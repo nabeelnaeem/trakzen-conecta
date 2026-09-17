@@ -2,6 +2,7 @@
 //! every instance listens on a TCP port and peers are added by IP address.
 
 pub mod commands;
+pub mod discovery;
 pub mod engine;
 pub mod protocol;
 pub mod store;

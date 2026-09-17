@@ -74,6 +74,7 @@ pub struct ChatMessage {
     pub file_size: Option<i64>,
     pub status: String,
     pub created_at: i64,
+    pub reply_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

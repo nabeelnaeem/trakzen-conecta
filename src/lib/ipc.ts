@@ -6,6 +6,7 @@ import type {
   ChatStatus,
   ComposeDraft,
   DeletedEvent,
+  Nearby,
   StorageStats,
   Contact,
   DraftContent,
@@ -110,8 +111,15 @@ export const chat = {
   listMessages: (peerId: number, limit = 100, beforeId?: number) =>
     invoke<ChatMessage[]>("chat_list_messages", { peerId, limit, beforeId }),
   markRead: (peerId: number) => invoke<void>("chat_mark_read", { peerId }),
-  sendText: (peerId: number, body: string) =>
-    invoke<ChatMessage>("chat_send_text", { peerId, body }),
+  sendText: (peerId: number, body: string, replyTo?: string | null) =>
+    invoke<ChatMessage>("chat_send_text", { peerId, body, replyTo: replyTo ?? null }),
+  typing: (peerId: number) => invoke<void>("chat_typing", { peerId }),
+  search: (peerId: number, query: string) => invoke<ChatMessage[]>("chat_search", { peerId, query }),
+  nearby: () => invoke<Nearby[]>("chat_nearby"),
+  addNearby: (peerId: string) => invoke<Peer>("chat_add_nearby", { peerId }),
+  pairingQr: () => invoke<[string, string]>("chat_pairing_qr"),
+  onNearby: (cb: (n: Nearby[]) => void) => listen<Nearby[]>("chat://nearby", (e) => cb(e.payload)),
+  onTyping: (cb: (peerId: number) => void) => listen<number>("chat://typing", (e) => cb(e.payload)),
   sendFile: (peerId: number, path: string) =>
     invoke<ChatMessage>("chat_send_file", { peerId, path }),
   openFile: (path: string, reveal: boolean) => invoke<void>("chat_open_file", { path, reveal }),
@@ -136,6 +144,7 @@ export const chat = {
 
 export const app = {
   quit: () => invoke<void>("app_quit"),
+  setBadge: (count: number) => invoke<void>("app_set_badge", { count }),
 };
 
 export function errorMessage(e: unknown): string {

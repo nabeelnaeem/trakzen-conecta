@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { chat, errorMessage } from "../../lib/ipc";
 import { notify } from "../../lib/notify";
-import type { ChatMessage, ChatStatus, Identity, Peer, TransferProgress } from "../../lib/types";
+import type { ChatMessage, ChatStatus, Identity, Nearby, Peer, TransferProgress } from "../../lib/types";
 
 interface ChatState {
   identity: Identity | null;
@@ -10,6 +10,9 @@ interface ChatState {
   activePeerId: number | null;
   messages: ChatMessage[];
   transfers: Record<string, TransferProgress>;
+  nearby: Nearby[];
+  /** peer row id → time the last "typing" arrived */
+  typing: Record<number, number>;
   error: string | null;
   initialised: boolean;
 
@@ -19,8 +22,9 @@ interface ChatState {
   selectPeer: (id: number | null) => Promise<void>;
   addPeer: (name: string, host: string, port?: number) => Promise<void>;
   removePeer: (id: number) => Promise<void>;
-  sendText: (body: string) => Promise<void>;
+  sendText: (body: string, replyTo?: string | null) => Promise<void>;
   sendFile: (path: string) => Promise<void>;
+  addNearby: (peerId: string) => Promise<void>;
   deleteMessage: (msgId: string, forEveryone: boolean) => Promise<void>;
   clearChat: (forEveryone: boolean) => Promise<void>;
   clearError: () => void;
@@ -41,6 +45,8 @@ export const useChat = create<ChatState>((set, get) => ({
   activePeerId: null,
   messages: [],
   transfers: {},
+  nearby: [],
+  typing: {},
   error: null,
   initialised: false,
 
@@ -92,6 +98,19 @@ export const useChat = create<ChatState>((set, get) => ({
         void notify(who, m.kind === "file" ? `Sent a file: ${m.fileName ?? ""}` : m.body, "chat");
       }
       void get().loadPeers();
+    });
+    chat.nearby().then((nearby) => set({ nearby })).catch(() => undefined);
+    await chat.onNearby((nearby) => set({ nearby }));
+    await chat.onTyping((peerId) => {
+      set({ typing: { ...get().typing, [peerId]: Date.now() } });
+      window.setTimeout(() => {
+        const t = get().typing;
+        if (Date.now() - (t[peerId] ?? 0) >= 3900) {
+          const next = { ...t };
+          delete next[peerId];
+          set({ typing: next });
+        }
+      }, 4000);
     });
     await chat.onDeleted((d) => {
       if (d.peerId === get().activePeerId) {
@@ -166,11 +185,11 @@ export const useChat = create<ChatState>((set, get) => ({
     }
   },
 
-  sendText: async (body) => {
+  sendText: async (body, replyTo) => {
     const id = get().activePeerId;
     if (id === null || !body.trim()) return;
     try {
-      const m = await chat.sendText(id, body);
+      const m = await chat.sendText(id, body, replyTo);
       set({ messages: upsertMessage(get().messages, m) });
     } catch (e) {
       // The failed message is already in the DB with status=failed and an
@@ -186,6 +205,16 @@ export const useChat = create<ChatState>((set, get) => ({
     try {
       const m = await chat.sendFile(id, path);
       set({ messages: upsertMessage(get().messages, m) });
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+  },
+
+  addNearby: async (peerId) => {
+    try {
+      const p = await chat.addNearby(peerId);
+      set({ peers: [p, ...get().peers.filter((x) => x.id !== p.id)] });
+      await get().selectPeer(p.id);
     } catch (e) {
       set({ error: errorMessage(e) });
     }

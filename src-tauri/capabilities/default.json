@@ -17,6 +17,7 @@
     "notification:default",
     "core:webview:default",
     "core:window:default",
-    "core:webview:allow-set-webview-zoom"
+    "core:webview:allow-set-webview-zoom",
+    "autostart:default"
   ]
 }

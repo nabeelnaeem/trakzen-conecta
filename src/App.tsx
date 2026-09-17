@@ -5,6 +5,7 @@ import { SettingsView } from "./features/settings/SettingsView";
 import { useMail } from "./features/mail/store";
 import { useChat } from "./features/chat/store";
 import { restoreZoom, setZoom, zoomStep } from "./lib/zoom";
+import { app as appIpc } from "./lib/ipc";
 
 type Tab = "mail" | "chat" | "settings";
 
@@ -20,6 +21,11 @@ export default function App() {
     void initMail();
     void initChat();
   }, [initMail, initChat]);
+
+  // Tray tooltip / window title / taskbar badge follow the unread total.
+  useEffect(() => {
+    void appIpc.setBadge(mailUnread + chatUnread);
+  }, [mailUnread, chatUnread]);
 
   // Ctrl+1/2/, switch tabs; Ctrl +/-/0 and Ctrl+wheel zoom.
   useEffect(() => {

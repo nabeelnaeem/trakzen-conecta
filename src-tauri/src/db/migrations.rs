@@ -115,6 +115,8 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX mail_snoozes_until ON mail_snoozes(until);
     ",
+    // 5: quoted replies in chat
+    "ALTER TABLE chat_messages ADD COLUMN reply_to TEXT;",
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

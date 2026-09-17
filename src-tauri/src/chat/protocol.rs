@@ -44,6 +44,14 @@ pub enum ControlMsg {
         msg_id: String,
         body: String,
         sent_at: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<String>,
+    },
+    /// The peer is composing; UI shows "typing…" briefly.
+    Typing,
+    /// Receiver has displayed these messages.
+    Read {
+        msg_ids: Vec<String>,
     },
     Ack {
         msg_id: String,
@@ -145,6 +153,7 @@ mod tests {
                 msg_id: id.clone(),
                 body: "héllo".into(),
                 sent_at: 42,
+                reply_to: None,
             }),
             Frame::Chunk {
                 transfer_id: transfer_id_bytes(&id),
@@ -160,7 +169,7 @@ mod tests {
 
         let mut cursor = std::io::Cursor::new(buf);
         match read_frame(&mut cursor).await.unwrap().unwrap() {
-            Frame::Control(ControlMsg::Text { msg_id, body, sent_at }) => {
+            Frame::Control(ControlMsg::Text { msg_id, body, sent_at, .. }) => {
                 assert_eq!(msg_id, id);
                 assert_eq!(body, "héllo");
                 assert_eq!(sent_at, 42);

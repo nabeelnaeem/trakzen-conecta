@@ -1,28 +1,61 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useChat } from "./store";
 import { Avatar } from "../mail/Avatar";
 import { bytes, shortDate, timeOnly } from "../../lib/format";
-import { chat as chatIpc } from "../../lib/ipc";
+import { chat as chatIpc, errorMessage } from "../../lib/ipc";
 import { renderMarkdown } from "../../lib/markdown";
+import { Spinner } from "../../lib/Spinner";
 import type { ChatMessage } from "../../lib/types";
 
 export function ChatView() {
   const s = useChat();
+  const [switcher, setSwitcher] = useState(false);
 
   useEffect(() => {
     void s.init();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Ctrl+K: jump to a peer.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSwitcher(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const active = s.peers.find((p) => p.id === s.activePeerId) ?? null;
+  const knownIds = new Set(s.peers.map((p) => p.peerId).filter(Boolean));
+  const nearbyNew = s.nearby.filter((n) => !knownIds.has(n.peerId));
 
   return (
     <div className="flex h-full">
       <aside className="flex w-72 shrink-0 flex-col border-r border-gray-200 bg-gray-50">
         <IdentityCard />
+        {nearbyNew.length > 0 && (
+          <div className="border-b border-gray-200 px-2 pb-2">
+            <div className="px-1 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Nearby</div>
+            {nearbyNew.map((n) => (
+              <div key={n.peerId} className="flex items-center gap-2 rounded-md px-1 py-1 hover:bg-gray-100">
+                <Avatar name={n.displayName} seed={n.peerId} size={28} />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm">{n.displayName}</div>
+                  <div className="truncate text-[11px] text-gray-500">{n.addresses[0]}</div>
+                </div>
+                <button className="btn btn-primary text-xs" onClick={() => void s.addNearby(n.peerId)}>
+                  Add
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <AddPeer />
         <ul className="flex-1 overflow-y-auto">
           {s.peers.map((p) => (
@@ -36,9 +69,7 @@ export function ChatView() {
               <div className="relative">
                 <Avatar name={p.displayName} seed={p.peerId ?? p.host} size={40} />
                 <span
-                  className={`absolute -right-0.5 -bottom-0.5 h-3 w-3 rounded-full border-2 border-gray-50 ${
-                    p.online ? "bg-green-500" : "bg-gray-400"
-                  }`}
+                  className={`absolute -right-0.5 -bottom-0.5 h-3 w-3 rounded-full border-2 border-gray-50 ${p.online ? "bg-green-500" : "bg-gray-400"}`}
                   title={p.online ? "Online" : "Offline"}
                 />
               </div>
@@ -49,7 +80,7 @@ export function ChatView() {
                 </div>
                 <div className="flex items-center justify-between gap-2">
                   <span className={`truncate text-xs ${p.unread ? "text-gray-800" : "text-gray-500"}`}>
-                    {p.lastMessage ?? `${p.host}:${p.port}`}
+                    {s.typing[p.id] ? <em className="text-blue-700">typing…</em> : (p.lastMessage ?? `${p.host}:${p.port}`)}
                   </span>
                   {p.unread > 0 && <span className="rounded-full bg-blue-600 px-1.5 text-[11px] text-white">{p.unread}</span>}
                 </div>
@@ -58,7 +89,9 @@ export function ChatView() {
           ))}
           {s.peers.length === 0 && (
             <li className="px-4 py-8 text-center text-xs text-gray-500">
-              No peers yet. Add one by IP address above, or ask someone on your network to add yours.
+              {s.nearby.length > 0
+                ? "Machines running Trakzen Conecta on this network appear under Nearby — click Add."
+                : "No peers yet. Other machines on this network running the app will appear here automatically; you can also add one by IP."}
             </li>
           )}
         </ul>
@@ -74,22 +107,84 @@ export function ChatView() {
           </div>
         )}
         {active ? (
-          <Conversation key={active.id} peerId={active.id} name={active.displayName} seed={active.peerId ?? active.host} host={`${active.host}:${active.port}`} online={active.online} />
+          <Conversation
+            key={active.id}
+            peerId={active.id}
+            name={active.displayName}
+            seed={active.peerId ?? active.host}
+            host={`${active.host}:${active.port}`}
+            online={active.online}
+            typing={!!s.typing[active.id]}
+          />
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 text-sm text-gray-400">
             <span className="text-4xl">💬</span>
             Pick a peer to start chatting
+            <span className="text-xs">Ctrl+K jumps to a peer</span>
           </div>
         )}
       </section>
+
+      {switcher && <PeerSwitcher onClose={() => setSwitcher(false)} />}
+    </div>
+  );
+}
+
+function PeerSwitcher({ onClose }: { onClose: () => void }) {
+  const { peers, selectPeer } = useChat();
+  const [q, setQ] = useState("");
+  const [i, setI] = useState(0);
+  const list = peers.filter((p) => p.displayName.toLowerCase().includes(q.toLowerCase()) || p.host.includes(q));
+  const pick = (id: number) => {
+    void selectPeer(id);
+    onClose();
+  };
+  return (
+    <div className="fixed inset-0 z-30 flex items-start justify-center bg-black/30 pt-24" onClick={onClose}>
+      <div className="w-[420px] rounded-lg border border-gray-300 bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <input
+          className="w-full border-b border-gray-200 px-4 py-3 text-sm outline-none"
+          placeholder="Jump to a peer…"
+          autoFocus
+          value={q}
+          onChange={(e) => {
+            setQ(e.target.value);
+            setI(0);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown") setI((x) => Math.min(list.length - 1, x + 1));
+            else if (e.key === "ArrowUp") setI((x) => Math.max(0, x - 1));
+            else if (e.key === "Enter" && list[i]) pick(list[i].id);
+            else if (e.key === "Escape") onClose();
+          }}
+        />
+        <ul className="max-h-72 overflow-y-auto py-1">
+          {list.map((p, idx) => (
+            <li
+              key={p.id}
+              className={`flex cursor-pointer items-center gap-2 px-4 py-2 text-sm ${idx === i ? "bg-blue-50" : ""}`}
+              onMouseEnter={() => setI(idx)}
+              onClick={() => pick(p.id)}
+            >
+              <span className={`h-2 w-2 rounded-full ${p.online ? "bg-green-500" : "bg-gray-400"}`} />
+              <span className="flex-1 truncate">{p.displayName}</span>
+              <span className="text-xs text-gray-500">{p.host}</span>
+            </li>
+          ))}
+          {list.length === 0 && <li className="px-4 py-3 text-sm text-gray-500">No matches</li>}
+        </ul>
+      </div>
     </div>
   );
 }
 
 function IdentityCard() {
   const { identity, status } = useChat();
+  const [showAll, setShowAll] = useState(false);
+  const [qr, setQr] = useState<[string, string] | null>(null);
   if (!identity) return null;
   const listening = status ? status.listening : identity.listening;
+  const primary = identity.addresses[0];
   return (
     <div className="border-b border-gray-200 p-3">
       <div className="flex items-center gap-3">
@@ -100,11 +195,29 @@ function IdentityCard() {
             {listening ? `● listening on :${identity.port}` : "● not listening"}
           </div>
         </div>
+        <button
+          className="btn btn-ghost text-xs"
+          title="Show a QR code other machines can scan to add you"
+          onClick={() => (qr ? setQr(null) : chatIpc.pairingQr().then(setQr).catch(() => undefined))}
+        >
+          ▦
+        </button>
       </div>
       <div className="mt-2 text-[11px] text-gray-600">
-        Your address{identity.addresses.length > 1 ? "es" : ""}:{" "}
-        <span className="select-all font-mono">{identity.addresses.length ? identity.addresses.join(", ") : "unknown"}</span>
+        Your address: <span className="select-all font-mono">{primary ?? "unknown"}</span>
+        {identity.addresses.length > 1 && (
+          <button className="ml-1 text-blue-700 hover:underline" onClick={() => setShowAll((v) => !v)}>
+            {showAll ? "hide" : `+${identity.addresses.length - 1} more`}
+          </button>
+        )}
+        {showAll && <div className="mt-1 font-mono text-gray-500">{identity.addresses.slice(1).join(", ")}</div>}
       </div>
+      {qr && (
+        <div className="mt-2 rounded-md border border-gray-200 bg-white p-2 text-center">
+          <div dangerouslySetInnerHTML={{ __html: qr[1] }} className="mx-auto [&>svg]:mx-auto [&>svg]:h-44 [&>svg]:w-44" />
+          <div className="mt-1 select-all break-all font-mono text-[10px] text-gray-500">{qr[0]}</div>
+        </div>
+      )}
       {status?.error && <div className="mt-1 text-xs text-red-700">{status.error}</div>}
     </div>
   );
@@ -119,8 +232,17 @@ function AddPeer() {
 
   const submit = async () => {
     if (!host.trim()) return;
-    const p = port.trim() ? Number(port) : undefined;
-    await addPeer(name, host, p);
+    let h = host.trim();
+    let p = port.trim() ? Number(port) : undefined;
+    let n = name;
+    // Pairing links from the QR code paste straight in.
+    if (h.startsWith("conecta://")) {
+      const u = new URL(h.replace("conecta://", "http://x/"));
+      h = u.searchParams.get("host") ?? h;
+      p = Number(u.searchParams.get("port")) || p;
+      n = n || (u.searchParams.get("name") ?? "");
+    }
+    await addPeer(n, h, p);
     setName("");
     setHost("");
     setPort("");
@@ -130,8 +252,8 @@ function AddPeer() {
   if (!openForm) {
     return (
       <div className="p-2">
-        <button className="btn w-full justify-center" onClick={() => setOpenForm(true)}>
-          + Add peer by IP
+        <button className="btn w-full justify-center text-xs" onClick={() => setOpenForm(true)}>
+          + Add peer by IP or pairing link
         </button>
       </div>
     );
@@ -140,7 +262,7 @@ function AddPeer() {
     <div className="space-y-2 border-b border-gray-200 p-2">
       <input className="input" placeholder="Name (optional)" value={name} onChange={(e) => setName(e.target.value)} />
       <div className="flex gap-2">
-        <input className="input" placeholder="192.168.1.20" value={host} autoFocus onChange={(e) => setHost(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void submit()} />
+        <input className="input" placeholder="192.168.1.20 or conecta://…" value={host} autoFocus onChange={(e) => setHost(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void submit()} />
         <input className="input w-24" placeholder={String(identity?.port ?? 47800)} value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} />
       </div>
       <div className="flex gap-2">
@@ -161,16 +283,26 @@ interface Pending {
   preview: string | null;
 }
 
-function Conversation({ peerId, name, seed, host, online }: { peerId: number; name: string; seed: string; host: string; online: boolean }) {
+const MAX_ROWS = 8;
+
+function Conversation({ peerId, name, seed, host, online, typing }: { peerId: number; name: string; seed: string; host: string; online: boolean; typing: boolean }) {
   const { messages, transfers, sendText, sendFile, removePeer, clearChat } = useChat();
   const [text, setText] = useState("");
   const [pending, setPending] = useState<Pending[]>([]);
+  const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
   const [dragging, setDragging] = useState(false);
-  const [expanded, setExpanded] = useState(false);
+  const [toolbar, setToolbar] = useState(false);
   const [menu, setMenu] = useState(false);
+  const [search, setSearch] = useState<string | null>(null);
+  const [results, setResults] = useState<ChatMessage[] | null>(null);
+  const [searching, setSearching] = useState(false);
   const bottom = useRef<HTMLDivElement>(null);
   const area = useRef<HTMLTextAreaElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const lastTyping = useRef(0);
+
+  const byId = useMemo(() => new Map(messages.map((m) => [m.msgId, m])), [messages]);
 
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
@@ -180,8 +312,58 @@ function Conversation({ peerId, name, seed, host, online }: { peerId: number; na
     return () => document.removeEventListener("mousedown", onClick);
   }, []);
 
-  // Files wait in the compose box until Enter; nothing leaves the machine
-  // on paste or drop alone.
+  // Ctrl+F searches this conversation; Esc clears whatever is in progress.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        setSearch((v) => v ?? "");
+        window.setTimeout(() => searchRef.current?.focus(), 0);
+      } else if (e.key === "Escape") {
+        if (search !== null) {
+          setSearch(null);
+          setResults(null);
+        } else if (replyTo || pending.length || text) {
+          setReplyTo(null);
+          setPending([]);
+          setText("");
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [search, replyTo, pending.length, text]);
+
+  useEffect(() => {
+    if (search === null) return;
+    if (!search.trim()) {
+      setResults(null);
+      return;
+    }
+    setSearching(true);
+    const t = window.setTimeout(() => {
+      chatIpc
+        .search(peerId, search)
+        .then(setResults)
+        .catch(() => setResults([]))
+        .finally(() => setSearching(false));
+    }, 200);
+    return () => window.clearTimeout(t);
+  }, [search, peerId]);
+
+  // 1 line to start, grows to MAX_ROWS.
+  useEffect(() => {
+    const el = area.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const line = 22;
+    el.style.height = `${Math.min(line * MAX_ROWS + 18, Math.max(40, el.scrollHeight))}px`;
+  }, [text]);
+
+  useEffect(() => {
+    bottom.current?.scrollIntoView({ block: "end" });
+  }, [messages.length, peerId, results === null]);
+
   const attach = async (paths: string[]) => {
     const fresh = paths.filter((p) => !pending.some((x) => x.path === p));
     const items: Pending[] = await Promise.all(
@@ -195,22 +377,6 @@ function Conversation({ peerId, name, seed, host, online }: { peerId: number; na
     area.current?.focus();
   };
 
-  // Grow with the content (toolbar inserts included), up to a cap that the
-  // expand toggle raises to most of the window.
-  useEffect(() => {
-    const el = area.current;
-    if (!el) return;
-    const max = expanded ? Math.round(window.innerHeight * 0.6) : 192;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(max, Math.max(expanded ? 200 : 40, el.scrollHeight))}px`;
-  }, [text, expanded]);
-
-  useEffect(() => {
-    bottom.current?.scrollIntoView({ block: "end" });
-  }, [messages.length, peerId]);
-
-  // Tauri delivers OS drag-and-drop as paths, which is exactly what the
-  // transfer needs; no need to read the files in the webview.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     void getCurrentWebview()
@@ -231,9 +397,11 @@ function Conversation({ peerId, name, seed, host, online }: { peerId: number; na
     const body = text.trim();
     const files = pending;
     if (!body && files.length === 0) return;
+    const quote = replyTo?.msgId ?? null;
     setText("");
     setPending([]);
-    if (body) await sendText(body);
+    setReplyTo(null);
+    if (body) await sendText(body, quote);
     for (const f of files) await sendFile(f.path);
     area.current?.focus();
   };
@@ -251,21 +419,19 @@ function Conversation({ peerId, name, seed, host, online }: { peerId: number; na
     const paths: string[] = [];
     for (const f of files) {
       const ext = f.type.split("/")[1] ?? "bin";
-      const name = f.name && f.name !== "image.png" ? f.name : `pasted-${new Date().toISOString().replace(/[:.]/g, "-")}.${ext}`;
-      paths.push(await chatIpc.stashBlob(name, new Uint8Array(await f.arrayBuffer())));
+      const fname = f.name && f.name !== "image.png" ? f.name : `pasted-${new Date().toISOString().replace(/[:.]/g, "-")}.${ext}`;
+      paths.push(await chatIpc.stashBlob(fname, new Uint8Array(await f.arrayBuffer())));
     }
     await attach(paths);
   };
 
-  // Wrap the selection (or insert a placeholder) with Markdown markers.
   const wrap = (before: string, after = before, placeholder = "text") => {
     const el = area.current;
     if (!el) return;
     const start = el.selectionStart;
     const end = el.selectionEnd;
     const sel = text.slice(start, end) || placeholder;
-    const next = text.slice(0, start) + before + sel + after + text.slice(end);
-    setText(next);
+    setText(text.slice(0, start) + before + sel + after + text.slice(end));
     requestAnimationFrame(() => {
       el.focus();
       el.setSelectionRange(start + before.length, start + before.length + sel.length);
@@ -274,7 +440,6 @@ function Conversation({ peerId, name, seed, host, online }: { peerId: number; na
 
   const onKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
-      // Inside an open ``` fence, Enter should add a line.
       const fences = (text.match(/```/g) ?? []).length;
       if (fences % 2 === 1) return;
       e.preventDefault();
@@ -289,6 +454,16 @@ function Conversation({ peerId, name, seed, host, online }: { peerId: number; na
     }
   };
 
+  const onChange = (v: string) => {
+    setText(v);
+    const now = Date.now();
+    if (v && now - lastTyping.current > 3000) {
+      lastTyping.current = now;
+      void chatIpc.typing(peerId);
+    }
+  };
+
+  const shown = results ?? messages;
   let lastDay = "";
   let lastFrom: string | null = null;
   let lastAt = 0;
@@ -300,10 +475,20 @@ function Conversation({ peerId, name, seed, host, online }: { peerId: number; na
         <div className="min-w-0">
           <div className="truncate font-medium">{name}</div>
           <div className="text-xs text-gray-500">
-            {host} · {online ? <span className="text-green-700">online</span> : "offline"}
+            {typing ? <em className="text-blue-700">typing…</em> : <>{host} · {online ? <span className="text-green-700">online</span> : "offline"}</>}
           </div>
         </div>
         <div className="flex-1" />
+        <button
+          className="btn btn-ghost"
+          title="Search in chat (Ctrl+F)"
+          onClick={() => {
+            setSearch("");
+            window.setTimeout(() => searchRef.current?.focus(), 0);
+          }}
+        >
+          ⌕
+        </button>
         <div className="relative" ref={menuRef}>
           <button className="btn btn-ghost" onClick={() => setMenu((v) => !v)} title="More">
             ⋯
@@ -341,92 +526,146 @@ function Conversation({ peerId, name, seed, host, online }: { peerId: number; na
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-4 py-3">
-        {messages.map((m) => {
-          const day = new Date(m.createdAt).toDateString();
-          const showDay = day !== lastDay;
-          const grouped = !showDay && lastFrom === m.direction && m.createdAt - lastAt < 3 * 60_000;
-          lastDay = day;
-          lastFrom = m.direction;
-          lastAt = m.createdAt;
-          return (
-            <div key={m.msgId}>
-              {showDay && (
-                <div className="my-3 flex items-center gap-3 text-[11px] text-gray-400">
-                  <span className="h-px flex-1 bg-gray-200" />
-                  {new Date(m.createdAt).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
-                  <span className="h-px flex-1 bg-gray-200" />
-                </div>
-              )}
-              <Bubble m={m} grouped={grouped} progress={transfers[m.msgId]} />
-            </div>
-          );
-        })}
-        <div ref={bottom} />
-      </div>
-
-      <div className="border-t border-gray-200 px-3 pt-2 pb-3">
-        <div className="mb-1 flex items-center gap-1 text-xs text-gray-500">
-          <FmtButton title="Bold (Ctrl+B)" onClick={() => wrap("**")}><b>B</b></FmtButton>
-          <FmtButton title="Italic (Ctrl+I)" onClick={() => wrap("_")}><i>I</i></FmtButton>
-          <FmtButton title="Strikethrough" onClick={() => wrap("~~")}><s>S</s></FmtButton>
-          <FmtButton title="Inline code (Ctrl+E)" onClick={() => wrap("`", "`", "code")}><code>{"<>"}</code></FmtButton>
-          <FmtButton title="Code block (Ctrl+Shift+E)" onClick={() => wrap("```\n", "\n```", "code")}>{"{ }"}</FmtButton>
-          <FmtButton title="Bulleted list" onClick={() => wrap("- ", "", "item")}>•</FmtButton>
-          <FmtButton title="Quote" onClick={() => wrap("> ", "", "quote")}>❝</FmtButton>
-          <span className="ml-auto">Enter to send · Shift+Enter for a new line · paste or drop files</span>
-          <FmtButton title={expanded ? "Shrink the message box" : "Expand the message box"} onClick={() => setExpanded((v) => !v)}>
-            {expanded ? "⤡" : "⤢"}
-          </FmtButton>
+      {search !== null && (
+        <div className="flex items-center gap-2 border-b border-gray-200 bg-gray-50 px-4 py-1.5">
+          <input ref={searchRef} className="input" placeholder="Search messages…" value={search} onChange={(e) => setSearch(e.target.value)} />
+          {searching && <Spinner size={14} className="text-blue-600" />}
+          {results && <span className="shrink-0 text-xs text-gray-500">{results.length} found</span>}
+          <button
+            className="btn btn-ghost text-xs"
+            onClick={() => {
+              setSearch(null);
+              setResults(null);
+            }}
+          >
+            ✕
+          </button>
         </div>
-        {pending.length > 0 && (
-          <div className="mb-2 flex flex-wrap gap-2">
-            {pending.map((f) => (
-              <div key={f.path} className="relative rounded-md border border-gray-200 bg-gray-50 p-1">
-                {f.preview ? (
-                  <img src={f.preview} alt={f.name} className="h-20 w-20 rounded object-cover" />
-                ) : (
-                  <div className="flex h-20 w-32 flex-col items-center justify-center gap-1 text-xs text-gray-600">
-                    <span className="text-2xl">📄</span>
-                    <span className="max-w-full truncate px-1">{f.name}</span>
+      )}
+
+      <div className="flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-[880px] px-4 py-3">
+          {shown.length === 0 && (
+            <div className="flex flex-col items-center justify-center gap-2 py-24 text-center text-gray-400">
+              {results ? (
+                <span className="text-sm">Nothing matches.</span>
+              ) : (
+                <>
+                  <Avatar name={name} seed={seed} size={56} />
+                  <div className="text-base text-gray-600">Send a message to {name}</div>
+                  <div className="text-xs">Messages stay on your two machines. Paste a screenshot or drop files to share them.</div>
+                </>
+              )}
+            </div>
+          )}
+          {shown.map((m) => {
+            const day = new Date(m.createdAt).toDateString();
+            const showDay = day !== lastDay;
+            const grouped = !showDay && lastFrom === m.direction && m.createdAt - lastAt < 3 * 60_000;
+            lastDay = day;
+            lastFrom = m.direction;
+            lastAt = m.createdAt;
+            return (
+              <div key={m.msgId}>
+                {showDay && (
+                  <div className="my-3 flex items-center gap-3 text-[11px] text-gray-400">
+                    <span className="h-px flex-1 bg-gray-200" />
+                    {new Date(m.createdAt).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
+                    <span className="h-px flex-1 bg-gray-200" />
                   </div>
                 )}
-                <button
-                  className="absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full bg-gray-800 text-[11px] text-white shadow hover:bg-red-600"
-                  onClick={() => setPending((cur) => cur.filter((x) => x.path !== f.path))}
-                  aria-label={`Remove ${f.name}`}
-                  title="Remove"
-                >
-                  ✕
-                </button>
+                <Bubble
+                  m={m}
+                  grouped={grouped}
+                  progress={transfers[m.msgId]}
+                  quoted={m.replyTo ? (byId.get(m.replyTo) ?? null) : null}
+                  onReply={() => {
+                    setReplyTo(m);
+                    area.current?.focus();
+                  }}
+                />
               </div>
-            ))}
+            );
+          })}
+          <div ref={bottom} />
+        </div>
+      </div>
+
+      <div className="border-t border-gray-200">
+        <div className="mx-auto w-full max-w-[880px] px-3 pt-2 pb-3">
+          {replyTo && (
+            <div className="mb-2 flex items-center gap-2 rounded-md border-l-4 border-blue-500 bg-gray-50 px-3 py-1.5 text-xs">
+              <div className="min-w-0 flex-1">
+                <div className="font-medium text-blue-700">{replyTo.direction === "out" ? "You" : name}</div>
+                <div className="truncate text-gray-600">{replyTo.kind === "file" ? `📄 ${replyTo.fileName ?? ""}` : replyTo.body}</div>
+              </div>
+              <button className="text-gray-500 hover:text-gray-900" onClick={() => setReplyTo(null)} aria-label="Cancel reply">
+                ✕
+              </button>
+            </div>
+          )}
+          {pending.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-2">
+              {pending.map((f) => (
+                <div key={f.path} className="relative rounded-md border border-gray-200 bg-gray-50 p-1">
+                  {f.preview ? (
+                    <img src={f.preview} alt={f.name} className="h-20 w-20 rounded object-cover" />
+                  ) : (
+                    <div className="flex h-20 w-32 flex-col items-center justify-center gap-1 text-xs text-gray-600">
+                      <span className="text-2xl">📄</span>
+                      <span className="max-w-full truncate px-1">{f.name}</span>
+                    </div>
+                  )}
+                  <button
+                    className="absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full bg-gray-800 text-[11px] text-white shadow hover:bg-red-600"
+                    onClick={() => setPending((cur) => cur.filter((x) => x.path !== f.path))}
+                    aria-label={`Remove ${f.name}`}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {toolbar && (
+            <div className="mb-1 flex items-center gap-1 text-sm text-gray-600">
+              <FmtButton title="Bold (Ctrl+B)" onClick={() => wrap("**")}><b>B</b></FmtButton>
+              <FmtButton title="Italic (Ctrl+I)" onClick={() => wrap("_")}><i>I</i></FmtButton>
+              <FmtButton title="Strikethrough" onClick={() => wrap("~~")}><s>S</s></FmtButton>
+              <FmtButton title="Inline code (Ctrl+E)" onClick={() => wrap("`", "`", "code")}><code>{"<>"}</code></FmtButton>
+              <FmtButton title="Code block (Ctrl+Shift+E)" onClick={() => wrap("```\n", "\n```", "code")}>{"{ }"}</FmtButton>
+              <FmtButton title="Bulleted list" onClick={() => wrap("- ", "", "item")}>• list</FmtButton>
+              <FmtButton title="Quote" onClick={() => wrap("> ", "", "quote")}>❝ quote</FmtButton>
+            </div>
+          )}
+          <div className="flex items-end gap-2">
+            <button className="btn" onClick={() => void pick()} title="Attach files">
+              📎
+            </button>
+            <button className={`btn ${toolbar ? "bg-gray-100" : ""}`} onClick={() => setToolbar((v) => !v)} title="Formatting (Markdown also works: **bold**, _italic_, `code`)">
+              Aa
+            </button>
+            <textarea
+              ref={area}
+              className="input min-h-[40px] flex-1 resize-none font-sans"
+              rows={1}
+              placeholder={online ? "Message… (Enter to send, Shift+Enter for a new line)" : "Peer is offline — messages are queued and sent when it returns"}
+              value={text}
+              onChange={(e) => onChange(e.target.value)}
+              onKeyDown={onKey}
+              onPaste={(e) => void onPaste(e)}
+            />
+            <button className="btn btn-primary" onClick={() => void submit()} disabled={!text.trim() && pending.length === 0}>
+              Send{pending.length > 0 ? ` (${pending.length})` : ""}
+            </button>
           </div>
-        )}
-        <div className="flex items-end gap-2">
-          <button className="btn" onClick={() => void pick()} title="Attach files">
-            📎
-          </button>
-          <textarea
-            ref={area}
-            className={`input min-h-[40px] flex-1 resize-none font-sans ${expanded ? "font-mono text-[13px]" : ""}`}
-            rows={1}
-            placeholder={online ? "Message…" : "Peer is offline; messages will fail until it comes back"}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={onKey}
-            onPaste={(e) => void onPaste(e)}
-          />
-          <button className="btn btn-primary" onClick={() => void submit()} disabled={!text.trim() && pending.length === 0}>
-            Send{pending.length > 0 ? ` (${pending.length})` : ""}
-          </button>
         </div>
       </div>
 
       {dragging && (
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-blue-600/10 backdrop-blur-[1px]">
           <div className="rounded-xl border-2 border-dashed border-blue-500 bg-white/90 px-8 py-6 text-lg font-medium text-blue-800">
-            Drop to send to {name}
+            Drop to attach for {name}
           </div>
         </div>
       )}
@@ -444,13 +683,34 @@ function MenuItem({ children, onClick, danger }: { children: React.ReactNode; on
 
 function FmtButton({ children, title, onClick }: { children: React.ReactNode; title: string; onClick: () => void }) {
   return (
-    <button className="rounded px-1.5 py-0.5 hover:bg-gray-200" title={title} onMouseDown={(e) => e.preventDefault()} onClick={onClick}>
+    <button className="rounded border border-gray-200 bg-white px-2 py-0.5 text-gray-700 hover:bg-gray-100" title={title} onMouseDown={(e) => e.preventDefault()} onClick={onClick}>
       {children}
     </button>
   );
 }
 
-function Bubble({ m, grouped, progress }: { m: ChatMessage; grouped: boolean; progress?: { bytesDone: number; bytesTotal: number } }) {
+function Ticks({ status, mine }: { status: string; mine: boolean }) {
+  if (!mine) return null;
+  if (status === "queued") return <span title="Queued until the peer is online">🕒</span>;
+  if (status === "sending") return <span title="Sending">✓</span>;
+  if (status === "failed") return <span title="Failed">!</span>;
+  if (status === "read") return <span className="text-cyan-200" title="Read">✓✓</span>;
+  return <span className="opacity-70" title="Delivered">✓✓</span>;
+}
+
+function Bubble({
+  m,
+  grouped,
+  progress,
+  quoted,
+  onReply,
+}: {
+  m: ChatMessage;
+  grouped: boolean;
+  progress?: { bytesDone: number; bytesTotal: number };
+  quoted: ChatMessage | null;
+  onReply: () => void;
+}) {
   const mine = m.direction === "out";
   const { deleteMessage } = useChat();
   const [menu, setMenu] = useState(false);
@@ -463,66 +723,39 @@ function Bubble({ m, grouped, progress }: { m: ChatMessage; grouped: boolean; pr
     document.addEventListener("mousedown", onClick);
     return () => document.removeEventListener("mousedown", onClick);
   }, [menu]);
-  const statusText =
-    m.status === "sending" ? "sending…"
-    : m.status === "receiving" ? "receiving…"
-    : m.status === "failed" ? "failed"
-    : m.status === "delivered" ? "✓✓"
-    : "";
-  return (
-    <div
-      className={`group flex items-center gap-1 ${mine ? "justify-end" : "justify-start"} ${grouped ? "mt-0.5" : "mt-2"}`}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        setMenu(true);
-      }}
-    >
-      {mine && <DeleteMenu open={menu} setOpen={setMenu} mine={mine} onDelete={(all) => void deleteMessage(m.msgId, all)} innerRef={ref} />}
-      <div
-        className={`max-w-[72%] px-3 py-1.5 text-sm ${
-          mine ? "rounded-2xl rounded-br-md bg-blue-600 text-white" : "rounded-2xl rounded-bl-md bg-gray-100 text-gray-900"
-        } ${m.status === "failed" ? "opacity-60 ring-1 ring-red-400" : ""}`}
-      >
-        {m.kind === "text" ? <MarkdownBody body={m.body} mine={mine} /> : <FileCard m={m} mine={mine} progress={progress} />}
-        <div className={`mt-0.5 text-right text-[10px] ${mine ? "text-blue-100" : "text-gray-500"}`}>
-          {timeOnly(m.createdAt)}
-          {statusText && ` ${statusText}`}
-        </div>
-      </div>
-      {!mine && <DeleteMenu open={menu} setOpen={setMenu} mine={mine} onDelete={(all) => void deleteMessage(m.msgId, all)} innerRef={ref} />}
-    </div>
-  );
-}
 
-/** Hover / right-click menu on a bubble: delete for me, or for everyone on own messages. */
-function DeleteMenu({
-  open,
-  setOpen,
-  mine,
-  onDelete,
-  innerRef,
-}: {
-  open: boolean;
-  setOpen: (v: boolean) => void;
-  mine: boolean;
-  onDelete: (forEveryone: boolean) => void;
-  innerRef: React.RefObject<HTMLDivElement | null>;
-}) {
-  return (
-    <div className="relative self-center" ref={innerRef}>
+  const menuEl = (
+    <div className="relative self-center" ref={ref}>
       <button
-        className={`rounded px-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 ${open ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
-        onClick={() => setOpen(!open)}
+        className={`rounded px-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 ${menu ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+        onClick={() => setMenu(!menu)}
         aria-label="Message options"
       >
         ▾
       </button>
-      {open && (
+      {menu && (
         <div className={`absolute top-full z-10 mt-1 w-48 rounded-md border border-gray-200 bg-white py-1 shadow-lg ${mine ? "right-0" : "left-0"}`}>
           <MenuItem
             onClick={() => {
-              setOpen(false);
-              onDelete(false);
+              setMenu(false);
+              onReply();
+            }}
+          >
+            Reply
+          </MenuItem>
+          <MenuItem
+            onClick={() => {
+              setMenu(false);
+              void navigator.clipboard.writeText(m.kind === "file" ? (m.filePath ?? m.fileName ?? "") : m.body);
+            }}
+          >
+            Copy
+          </MenuItem>
+          <div className="my-1 border-t border-gray-100" />
+          <MenuItem
+            onClick={() => {
+              setMenu(false);
+              void deleteMessage(m.msgId, false);
             }}
           >
             Delete for me
@@ -531,8 +764,8 @@ function DeleteMenu({
             <MenuItem
               danger
               onClick={() => {
-                setOpen(false);
-                onDelete(true);
+                setMenu(false);
+                void deleteMessage(m.msgId, true);
               }}
             >
               Delete for everyone
@@ -540,6 +773,35 @@ function DeleteMenu({
           )}
         </div>
       )}
+    </div>
+  );
+
+  return (
+    <div
+      className={`group flex items-center gap-1 ${mine ? "justify-end" : "justify-start"} ${grouped ? "mt-0.5" : "mt-2"}`}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setMenu(true);
+      }}
+    >
+      {mine && menuEl}
+      <div
+        className={`max-w-[60%] px-3 py-1.5 text-sm ${
+          mine ? "rounded-2xl rounded-br-md bg-blue-600 text-white" : "rounded-2xl rounded-bl-md bg-gray-100 text-gray-900"
+        } ${m.status === "failed" ? "opacity-60 ring-1 ring-red-400" : ""}`}
+      >
+        {m.replyTo && (
+          <div className={`mb-1 rounded border-l-2 px-2 py-0.5 text-xs ${mine ? "border-blue-200 bg-blue-500/60 text-blue-50" : "border-blue-500 bg-white/70 text-gray-600"}`}>
+            {quoted ? (quoted.kind === "file" ? `📄 ${quoted.fileName ?? ""}` : quoted.body.slice(0, 140)) : "Original message unavailable"}
+          </div>
+        )}
+        {m.kind === "text" ? <MarkdownBody body={m.body} mine={mine} /> : <FileCard m={m} mine={mine} progress={progress} />}
+        <div className={`mt-0.5 flex items-center justify-end gap-1 text-[10px] ${mine ? "text-blue-100" : "text-gray-500"}`}>
+          {timeOnly(m.createdAt)}
+          <Ticks status={m.status} mine={mine} />
+        </div>
+      </div>
+      {!mine && menuEl}
     </div>
   );
 }
@@ -563,7 +825,8 @@ function MarkdownBody({ body, mine }: { body: string; mine: boolean }) {
 
 function FileCard({ m, mine, progress }: { m: ChatMessage; mine: boolean; progress?: { bytesDone: number; bytesTotal: number } }) {
   const [preview, setPreview] = useState<string | null>(null);
-  const done = m.status === "unread" || m.status === "received" || m.status === "delivered" || (mine && m.status !== "failed");
+  const [err, setErr] = useState<string | null>(null);
+  const done = m.status === "unread" || m.status === "received" || m.status === "delivered" || m.status === "read" || (mine && m.status !== "failed");
   useEffect(() => {
     if (!m.filePath || !done) return;
     let alive = true;
@@ -573,15 +836,11 @@ function FileCard({ m, mine, progress }: { m: ChatMessage; mine: boolean; progre
     };
   }, [m.filePath, done]);
   const pct = progress && progress.bytesTotal > 0 ? Math.round((progress.bytesDone / progress.bytesTotal) * 100) : null;
+  const openIt = (reveal: boolean) => m.filePath && chatIpc.openFile(m.filePath, reveal).catch((e) => setErr(errorMessage(e)));
   return (
     <div className="min-w-[200px]">
       {preview ? (
-        <img
-          src={preview}
-          alt={m.fileName ?? ""}
-          className="mb-1 max-h-72 cursor-pointer rounded-lg"
-          onClick={() => m.filePath && void chatIpc.openFile(m.filePath, false)}
-        />
+        <img src={preview} alt={m.fileName ?? ""} className="mb-1 max-h-72 cursor-pointer rounded-lg" onClick={() => void openIt(false)} />
       ) : (
         <div className="flex items-center gap-2">
           <span className="text-xl">📄</span>
@@ -596,11 +855,17 @@ function FileCard({ m, mine, progress }: { m: ChatMessage; mine: boolean; progre
         {pct !== null && <span>· {pct}%</span>}
         {done && m.filePath && (
           <>
-            <button className="underline" onClick={() => void chatIpc.openFile(m.filePath!, false)}>Open</button>
-            <button className="underline" onClick={() => void chatIpc.openFile(m.filePath!, true)}>Show in folder</button>
+            <button className="underline" onClick={() => void openIt(false)}>
+              Open
+            </button>
+            <button className="underline" onClick={() => void openIt(true)}>
+              Show in folder
+            </button>
           </>
         )}
+        {done && !m.filePath && <span>(file removed)</span>}
       </div>
+      {err && <div className="text-xs text-red-200">{err}</div>}
       {pct !== null && (
         <div className={`mt-1 h-1 overflow-hidden rounded ${mine ? "bg-blue-400" : "bg-gray-300"}`}>
           <div className={`h-full ${mine ? "bg-white" : "bg-blue-600"}`} style={{ width: `${pct}%` }} />

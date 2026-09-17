@@ -6,6 +6,8 @@ import { bytes } from "../../lib/format";
 import { chat as chatIpc } from "../../lib/ipc";
 import type { StorageStats } from "../../lib/types";
 import { onZoom, setZoom, zoomLevel, zoomStep } from "../../lib/zoom";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { disable as autostartDisable, enable as autostartEnable, isEnabled as autostartEnabled } from "@tauri-apps/plugin-autostart";
 import type { Account, MailFilter, SettingsView as Settings } from "../../lib/types";
 import { useChat } from "../chat/store";
 import { useMail } from "../mail/store";
@@ -29,6 +31,10 @@ export function SettingsView() {
   const [undo, setUndo] = useState("10");
   const [zoom, setZoomState] = useState(zoomLevel());
   useEffect(() => onZoom(setZoomState), []);
+  const [autostart, setAutostart] = useState<boolean | null>(null);
+  useEffect(() => {
+    autostartEnabled().then(setAutostart).catch(() => setAutostart(null));
+  }, []);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const refreshIdentity = useChat((c) => c.refreshIdentity);
@@ -101,6 +107,17 @@ export function SettingsView() {
           <h2 className="text-base font-semibold">General</h2>
           <div className="mt-3 space-y-2 text-sm">
             <Toggle v={closeToTray} on={setCloseToTray} label="Keep running in the system tray when the window is closed" hint="Quit from the tray icon's menu." />
+            {autostart !== null && (
+              <Toggle
+                v={autostart}
+                on={(v) => {
+                  setAutostart(v);
+                  (v ? autostartEnable() : autostartDisable()).catch((e) => setErr(errorMessage(e)));
+                }}
+                label="Start when I log in"
+                hint="Applies immediately; no need to press Save."
+              />
+            )}
             <Toggle v={notifications} on={setNotifications} label="Desktop notifications for new mail and chat messages" />
             <div className="flex items-center gap-2">
               <span className="text-sm">Text size</span>
@@ -221,6 +238,21 @@ export function SettingsView() {
 
         <FiltersSection />
         <StorageSection />
+
+        <section className="border-t border-gray-200 pt-4 text-sm text-gray-600">
+          <h2 className="text-base font-semibold text-gray-900">About</h2>
+          <div className="mt-2">
+            Trakzen Conecta <span className="font-mono">v{__APP_VERSION__}</span> · built {__BUILD_DATE__}
+          </div>
+          <div className="mt-1 flex gap-3 text-xs">
+            <button className="text-blue-700 hover:underline" onClick={() => void openUrl("https://github.com/nabeelnaeem/trakzen-conecta/releases")}>
+              Releases
+            </button>
+            <button className="text-blue-700 hover:underline" onClick={() => void openUrl("https://github.com/nabeelnaeem/trakzen-conecta/issues")}>
+              Report a problem
+            </button>
+          </div>
+        </section>
       </div>
     </div>
   );

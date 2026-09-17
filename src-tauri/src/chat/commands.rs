@@ -90,7 +90,7 @@ pub async fn chat_list_messages(
 
 #[tauri::command]
 pub async fn chat_mark_read(state: State<'_, AppState>, peer_id: i64) -> Result<()> {
-    state.chat.store.mark_read(peer_id)
+    state.chat.mark_read(peer_id).await
 }
 
 #[tauri::command]
@@ -98,8 +98,77 @@ pub async fn chat_send_text(
     state: State<'_, AppState>,
     peer_id: i64,
     body: String,
+    reply_to: Option<String>,
 ) -> Result<ChatMessage> {
-    state.chat.send_text(peer_id, &body).await
+    state.chat.send_text(peer_id, &body, reply_to.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn chat_typing(state: State<'_, AppState>, peer_id: i64) -> Result<()> {
+    state.chat.send_typing(peer_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn chat_search(state: State<'_, AppState>, peer_id: i64, query: String) -> Result<Vec<ChatMessage>> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    state.chat.store.search_messages(peer_id, query.trim(), 200)
+}
+
+#[tauri::command]
+pub async fn chat_nearby(state: State<'_, AppState>) -> Result<Vec<super::discovery::Nearby>> {
+    Ok(state.chat.nearby())
+}
+
+/// Adds a discovered peer using its advertised address; if a row with that
+/// peer id already exists it just reconnects.
+#[tauri::command]
+pub async fn chat_add_nearby(state: State<'_, AppState>, peer_id: String) -> Result<Peer> {
+    let n = state
+        .chat
+        .nearby()
+        .into_iter()
+        .find(|n| n.peer_id == peer_id)
+        .ok_or_else(|| AppError::NotFound("that peer is no longer visible".into()))?;
+    let host = n.addresses.first().cloned().unwrap_or_default();
+    let row = state
+        .chat
+        .store
+        .bind_peer(None, &n.peer_id, &n.display_name, &host, n.port)?;
+    let engine = state.chat.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = engine.connect_peer(row).await;
+    });
+    let mut p = state.chat.store.get_peer(row)?;
+    p.online = state.chat.is_online(row);
+    Ok(p)
+}
+
+/// SVG QR code of a pairing link for this machine.
+#[tauri::command]
+pub async fn chat_pairing_qr(state: State<'_, AppState>) -> Result<(String, String)> {
+    let id = state.chat.identity();
+    let host = id.addresses.first().cloned().unwrap_or_else(|| "127.0.0.1".into());
+    let link = format!(
+        "conecta://pair?host={}&port={}&id={}&name={}",
+        host,
+        id.port,
+        id.peer_id,
+        urlencoding_encode(&id.display_name)
+    );
+    let code = qrcode::QrCode::new(link.as_bytes()).map_err(|e| AppError::Other(e.to_string()))?;
+    let svg = code
+        .render::<qrcode::render::svg::Color>()
+        .min_dimensions(220, 220)
+        .quiet_zone(true)
+        .build();
+    Ok((link, svg))
+}
+
+fn urlencoding_encode(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
 #[tauri::command]

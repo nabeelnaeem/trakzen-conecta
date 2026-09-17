@@ -33,7 +33,7 @@ fn row_to_peer(r: &Row) -> rusqlite::Result<Peer> {
 }
 
 const MSG_COLS: &str =
-    "id, msg_id, peer_id, direction, kind, body, file_name, file_path, file_size, status, created_at";
+    "id, msg_id, peer_id, direction, kind, body, file_name, file_path, file_size, status, created_at, reply_to";
 
 fn row_to_message(r: &Row) -> rusqlite::Result<ChatMessage> {
     let direction: String = r.get(3)?;
@@ -58,6 +58,7 @@ fn row_to_message(r: &Row) -> rusqlite::Result<ChatMessage> {
         file_size: r.get(8)?,
         status: r.get(9)?,
         created_at: r.get(10)?,
+        reply_to: r.get(11)?,
     })
 }
 
@@ -72,6 +73,7 @@ pub struct NewMessage<'a> {
     pub file_size: Option<i64>,
     pub status: &'a str,
     pub created_at: i64,
+    pub reply_to: Option<&'a str>,
 }
 
 impl ChatStore {
@@ -216,8 +218,8 @@ impl ChatStore {
         let conn = self.db.conn();
         conn.execute(
             "INSERT INTO chat_messages(msg_id, peer_id, direction, kind, body, file_name,
-                file_path, file_size, status, created_at)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                file_path, file_size, status, created_at, reply_to)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(msg_id) DO NOTHING",
             params![
                 m.msg_id,
@@ -230,6 +232,7 @@ impl ChatStore {
                 m.file_size,
                 m.status,
                 m.created_at,
+                m.reply_to,
             ],
         )?;
         let sql = format!("SELECT {MSG_COLS} FROM chat_messages WHERE msg_id = ?1");
@@ -327,12 +330,60 @@ impl ChatStore {
         Ok(n)
     }
 
-    pub fn mark_read(&self, peer_id: i64) -> Result<()> {
-        self.db.conn().execute(
+    /// Marks incoming messages read; returns their ids so the sender can be
+    /// told (read receipts).
+    pub fn mark_read(&self, peer_id: i64) -> Result<Vec<String>> {
+        let mut conn = self.db.conn();
+        let tx = conn.transaction()?;
+        let ids: Vec<String> = tx
+            .prepare("SELECT msg_id FROM chat_messages WHERE peer_id = ?1 AND direction = 'in' AND status = 'unread'")?
+            .query_map(params![peer_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        tx.execute(
             "UPDATE chat_messages SET status = 'received'
              WHERE peer_id = ?1 AND direction = 'in' AND status = 'unread'",
             params![peer_id],
         )?;
-        Ok(())
+        tx.commit()?;
+        Ok(ids)
+    }
+
+    pub fn set_status_many(&self, msg_ids: &[String], status: &str) -> Result<Vec<ChatMessage>> {
+        let mut out = Vec::new();
+        for id in msg_ids {
+            if let Some(m) = self.set_status(id, status)? {
+                out.push(m);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Outgoing text that could not be sent because the peer was offline.
+    pub fn queued_messages(&self, peer_id: i64) -> Result<Vec<ChatMessage>> {
+        let conn = self.db.conn();
+        let sql = format!(
+            "SELECT {MSG_COLS} FROM chat_messages
+             WHERE peer_id = ?1 AND direction = 'out' AND kind = 'text' AND status = 'queued'
+             ORDER BY id ASC"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params![peer_id], row_to_message)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn search_messages(&self, peer_id: i64, query: &str, limit: i64) -> Result<Vec<ChatMessage>> {
+        let like = format!("%{}%", query.replace('%', "").replace('_', ""));
+        let conn = self.db.conn();
+        let sql = format!(
+            "SELECT {MSG_COLS} FROM chat_messages
+             WHERE peer_id = ?1 AND (body LIKE ?2 OR file_name LIKE ?2)
+             ORDER BY id DESC LIMIT ?3"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let mut rows: Vec<ChatMessage> = stmt
+            .query_map(params![peer_id, like, limit], row_to_message)?
+            .collect::<rusqlite::Result<_>>()?;
+        rows.reverse();
+        Ok(rows)
     }
 }

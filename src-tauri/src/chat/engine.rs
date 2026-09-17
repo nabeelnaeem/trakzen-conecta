@@ -23,10 +23,12 @@ pub const EVENT_PEER: &str = "chat://peer";
 pub const EVENT_TRANSFER: &str = "chat://transfer";
 pub const EVENT_STATUS: &str = "chat://status";
 pub const EVENT_DELETED: &str = "chat://deleted";
+pub const EVENT_TYPING: &str = "chat://typing";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const RECONNECT_INTERVAL: Duration = Duration::from_secs(20);
+const RECONNECT_TICK: Duration = Duration::from_secs(5);
+const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 struct Conn {
     generation: u64,
@@ -48,6 +50,9 @@ pub struct ChatEngine {
     conns: Mutex<HashMap<i64, Conn>>,
     connecting: Mutex<HashSet<i64>>,
     generation: AtomicU64,
+    /// Per-peer reconnect schedule: (failures so far, earliest next attempt).
+    backoff: Mutex<HashMap<i64, (u32, std::time::Instant)>>,
+    pub discovery: Mutex<Option<Arc<super::discovery::Discovery>>>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -96,6 +101,8 @@ impl ChatEngine {
             conns: Mutex::new(HashMap::new()),
             connecting: Mutex::new(HashSet::new()),
             generation: AtomicU64::new(1),
+            backoff: Mutex::new(HashMap::new()),
+            discovery: Mutex::new(None),
         }))
     }
 
@@ -116,6 +123,14 @@ impl ChatEngine {
             };
             engine.me.write().unwrap().listening = true;
             tracing::info!(port, "chat listener up");
+            {
+                let (id, name) = {
+                    let me = engine.me.read().unwrap();
+                    (me.peer_id.clone(), me.display_name.clone())
+                };
+                *engine.discovery.lock().unwrap() =
+                    super::discovery::Discovery::start(engine.app.clone(), id, name, port);
+            }
             let _ = engine
                 .app
                 .emit(EVENT_STATUS, serde_json::json!({ "listening": true }));
@@ -162,6 +177,13 @@ impl ChatEngine {
         }
         settings::set(&self.db, settings::CHAT_DISPLAY_NAME, name)?;
         self.me.write().unwrap().display_name = name.to_string();
+        let (id, port) = {
+            let me = self.me.read().unwrap();
+            (me.peer_id.clone(), me.port)
+        };
+        if let Some(d) = self.discovery.lock().unwrap().as_ref() {
+            d.rename(&id, name, port);
+        }
         Ok(self.identity())
     }
 
@@ -177,6 +199,10 @@ impl ChatEngine {
     }
 
     // ---- peers ------------------------------------------------------------
+
+    pub fn nearby(&self) -> Vec<super::discovery::Nearby> {
+        self.discovery.lock().unwrap().as_ref().map(|d| d.list()).unwrap_or_default()
+    }
 
     pub fn is_online(&self, row_id: i64) -> bool {
         self.conns.lock().unwrap().contains_key(&row_id)
@@ -202,20 +228,53 @@ impl ChatEngine {
         let _ = self.app.emit(EVENT_MESSAGE, m);
     }
 
+    /// Dials offline peers on an exponential schedule (5 s doubling to 60 s)
+    /// so a machine that is off for the day is not hammered every few seconds.
     async fn reconnect_loop(self: Arc<Self>) {
         loop {
             if let Ok(peers) = self.store.list_peers() {
+                let now = std::time::Instant::now();
                 for p in peers {
-                    if !self.is_online(p.id) {
-                        let engine = self.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let _ = engine.connect_peer(p.id).await;
-                        });
+                    if self.is_online(p.id) {
+                        continue;
                     }
+                    let due = self
+                        .backoff
+                        .lock()
+                        .unwrap()
+                        .get(&p.id)
+                        .map_or(true, |(_, next)| *next <= now);
+                    if !due {
+                        continue;
+                    }
+                    let engine = self.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if engine.connect_peer(p.id).await.is_err() {
+                            let mut b = engine.backoff.lock().unwrap();
+                            let (n, _) = b.get(&p.id).copied().unwrap_or((0, std::time::Instant::now()));
+                            let wait = (RECONNECT_TICK * 2u32.pow(n.min(4))).min(BACKOFF_MAX);
+                            b.insert(p.id, (n + 1, std::time::Instant::now() + wait));
+                        }
+                    });
                 }
             }
-            tokio::time::sleep(RECONNECT_INTERVAL).await;
+            tokio::time::sleep(RECONNECT_TICK).await;
         }
+    }
+
+    /// Every address worth trying for a peer: the stored one first, then
+    /// whatever mDNS currently reports for its peer id (handles machines
+    /// that changed IP or sit on a different interface).
+    fn candidate_addresses(&self, peer: &Peer) -> Vec<(String, u16)> {
+        let mut out = vec![(peer.host.clone(), peer.port)];
+        if let (Some(id), Some(d)) = (&peer.peer_id, self.discovery.lock().unwrap().as_ref()) {
+            for a in d.addresses_for(id) {
+                if !out.contains(&a) {
+                    out.push(a);
+                }
+            }
+        }
+        out
     }
 
     /// Dials the peer's chat port and runs the connection until it drops.
@@ -234,13 +293,24 @@ impl ChatEngine {
 
     async fn connect_peer_inner(self: &Arc<Self>, row_id: i64) -> Result<mpsc::Sender<Frame>> {
         let peer = self.store.get_peer(row_id)?;
-        let mut stream = dial(&peer.host, peer.port).await?;
+        let mut last_err = AppError::Other("no address".into());
+        let mut dialed: Option<(TcpStream, String)> = None;
+        for (host, port) in self.candidate_addresses(&peer) {
+            match dial(&host, port).await {
+                Ok(s) => {
+                    dialed = Some((s, host));
+                    break;
+                }
+                Err(e) => last_err = e,
+            }
+        }
+        let Some((mut stream, host)) = dialed else { return Err(last_err) };
         let hello = self.handshake(&mut stream, Purpose::Chat).await?;
         let bound = self.store.bind_peer(
             Some(row_id),
             &hello.peer_id,
             &hello.display_name,
-            &peer.host,
+            &host,
             hello.port,
         )?;
         let tx = self.clone().run_chat_connection(stream, bound);
@@ -315,7 +385,11 @@ impl ChatEngine {
             },
         );
         let _ = self.store.touch_peer(row_id);
+        self.backoff.lock().unwrap().remove(&row_id);
         self.emit_peer(row_id);
+        let flush = self.clone();
+        let flush_tx = tx.clone();
+        tauri::async_runtime::spawn(async move { flush.flush_queue(row_id, &flush_tx).await });
 
         let (mut rd, mut wr) = stream.into_split();
         tauri::async_runtime::spawn(async move {
@@ -360,7 +434,7 @@ impl ChatEngine {
 
     async fn on_control(&self, row_id: i64, msg: ControlMsg, out: &mpsc::Sender<Frame>) -> Result<()> {
         match msg {
-            ControlMsg::Text { msg_id, body, .. } => {
+            ControlMsg::Text { msg_id, body, reply_to, .. } => {
                 let m = self.store.insert_message(&NewMessage {
                     msg_id: &msg_id,
                     peer_id: row_id,
@@ -372,6 +446,7 @@ impl ChatEngine {
                     file_size: None,
                     status: "unread",
                     created_at: now_ms(),
+                    reply_to: reply_to.as_deref(),
                 })?;
                 self.store.touch_peer(row_id)?;
                 self.emit_message(&m);
@@ -379,7 +454,19 @@ impl ChatEngine {
                 let _ = out.send(Frame::Control(ControlMsg::Ack { msg_id })).await;
             }
             ControlMsg::Ack { msg_id } => {
-                if let Some(m) = self.store.set_status(&msg_id, "delivered")? {
+                // Don't regress a message the peer already reported as read.
+                let current = self.store.get_message(&msg_id)?;
+                if current.map_or(true, |m| m.status != "read") {
+                    if let Some(m) = self.store.set_status(&msg_id, "delivered")? {
+                        self.emit_message(&m);
+                    }
+                }
+            }
+            ControlMsg::Typing => {
+                let _ = self.app.emit(EVENT_TYPING, row_id);
+            }
+            ControlMsg::Read { msg_ids } => {
+                for m in self.store.set_status_many(&msg_ids, "read")? {
                     self.emit_message(&m);
                 }
             }
@@ -402,6 +489,7 @@ impl ChatEngine {
                             file_size: m.file_size,
                             status: &m.status,
                             created_at: m.created_at,
+                            reply_to: m.reply_to.as_deref(),
                         });
                     }
                 }
@@ -483,7 +571,7 @@ impl ChatEngine {
 
     // ---- sending ----------------------------------------------------------
 
-    pub async fn send_text(self: &Arc<Self>, row_id: i64, body: &str) -> Result<ChatMessage> {
+    pub async fn send_text(self: &Arc<Self>, row_id: i64, body: &str, reply_to: Option<&str>) -> Result<ChatMessage> {
         let body = body.trim();
         if body.is_empty() {
             return Err(AppError::Other("message is empty".into()));
@@ -501,12 +589,14 @@ impl ChatEngine {
             file_size: None,
             status: "sending",
             created_at: now,
+            reply_to,
         })?;
 
         let frame = Frame::Control(ControlMsg::Text {
             msg_id: msg_id.clone(),
             body: body.to_string(),
             sent_at: now,
+            reply_to: reply_to.map(str::to_string),
         });
         let sent = match self.connect_peer(row_id).await {
             Ok(tx) => tx.send(frame).await.is_ok(),
@@ -518,13 +608,48 @@ impl ChatEngine {
         if sent {
             Ok(msg)
         } else {
-            let failed = self
-                .store
-                .set_status(&msg_id, "failed")?
-                .unwrap_or(msg);
-            self.emit_message(&failed);
-            Err(AppError::Other("peer is not reachable".into()))
+            // Keep it; it goes out automatically when the peer comes back.
+            let queued = self.store.set_status(&msg_id, "queued")?.unwrap_or(msg);
+            self.emit_message(&queued);
+            Ok(queued)
         }
+    }
+
+    /// Sends messages that were written while the peer was offline.
+    async fn flush_queue(&self, row_id: i64, tx: &mpsc::Sender<Frame>) {
+        let Ok(queued) = self.store.queued_messages(row_id) else { return };
+        for m in queued {
+            let frame = Frame::Control(ControlMsg::Text {
+                msg_id: m.msg_id.clone(),
+                body: m.body.clone(),
+                sent_at: m.created_at,
+                reply_to: m.reply_to.clone(),
+            });
+            if tx.send(frame).await.is_err() {
+                break;
+            }
+            if let Ok(Some(m)) = self.store.set_status(&m.msg_id, "sending") {
+                self.emit_message(&m);
+            }
+        }
+    }
+
+    pub async fn send_typing(self: &Arc<Self>, row_id: i64) {
+        let tx = self.conns.lock().unwrap().get(&row_id).map(|c| c.tx.clone());
+        if let Some(tx) = tx {
+            let _ = tx.try_send(Frame::Control(ControlMsg::Typing));
+        }
+    }
+
+    /// Marks a peer's messages read locally and tells the peer.
+    pub async fn mark_read(self: &Arc<Self>, row_id: i64) -> Result<()> {
+        let ids = self.store.mark_read(row_id)?;
+        if !ids.is_empty() {
+            if let Some(tx) = self.conns.lock().unwrap().get(&row_id).map(|c| c.tx.clone()) {
+                let _ = tx.try_send(Frame::Control(ControlMsg::Read { msg_ids: ids }));
+            }
+        }
+        Ok(())
     }
 
     pub async fn send_file(self: &Arc<Self>, row_id: i64, path: String) -> Result<ChatMessage> {
@@ -550,6 +675,7 @@ impl ChatEngine {
             file_size: Some(size as i64),
             status: "sending",
             created_at: now_ms(),
+            reply_to: None,
         })?;
 
         let engine = self.clone();
@@ -598,7 +724,18 @@ impl ChatEngine {
         use tokio::io::AsyncReadExt;
 
         let peer = self.store.get_peer(row_id)?;
-        let mut stream = dial(&peer.host, peer.port).await?;
+        let mut stream = None;
+        let mut last_err = AppError::Other("no address".into());
+        for (host, port) in self.candidate_addresses(&peer) {
+            match dial(&host, port).await {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(e) => last_err = e,
+            }
+        }
+        let Some(mut stream) = stream else { return Err(last_err) };
         self.handshake(&mut stream, Purpose::Transfer).await?;
 
         protocol::write_frame(
@@ -700,6 +837,7 @@ impl ChatEngine {
             file_size: Some(size as i64),
             status: "receiving",
             created_at: now_ms(),
+            reply_to: None,
         })?;
         self.emit_message(&msg);
         self.emit_peer(row_id);

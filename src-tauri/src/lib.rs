@@ -124,6 +124,19 @@ async fn app_quit(app: AppHandle) {
     app.exit(0);
 }
 
+/// Unread total shown on the tray tooltip and window title.
+#[tauri::command]
+async fn app_set_badge(app: AppHandle, count: u32) {
+    let suffix = if count > 0 { format!(" ({count})") } else { String::new() };
+    if let Some(t) = app.tray_by_id("main") {
+        let _ = t.set_tooltip(Some(format!("Trakzen Conecta{suffix}")));
+    }
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.set_title(&format!("Trakzen Conecta{suffix}"));
+        let _ = w.set_badge_count(if count > 0 { Some(count as i64) } else { None });
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -137,6 +150,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .on_window_event(|window, event| {
             // Closing the main window hides it to the tray unless the user
             // turned that off; the tray menu has an explicit Quit.
@@ -319,6 +336,12 @@ pub fn run() {
             chat::commands::chat_clear_chat,
             chat::commands::chat_storage_stats,
             chat::commands::chat_clear_storage,
+            chat::commands::chat_typing,
+            chat::commands::chat_search,
+            chat::commands::chat_nearby,
+            chat::commands::chat_add_nearby,
+            chat::commands::chat_pairing_qr,
+            app_set_badge,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

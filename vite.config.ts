@@ -1,6 +1,9 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { readFileSync } from "node:fs";
+
+const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")) as { version: string };
 
 const host = process.env.TAURI_DEV_HOST;
 
@@ -11,6 +14,12 @@ export default defineConfig(() => ({
   // Notification sounds are inlined into the bundle (see src/lib/notify.ts);
   // a few hundred KB more in a desktop app is fine.
   build: { chunkSizeWarningLimit: 1500 },
+
+  // Shown under Settings → About.
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+    __BUILD_DATE__: JSON.stringify(new Date().toISOString().slice(0, 10)),
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

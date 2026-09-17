@@ -229,6 +229,15 @@ export interface ChatMessage {
   fileSize: number | null;
   status: string;
   createdAt: number;
+  replyTo: string | null;
+}
+
+export interface Nearby {
+  peerId: string;
+  displayName: string;
+  addresses: string[];
+  port: number;
+  lastSeen: number;
 }
 
 export interface TransferProgress {
