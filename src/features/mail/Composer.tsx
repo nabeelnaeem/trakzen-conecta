@@ -2,6 +2,7 @@ import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useMail } from "./store";
 import { buildFrameDoc } from "./frame";
+import { RecipientInput } from "./RecipientInput";
 
 export function Composer() {
   const { composer, updateComposer, closeCompose, send, busy } = useMail();
@@ -33,11 +34,11 @@ export function Composer() {
 
         <div className="space-y-1 border-b border-gray-200 px-3 py-2 text-sm">
           <Row label="To">
-            <input
-              className="flex-1 outline-none"
+            <RecipientInput
+              accountId={c.accountId}
               autoFocus
               value={c.to}
-              onChange={(e) => updateComposer({ to: e.target.value })}
+              onChange={(to) => updateComposer({ to })}
               placeholder="name@example.com, other@example.com"
             />
             {!showCc && (
@@ -49,10 +50,10 @@ export function Composer() {
           {(showCc || c.cc || c.bcc) && (
             <>
               <Row label="Cc">
-                <input className="flex-1 outline-none" value={c.cc} onChange={(e) => updateComposer({ cc: e.target.value })} />
+                <RecipientInput accountId={c.accountId} value={c.cc} onChange={(cc) => updateComposer({ cc })} />
               </Row>
               <Row label="Bcc">
-                <input className="flex-1 outline-none" value={c.bcc} onChange={(e) => updateComposer({ bcc: e.target.value })} />
+                <RecipientInput accountId={c.accountId} value={c.bcc} onChange={(bcc) => updateComposer({ bcc })} />
               </Row>
             </>
           )}
@@ -121,7 +122,7 @@ export function Composer() {
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="flex items-center gap-2 border-b border-gray-100 py-1 last:border-0">
+    <div className="relative flex items-center gap-2 border-b border-gray-100 py-1 last:border-0">
       <span className="w-14 shrink-0 text-gray-500">{label}</span>
       {children}
     </div>

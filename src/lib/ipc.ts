@@ -5,6 +5,7 @@ import type {
   ChatMessage,
   ChatStatus,
   ComposeDraft,
+  Contact,
   FetchResult,
   FlagChange,
   Identity,
@@ -42,6 +43,8 @@ export const mail = {
   fetchMore: (accountId: number, query: ListQuery, reset: boolean) =>
     invoke<FetchResult>("mail_fetch_more", { accountId, query, reset }),
   listFilters: (accountId: number) => invoke<MailFilter[]>("mail_list_filters", { accountId }),
+  suggestContacts: (accountId: number, query: string) =>
+    invoke<Contact[]>("mail_suggest_contacts", { accountId, query }),
   search: (accountId: number, query: string) =>
     invoke<MessageSummary[]>("mail_search", { accountId, query }),
   unreadCount: (accountId: number) => invoke<number>("mail_unread_count", { accountId }),

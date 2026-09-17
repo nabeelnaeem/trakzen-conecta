@@ -94,6 +94,19 @@ const MIGRATIONS: &[&str] = &[
         UNIQUE(account_id, remote_id)
     );
     ",
+    // 3: address book derived from mail traffic, for recipient suggestions
+    "
+    CREATE TABLE mail_contacts (
+        id         INTEGER PRIMARY KEY,
+        account_id INTEGER NOT NULL REFERENCES mail_accounts(id) ON DELETE CASCADE,
+        email      TEXT    NOT NULL,
+        name       TEXT    NOT NULL DEFAULT '',
+        count      INTEGER NOT NULL DEFAULT 0,
+        last_seen  INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(account_id, email)
+    );
+    CREATE INDEX mail_contacts_lookup ON mail_contacts(account_id, count DESC, last_seen DESC);
+    ",
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

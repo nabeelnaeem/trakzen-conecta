@@ -120,6 +120,14 @@ export const useMail = create<MailState>((set, get) => ({
       /* defaults are fine */
     }
     await get().loadAccounts();
+    // Coming back to the window is the moment people expect fresh mail.
+    let lastFocusSync = 0;
+    window.addEventListener("focus", () => {
+      const now = Date.now();
+      if (now - lastFocusSync < 15_000) return;
+      lastFocusSync = now;
+      void get().sync();
+    });
     await mail.onSync((ev: SyncEvent) => {
       const { syncing, activeAccountId } = get();
       switch (ev.type) {

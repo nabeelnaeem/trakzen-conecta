@@ -195,6 +195,12 @@ export interface SettingsView {
   chatDownloadDir: string;
   mailShowImages: boolean;
   mailSignature: string;
+  mailPollSeconds: number;
+}
+
+export interface Contact {
+  email: string;
+  name: string;
 }
 
 export interface SettingsPatch {
@@ -205,4 +211,5 @@ export interface SettingsPatch {
   chatDownloadDir?: string;
   mailShowImages?: boolean;
   mailSignature?: string;
+  mailPollSeconds?: number;
 }

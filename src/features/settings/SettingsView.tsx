@@ -14,6 +14,7 @@ export function SettingsView() {
   const [dir, setDir] = useState("");
   const [showImages, setShowImages] = useState(true);
   const [signature, setSignature] = useState("");
+  const [poll, setPoll] = useState("60");
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const refreshIdentity = useChat((c) => c.refreshIdentity);
@@ -30,6 +31,7 @@ export function SettingsView() {
         setDir(v.chatDownloadDir);
         setShowImages(v.mailShowImages);
         setSignature(v.mailSignature);
+        setPoll(String(v.mailPollSeconds));
       })
       .catch((e) => setErr(errorMessage(e)));
   }, []);
@@ -46,6 +48,7 @@ export function SettingsView() {
         chatDownloadDir: dir,
         mailShowImages: showImages,
         mailSignature: signature,
+        mailPollSeconds: Math.max(0, Number(poll) || 0),
       });
       setS(v);
       setClientSecret("");
@@ -72,6 +75,14 @@ export function SettingsView() {
             <p className="-mt-2 text-xs text-gray-500">
               Off means senders can't tell when you open a message; you can still show images per message.
             </p>
+            <div>
+              <label className="label">Check for new mail every (seconds)</label>
+              <input className="input w-32" value={poll} onChange={(e) => setPoll(e.target.value.replace(/\D/g, ""))} />
+              <p className="mt-1 text-xs text-gray-500">
+                Each check is one small request per account. Minimum 15; 0 turns background checks off
+                (the app still syncs when you return to the window or press ⟳).
+              </p>
+            </div>
             <div>
               <label className="label">Signature (appended to messages you send)</label>
               <textarea className="input min-h-[72px]" value={signature} onChange={(e) => setSignature(e.target.value)} />

@@ -136,7 +136,20 @@ impl MailStore {
                     message_id_hdr = COALESCE(excluded.message_id_hdr, message_id_hdr),
                     references_hdr = COALESCE(excluded.references_hdr, references_hdr)",
             )?;
+            let mut contact = tx.prepare_cached(
+                "INSERT INTO mail_contacts(account_id, email, name, count, last_seen)
+                 VALUES(?1, ?2, ?3, 1, ?4)
+                 ON CONFLICT(account_id, email) DO UPDATE SET
+                    count = count + 1,
+                    last_seen = MAX(last_seen, excluded.last_seen),
+                    name = CASE WHEN excluded.name <> '' THEN excluded.name ELSE name END",
+            )?;
+            let mut exists = tx.prepare_cached(
+                "SELECT 1 FROM mail_messages WHERE account_id = ?1 AND remote_id = ?2",
+            )?;
             for m in msgs {
+                // Only count each message once, not on every label refresh.
+                let is_new = !exists.exists(params![account_id, m.remote_id])?;
                 stmt.execute(params![
                     account_id,
                     m.remote_id,
@@ -155,10 +168,122 @@ impl MailStore {
                     m.message_id_hdr,
                     m.references_hdr,
                 ])?;
+                if !is_new {
+                    continue;
+                }
+                let mut seen = std::collections::HashSet::new();
+                let mut record = |raw: &str| -> rusqlite::Result<()> {
+                    for mb in super::compose::split_addresses(raw) {
+                        let (name, email) = super::gmail::split_mailbox(&mb);
+                        let email = email.trim().to_ascii_lowercase();
+                        if !email.contains('@') || !seen.insert(email.clone()) {
+                            continue;
+                        }
+                        let name = if name == email { String::new() } else { name };
+                        contact.execute(params![account_id, email, name, m.date])?;
+                    }
+                    Ok(())
+                };
+                if !m.from_addr.is_empty() {
+                    let from = if m.from_name.is_empty() || m.from_name == m.from_addr {
+                        m.from_addr.clone()
+                    } else {
+                        format!("{} <{}>", m.from_name, m.from_addr)
+                    };
+                    record(&from)?;
+                }
+                record(&m.to_addrs)?;
+                record(&m.cc_addrs)?;
             }
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// One-off for databases that predate the contacts table: derive it
+    /// from the messages already cached. No-op once anything is in there.
+    pub fn backfill_contacts(&self) -> Result<usize> {
+        let msgs: Vec<(i64, RemoteMessage)> = {
+            let conn = self.db.conn();
+            let empty: i64 = conn.query_row("SELECT COUNT(*) FROM mail_contacts", [], |r| r.get(0))?;
+            if empty > 0 {
+                return Ok(0);
+            }
+            let mut stmt = conn.prepare(
+                "SELECT account_id, remote_id, from_name, from_addr, to_addrs, cc_addrs, date FROM mail_messages",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    RemoteMessage {
+                        remote_id: r.get(1)?,
+                        from_name: r.get(2)?,
+                        from_addr: r.get(3)?,
+                        to_addrs: r.get(4)?,
+                        cc_addrs: r.get(5)?,
+                        date: r.get(6)?,
+                        ..Default::default()
+                    },
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let mut conn = self.db.conn();
+        let tx = conn.transaction()?;
+        let mut contact = tx.prepare_cached(
+            "INSERT INTO mail_contacts(account_id, email, name, count, last_seen)
+             VALUES(?1, ?2, ?3, 1, ?4)
+             ON CONFLICT(account_id, email) DO UPDATE SET
+                count = count + 1,
+                last_seen = MAX(last_seen, excluded.last_seen),
+                name = CASE WHEN excluded.name <> '' THEN excluded.name ELSE name END",
+        )?;
+        let n = msgs.len();
+        for (account_id, m) in &msgs {
+            let from = if m.from_name.is_empty() || m.from_name == m.from_addr {
+                m.from_addr.clone()
+            } else {
+                format!("{} <{}>", m.from_name, m.from_addr)
+            };
+            let mut seen = std::collections::HashSet::new();
+            for raw in [from.as_str(), m.to_addrs.as_str(), m.cc_addrs.as_str()] {
+                for mb in super::compose::split_addresses(raw) {
+                    let (name, email) = super::gmail::split_mailbox(&mb);
+                    let email = email.trim().to_ascii_lowercase();
+                    if !email.contains('@') || !seen.insert(email.clone()) {
+                        continue;
+                    }
+                    let name = if name == email { String::new() } else { name };
+                    contact.execute(params![account_id, email, name, m.date])?;
+                }
+            }
+        }
+        drop(contact);
+        tx.commit()?;
+        Ok(n)
+    }
+
+    /// Recipient suggestions: prefix/substring match on name or address,
+    /// most-used first. The account's own address is excluded.
+    pub fn suggest_contacts(&self, account_id: i64, query: &str, limit: i64) -> Result<Vec<Contact>> {
+        let like = format!("%{}%", query.trim().replace('%', "").replace('_', ""));
+        let conn = self.db.conn();
+        let mut stmt = conn.prepare_cached(
+            "SELECT c.email, c.name FROM mail_contacts c
+             JOIN mail_accounts a ON a.id = c.account_id
+             WHERE c.account_id = ?1 AND c.email <> lower(a.email)
+               AND (c.email LIKE ?2 OR c.name LIKE ?2)
+             ORDER BY (c.email LIKE ?3 OR c.name LIKE ?3) DESC, c.count DESC, c.last_seen DESC
+             LIMIT ?4",
+        )?;
+        let prefix = format!("{}%", query.trim().replace('%', "").replace('_', ""));
+        let rows = stmt.query_map(params![account_id, like, prefix, limit], |r| {
+            Ok(Contact {
+                email: r.get(0)?,
+                name: r.get(1)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn delete_messages(&self, account_id: i64, remote_ids: &[String]) -> Result<()> {
@@ -593,5 +718,45 @@ mod tests {
         assert_eq!(list(Folder::All, None, None).len(), 4);
         assert_eq!(list(Folder::Drafts, None, None).len(), 0);
         assert_eq!(list(Folder::Inbox, None, Some("Label_7")), vec!["4"]);
+    }
+}
+
+#[cfg(test)]
+mod contact_tests {
+    use super::*;
+
+    #[test]
+    fn contacts_are_derived_from_traffic_and_ranked() {
+        let dir = std::env::temp_dir().join(format!("tc-test-{}", uuid::Uuid::new_v4()));
+        let store = MailStore::new(Arc::new(Db::open(&dir).unwrap()));
+        let acc = store.upsert_account("gmail", "me@example.com", None).unwrap();
+        let m = |id: &str, from: (&str, &str), to: &str| RemoteMessage {
+            remote_id: id.into(),
+            from_name: from.0.into(),
+            from_addr: from.1.into(),
+            to_addrs: to.into(),
+            date: 10,
+            ..Default::default()
+        };
+        store
+            .upsert_messages(
+                acc.id,
+                &[
+                    m("1", ("Rabiya Gull", "rabiya@example.com"), "Me <me@example.com>"),
+                    m("2", ("Rabiya Gull", "rabiya@example.com"), "me@example.com, Rob <rob@example.com>"),
+                    m("3", ("Robert", "robert@example.com"), "me@example.com"),
+                ],
+            )
+            .unwrap();
+        // Re-upserting the same message must not inflate counts.
+        store
+            .upsert_messages(acc.id, &[m("3", ("Robert", "robert@example.com"), "me@example.com")])
+            .unwrap();
+
+        let got = store.suggest_contacts(acc.id, "r", 10).unwrap();
+        let emails: Vec<&str> = got.iter().map(|c| c.email.as_str()).collect();
+        assert_eq!(emails, vec!["rabiya@example.com", "rob@example.com", "robert@example.com"]);
+        assert_eq!(got[0].name, "Rabiya Gull");
+        assert!(store.suggest_contacts(acc.id, "me@", 10).unwrap().is_empty());
     }
 }

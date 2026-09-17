@@ -37,6 +37,7 @@ pub struct SettingsPatch {
     chat_download_dir: Option<String>,
     mail_show_images: Option<bool>,
     mail_signature: Option<String>,
+    mail_poll_seconds: Option<u64>,
 }
 
 #[tauri::command]
@@ -71,6 +72,10 @@ async fn settings_update(
     }
     if let Some(v) = patch.mail_signature {
         settings::set(&state.db, settings::MAIL_SIGNATURE, v.trim_end())?;
+    }
+    if let Some(v) = patch.mail_poll_seconds {
+        // Picked up by the poll loop on its next tick; 0 pauses it.
+        settings::set(&state.db, settings::MAIL_POLL_SECONDS, &v.to_string())?;
     }
     settings::view(&state.db)
 }
@@ -115,10 +120,40 @@ pub fn run() {
             // Refresh every account in the background at launch; the UI
             // renders from the local cache immediately.
             let handle = app.handle().clone();
+            match handle.state::<AppState>().mail.backfill_contacts() {
+                Ok(n) if n > 0 => tracing::info!(messages = n, "built contacts from cached mail"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(%e, "contact backfill failed"),
+            }
             let accounts = handle.state::<AppState>().mail.list_accounts()?;
             for a in accounts {
                 mail::commands::spawn_sync(handle.clone(), a.id);
             }
+
+            // Gmail has no push for installed apps short of Pub/Sub, so poll
+            // the history API. Each tick is one small request per account.
+            let poller = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    let secs = {
+                        let state = poller.state::<AppState>();
+                        settings::poll_seconds(&state.db).unwrap_or(settings::DEFAULT_MAIL_POLL_SECONDS)
+                    };
+                    let wait = if secs == 0 { 30 } else { secs.max(15) };
+                    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                    if secs == 0 {
+                        continue;
+                    }
+                    let accounts = poller
+                        .state::<AppState>()
+                        .mail
+                        .list_accounts()
+                        .unwrap_or_default();
+                    for a in accounts {
+                        mail::commands::spawn_sync(poller.clone(), a.id);
+                    }
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -142,6 +177,7 @@ pub fn run() {
             mail::commands::mail_modify_labels,
             mail::commands::mail_fetch_more,
             mail::commands::mail_list_filters,
+            mail::commands::mail_suggest_contacts,
             chat::commands::chat_identity,
             chat::commands::chat_set_display_name,
             chat::commands::chat_list_peers,

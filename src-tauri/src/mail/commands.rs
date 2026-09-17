@@ -176,6 +176,18 @@ pub async fn mail_fetch_more(
 }
 
 #[tauri::command]
+pub async fn mail_suggest_contacts(
+    state: State<'_, AppState>,
+    account_id: i64,
+    query: String,
+) -> Result<Vec<Contact>> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    state.mail.suggest_contacts(account_id, &query, 8)
+}
+
+#[tauri::command]
 pub async fn mail_list_filters(
     state: State<'_, AppState>,
     account_id: i64,

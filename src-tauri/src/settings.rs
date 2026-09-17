@@ -12,6 +12,9 @@ pub const CHAT_PORT: &str = "chat_port";
 pub const CHAT_DOWNLOAD_DIR: &str = "chat_download_dir";
 pub const MAIL_SHOW_IMAGES: &str = "mail_show_images";
 pub const MAIL_SIGNATURE: &str = "mail_signature";
+pub const MAIL_POLL_SECONDS: &str = "mail_poll_seconds";
+
+pub const DEFAULT_MAIL_POLL_SECONDS: u64 = 60;
 
 pub const DEFAULT_CHAT_PORT: u16 = 47800;
 
@@ -56,6 +59,8 @@ pub struct SettingsView {
     pub chat_download_dir: String,
     pub mail_show_images: bool,
     pub mail_signature: String,
+    /// 0 disables background polling.
+    pub mail_poll_seconds: u64,
 }
 
 pub fn view(db: &Db) -> Result<SettingsView> {
@@ -71,5 +76,12 @@ pub fn view(db: &Db) -> Result<SettingsView> {
         chat_download_dir: get(db, CHAT_DOWNLOAD_DIR)?.unwrap_or_default(),
         mail_show_images: get(db, MAIL_SHOW_IMAGES)?.map_or(true, |v| v == "true"),
         mail_signature: get(db, MAIL_SIGNATURE)?.unwrap_or_default(),
+        mail_poll_seconds: poll_seconds(db)?,
     })
+}
+
+pub fn poll_seconds(db: &Db) -> Result<u64> {
+    Ok(get(db, MAIL_POLL_SECONDS)?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_MAIL_POLL_SECONDS))
 }
