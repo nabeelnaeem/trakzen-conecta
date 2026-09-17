@@ -159,8 +159,19 @@ function Conversation({ peerId, name, seed, host, online }: { peerId: number; na
   const { messages, transfers, sendText, sendFile, removePeer } = useChat();
   const [text, setText] = useState("");
   const [dragging, setDragging] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const bottom = useRef<HTMLDivElement>(null);
   const area = useRef<HTMLTextAreaElement>(null);
+
+  // Grow with the content (toolbar inserts included), up to a cap that the
+  // expand toggle raises to most of the window.
+  useEffect(() => {
+    const el = area.current;
+    if (!el) return;
+    const max = expanded ? Math.round(window.innerHeight * 0.6) : 192;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(max, Math.max(expanded ? 200 : 40, el.scrollHeight))}px`;
+  }, [text, expanded]);
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: "end" });
@@ -300,6 +311,9 @@ function Conversation({ peerId, name, seed, host, online }: { peerId: number; na
           <FmtButton title="Bulleted list" onClick={() => wrap("- ", "", "item")}>•</FmtButton>
           <FmtButton title="Quote" onClick={() => wrap("> ", "", "quote")}>❝</FmtButton>
           <span className="ml-auto">Enter to send · Shift+Enter for a new line · paste or drop files</span>
+          <FmtButton title={expanded ? "Shrink the message box" : "Expand the message box"} onClick={() => setExpanded((v) => !v)}>
+            {expanded ? "⤡" : "⤢"}
+          </FmtButton>
         </div>
         <div className="flex items-end gap-2">
           <button className="btn" onClick={() => void pick()} title="Send files">
@@ -307,15 +321,11 @@ function Conversation({ peerId, name, seed, host, online }: { peerId: number; na
           </button>
           <textarea
             ref={area}
-            className="input max-h-48 min-h-[40px] flex-1 resize-none font-sans"
+            className={`input min-h-[40px] flex-1 resize-none font-sans ${expanded ? "font-mono text-[13px]" : ""}`}
             rows={1}
             placeholder={online ? "Message…" : "Peer is offline; messages will fail until it comes back"}
             value={text}
-            onChange={(e) => {
-              setText(e.target.value);
-              e.target.style.height = "auto";
-              e.target.style.height = `${Math.min(192, e.target.scrollHeight)}px`;
-            }}
+            onChange={(e) => setText(e.target.value)}
             onKeyDown={onKey}
             onPaste={(e) => void onPaste(e)}
           />
