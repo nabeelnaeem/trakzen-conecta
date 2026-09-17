@@ -28,3 +28,4 @@ logs
 
 # Per-machine pnpm overrides (e.g. minimum-release-age)
 .npmrc
+pnpm-workspace.yaml
