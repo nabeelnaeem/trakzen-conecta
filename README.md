@@ -49,7 +49,9 @@ Linux:
   On Ubuntu 22.04/24.04 that is:
 
   ```sh
-  sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file     libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev     libdbus-1-dev pkg-config
+  sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
+    libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
+    libdbus-1-dev pkg-config
   ```
 
   On Windows: the WebView2 runtime (already on Windows 10/11) and the MSVC
@@ -83,8 +85,9 @@ project free of secrets.
    after approving, the tab tells you to return to the app and the inbox
    starts filling.
 
-The app requests the single `gmail.modify` scope: read, send, label changes
-and moving to trash. It cannot permanently delete mail.
+The app requests two scopes: `gmail.modify` (read, send, label changes,
+moving to trash – it cannot permanently delete mail) and
+`gmail.settings.basic` (creating and deleting filters).
 
 Refresh tokens are stored in the operating system's credential store
 (Windows Credential Manager, macOS Keychain, Secret Service on Linux), not in
