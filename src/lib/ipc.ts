@@ -106,6 +106,9 @@ export const chat = {
   sendFile: (peerId: number, path: string) =>
     invoke<ChatMessage>("chat_send_file", { peerId, path }),
   openFile: (path: string, reveal: boolean) => invoke<void>("chat_open_file", { path, reveal }),
+  stashBlob: (name: string, bytes: Uint8Array) =>
+    invoke<string>("chat_stash_blob", bytes, { headers: { "x-file-name": encodeURIComponent(name) } }),
+  filePreview: (path: string) => invoke<string | null>("chat_file_preview", { path }),
   onMessage: (cb: (m: ChatMessage) => void) =>
     listen<ChatMessage>("chat://message", (e) => cb(e.payload)),
   onPeer: (cb: (p: Peer) => void) => listen<Peer>("chat://peer", (e) => cb(e.payload)),

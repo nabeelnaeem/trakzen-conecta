@@ -35,17 +35,44 @@ body,
 }
 
 .btn {
-  @apply inline-flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-800 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed;
+  @apply inline-flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-800 transition-colors hover:bg-gray-50 active:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 disabled:opacity-50 disabled:cursor-not-allowed;
 }
 .btn-primary {
-  @apply border-blue-600 bg-blue-600 text-white hover:bg-blue-700;
+  @apply border-blue-600 bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800;
 }
 .btn-ghost {
-  @apply border-transparent bg-transparent hover:bg-gray-200;
+  @apply border-transparent bg-transparent hover:bg-gray-200 active:bg-gray-300;
 }
 .input {
-  @apply w-full rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500;
+  @apply w-full rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-sm outline-none transition-shadow focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30;
 }
 .label {
   @apply mb-1 block text-xs font-medium text-gray-600;
+}
+
+/* Chat message markdown */
+.md code.md-code {
+  @apply rounded bg-black/10 px-1 py-0.5 font-mono text-[12px];
+}
+.md-mine code.md-code {
+  @apply bg-white/20;
+}
+.md pre.md-pre {
+  @apply my-1 overflow-x-auto rounded-md bg-gray-900 px-3 py-2 font-mono text-[12px] leading-5 text-gray-100;
+}
+.md pre.md-pre[data-lang]::before {
+  content: attr(data-lang);
+  @apply mb-1 block text-[10px] uppercase tracking-wide text-gray-400;
+}
+.md ul.md-ul {
+  @apply my-1 list-disc pl-5;
+}
+.md blockquote.md-quote {
+  @apply my-1 border-l-2 border-current/40 pl-2 opacity-90;
+}
+.md a {
+  @apply underline;
+}
+.md strong {
+  font-weight: 600;
 }

@@ -120,3 +120,61 @@ pub async fn chat_open_file(app: tauri::AppHandle, path: String, reveal: bool) -
     };
     res.map_err(|e| AppError::Other(format!("could not open: {e}")))
 }
+
+/// Receives raw bytes from the webview (pasted screenshots, dropped blobs)
+/// and stashes them as a file so they can go through the normal transfer.
+#[tauri::command]
+pub async fn chat_stash_blob(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<String> {
+    use tauri::Manager;
+    let name = request
+        .headers()
+        .get("x-file-name")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| urlencoding_decode(s))
+        .unwrap_or_else(|| "pasted.png".into());
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err(AppError::Other("expected a binary body".into()));
+    };
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| AppError::Other(format!("no cache dir: {e}")))?
+        .join("outgoing");
+    tokio::fs::create_dir_all(&dir).await?;
+    let safe = sanitize_filename::sanitize(&name);
+    let path = crate::util::unique_path(&dir, if safe.is_empty() { "file" } else { &safe });
+    tokio::fs::write(&path, bytes).await?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Small images come back as a data URL for inline previews; anything else
+/// (or anything large) returns None and the UI shows a file card.
+#[tauri::command]
+pub async fn chat_file_preview(path: String) -> Result<Option<String>> {
+    use base64::Engine;
+    const MAX: u64 = 8 * 1024 * 1024;
+    let mime = mime_guess::from_path(&path).first_or_octet_stream();
+    if mime.type_() != mime_guess::mime::IMAGE {
+        return Ok(None);
+    }
+    let meta = match tokio::fs::metadata(&path).await {
+        Ok(m) => m,
+        Err(_) => return Ok(None),
+    };
+    if meta.len() > MAX {
+        return Ok(None);
+    }
+    let bytes = tokio::fs::read(&path).await?;
+    Ok(Some(format!(
+        "data:{};base64,{}",
+        mime,
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )))
+}
+
+fn urlencoding_decode(s: &str) -> String {
+    url::form_urlencoded::parse(format!("v={s}").as_bytes())
+        .find(|(k, _)| k == "v")
+        .map(|(_, v)| v.into_owned())
+        .unwrap_or_else(|| s.to_string())
+}

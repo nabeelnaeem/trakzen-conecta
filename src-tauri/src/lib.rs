@@ -301,6 +301,8 @@ pub fn run() {
             chat::commands::chat_send_text,
             chat::commands::chat_send_file,
             chat::commands::chat_open_file,
+            chat::commands::chat_stash_blob,
+            chat::commands::chat_file_preview,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
