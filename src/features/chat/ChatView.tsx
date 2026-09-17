@@ -6,7 +6,7 @@ import { useChat } from "./store";
 import { Avatar } from "../mail/Avatar";
 import { bytes, shortDate, timeOnly } from "../../lib/format";
 import { chat as chatIpc, errorMessage } from "../../lib/ipc";
-import { renderMarkdown } from "../../lib/markdown";
+import { codeFromCopyButton, renderMarkdown } from "../../lib/markdown";
 import { Spinner } from "../../lib/Spinner";
 import type { ChatMessage } from "../../lib/types";
 
@@ -284,6 +284,7 @@ interface Pending {
 }
 
 const MAX_ROWS = 8;
+const CODE_LANGS = ["", "typescript", "javascript", "python", "rust", "go", "java", "csharp", "sql", "bash", "json", "yaml", "html", "css"];
 
 function Conversation({ peerId, name, seed, host, online, typing }: { peerId: number; name: string; seed: string; host: string; online: boolean; typing: boolean }) {
   const { messages, transfers, sendText, sendFile, removePeer, clearChat } = useChat();
@@ -292,6 +293,10 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
   const [dragging, setDragging] = useState(false);
   const [toolbar, setToolbar] = useState(false);
+  // Slack-style code mode: monospace box, Enter inserts a line, Ctrl+Enter
+  // sends, the text goes out wrapped in a fenced block.
+  const [codeMode, setCodeMode] = useState(false);
+  const [codeLang, setCodeLang] = useState("");
   const [menu, setMenu] = useState(false);
   const [search, setSearch] = useState<string | null>(null);
   const [results, setResults] = useState<ChatMessage[] | null>(null);
@@ -351,14 +356,15 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
     return () => window.clearTimeout(t);
   }, [search, peerId]);
 
-  // 1 line to start, grows to MAX_ROWS.
+  // 1 line to start, grows to MAX_ROWS (more room in code mode).
   useEffect(() => {
     const el = area.current;
     if (!el) return;
     el.style.height = "auto";
     const line = 22;
-    el.style.height = `${Math.min(line * MAX_ROWS + 18, Math.max(40, el.scrollHeight))}px`;
-  }, [text]);
+    const rows = codeMode ? 18 : MAX_ROWS;
+    el.style.height = `${Math.min(line * rows + 18, Math.max(codeMode ? 120 : 40, el.scrollHeight))}px`;
+  }, [text, codeMode]);
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: "end" });
@@ -394,13 +400,15 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
   }, [peerId]);
 
   const submit = async () => {
-    const body = text.trim();
+    let body = codeMode ? text.replace(/^\n+|\n+$/g, "") : text.trim();
     const files = pending;
     if (!body && files.length === 0) return;
+    if (codeMode && body) body = "```" + codeLang + "\n" + body + "\n```";
     const quote = replyTo?.msgId ?? null;
     setText("");
     setPending([]);
     setReplyTo(null);
+    setCodeMode(false);
     if (body) await sendText(body, quote);
     for (const f of files) await sendFile(f.path);
     area.current?.focus();
@@ -439,6 +447,20 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
   };
 
   const onKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (codeMode) {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        void submit();
+      } else if (e.key === "Tab") {
+        e.preventDefault();
+        const el = e.currentTarget;
+        const start = el.selectionStart;
+        const end = el.selectionEnd;
+        setText(text.slice(0, start) + "  " + text.slice(end));
+        requestAnimationFrame(() => el.setSelectionRange(start + 2, start + 2));
+      }
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       const fences = (text.match(/```/g) ?? []).length;
       if (fences % 2 === 1) return;
@@ -450,7 +472,7 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
       if (e.key === "b") (e.preventDefault(), wrap("**"));
       else if (e.key === "i") (e.preventDefault(), wrap("_"));
       else if (e.key === "e") (e.preventDefault(), wrap("`", "`", "code"));
-      else if (e.key === "E") (e.preventDefault(), wrap("```\n", "\n```", "code"));
+      else if (e.key === "E") (e.preventDefault(), setCodeMode(true));
     }
   };
 
@@ -633,9 +655,25 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
               <FmtButton title="Italic (Ctrl+I)" onClick={() => wrap("_")}><i>I</i></FmtButton>
               <FmtButton title="Strikethrough" onClick={() => wrap("~~")}><s>S</s></FmtButton>
               <FmtButton title="Inline code (Ctrl+E)" onClick={() => wrap("`", "`", "code")}><code>{"<>"}</code></FmtButton>
-              <FmtButton title="Code block (Ctrl+Shift+E)" onClick={() => wrap("```\n", "\n```", "code")}>{"{ }"}</FmtButton>
+              <FmtButton title="Code block (Ctrl+Shift+E)" onClick={() => setCodeMode(true)}>{"{ }"}</FmtButton>
               <FmtButton title="Bulleted list" onClick={() => wrap("- ", "", "item")}>• list</FmtButton>
               <FmtButton title="Quote" onClick={() => wrap("> ", "", "quote")}>❝ quote</FmtButton>
+            </div>
+          )}
+          {codeMode && (
+            <div className="mb-1 flex items-center gap-2 rounded-t-md border border-b-0 border-gray-700 bg-gray-800 px-3 py-1 text-xs text-gray-300">
+              <span className="font-medium text-gray-100">Code block</span>
+              <select className="rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-100" value={codeLang} onChange={(e) => setCodeLang(e.target.value)}>
+                {CODE_LANGS.map((l) => (
+                  <option key={l} value={l}>
+                    {l || "plain text"}
+                  </option>
+                ))}
+              </select>
+              <span className="ml-auto">Enter for a new line · Tab indents · Ctrl+Enter sends</span>
+              <button className="rounded px-1.5 py-0.5 hover:bg-white/10" onClick={() => setCodeMode(false)} title="Back to normal message">
+                ✕
+              </button>
             </div>
           )}
           <div className="flex items-end gap-2">
@@ -645,11 +683,15 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
             <button className={`btn ${toolbar ? "bg-gray-100" : ""}`} onClick={() => setToolbar((v) => !v)} title="Formatting (Markdown also works: **bold**, _italic_, `code`)">
               Aa
             </button>
+            <button className={`btn ${codeMode ? "bg-gray-800 text-white" : ""}`} onClick={() => setCodeMode((v) => !v)} title="Code block (Ctrl+Shift+E)">
+              {"{ }"}
+            </button>
             <textarea
               ref={area}
-              className="input min-h-[40px] flex-1 resize-none font-sans"
+              className={`input min-h-[40px] flex-1 resize-none ${codeMode ? "rounded-t-none border-gray-700 bg-gray-900 font-mono text-[13px] text-gray-100 placeholder:text-gray-500 focus:border-gray-500 focus:ring-0" : "font-sans"}`}
               rows={1}
-              placeholder={online ? "Message… (Enter to send, Shift+Enter for a new line)" : "Peer is offline — messages are queued and sent when it returns"}
+              spellCheck={!codeMode}
+              placeholder={codeMode ? "Paste or type code…" : online ? "Message… (Enter to send, Shift+Enter for a new line)" : "Peer is offline — messages are queued and sent when it returns"}
               value={text}
               onChange={(e) => onChange(e.target.value)}
               onKeyDown={onKey}
@@ -786,7 +828,7 @@ function Bubble({
     >
       {mine && menuEl}
       <div
-        className={`max-w-[60%] px-3 py-1.5 text-sm ${
+        className={`${m.body.includes("```") ? "max-w-[85%]" : "max-w-[60%]"} px-3 py-1.5 text-sm ${
           mine ? "rounded-2xl rounded-br-md bg-blue-600 text-white" : "rounded-2xl rounded-bl-md bg-gray-100 text-gray-900"
         } ${m.status === "failed" ? "opacity-60 ring-1 ring-red-400" : ""}`}
       >
@@ -812,7 +854,18 @@ function MarkdownBody({ body, mine }: { body: string; mine: boolean }) {
     <div
       className={`md break-words ${mine ? "md-mine" : ""}`}
       onClick={(e) => {
-        const a = (e.target as HTMLElement).closest("a");
+        const t = e.target as HTMLElement;
+        const copy = t.closest(".md-copy") as HTMLElement | null;
+        if (copy) {
+          const code = codeFromCopyButton(copy);
+          if (code !== null) {
+            void navigator.clipboard.writeText(code);
+            copy.textContent = "Copied";
+            window.setTimeout(() => (copy.textContent = "Copy"), 1500);
+          }
+          return;
+        }
+        const a = t.closest("a");
         if (a?.href) {
           e.preventDefault();
           void openUrl(a.href);

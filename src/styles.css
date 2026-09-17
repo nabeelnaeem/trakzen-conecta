@@ -59,12 +59,24 @@ body,
 .md-mine code.md-code {
   @apply bg-white/20;
 }
-.md pre.md-pre {
-  @apply my-1 overflow-x-auto rounded-md bg-gray-900 px-3 py-2 font-mono text-[12px] leading-5 text-gray-100;
+.md .md-codewrap {
+  @apply my-1 overflow-hidden rounded-md bg-gray-900 text-gray-100;
 }
-.md pre.md-pre[data-lang]::before {
-  content: attr(data-lang);
-  @apply mb-1 block text-[10px] uppercase tracking-wide text-gray-400;
+.md .md-codebar {
+  @apply flex items-center justify-between border-b border-white/10 px-3 py-1 text-[10px] uppercase tracking-wide text-gray-400;
+}
+.md .md-copy {
+  @apply rounded px-1.5 py-0.5 normal-case tracking-normal text-gray-300 hover:bg-white/10 hover:text-white;
+}
+.md pre.md-pre {
+  @apply m-0 overflow-x-auto px-3 py-2 font-mono text-[12px] leading-5;
+  tab-size: 2;
+}
+.md p.md-p {
+  @apply my-0;
+}
+.md p.md-p + p.md-p {
+  @apply mt-2;
 }
 .md ul.md-ul {
   @apply my-1 list-disc pl-5;
