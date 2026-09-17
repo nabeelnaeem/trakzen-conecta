@@ -5,7 +5,7 @@ import { buildFrameDoc } from "./frame";
 import { RecipientInput } from "./RecipientInput";
 
 export function Composer() {
-  const { composer, updateComposer, closeCompose, send, busy } = useMail();
+  const { composer, updateComposer, closeCompose, discardDraft, send, busy } = useMail();
   const [showCc, setShowCc] = useState(false);
   if (!composer) return null;
   const c = composer;
@@ -27,6 +27,9 @@ export function Composer() {
       >
         <div className="flex items-center justify-between border-b border-gray-200 bg-gray-50 px-3 py-2">
           <span className="text-sm font-medium">{c.subject || "New message"}</span>
+          <span className="ml-auto mr-3 text-xs text-gray-500">
+            {c.saving ? "Saving…" : c.dirty ? "Unsaved changes" : c.savedAt ? "Draft saved" : ""}
+          </span>
           <button className="text-gray-500 hover:text-gray-900" onClick={closeCompose} aria-label="Close">
             ✕
           </button>
@@ -111,7 +114,13 @@ export function Composer() {
             Attach
           </button>
           <div className="flex-1" />
-          <button className="btn btn-ghost" onClick={closeCompose}>
+          <button
+            className="btn btn-ghost text-red-700"
+            onClick={() => {
+              if (!c.draftId || confirm("Discard this draft?")) void discardDraft();
+            }}
+            title="Delete draft"
+          >
             Discard
           </button>
         </div>

@@ -6,6 +6,7 @@ import type {
   ChatStatus,
   ComposeDraft,
   Contact,
+  DraftContent,
   FetchResult,
   FlagChange,
   Identity,
@@ -77,6 +78,10 @@ export const mail = {
   composeDraft: (messageId: number, mode: ReplyMode) =>
     invoke<ComposeDraft>("mail_compose_draft", { messageId, mode }),
   send: (message: OutgoingMessage) => invoke<void>("mail_send", { message }),
+  saveDraft: (message: OutgoingMessage) => invoke<string>("mail_save_draft", { message }),
+  discardDraft: (accountId: number, draftId: string) =>
+    invoke<void>("mail_discard_draft", { accountId, draftId }),
+  openDraft: (messageId: number) => invoke<DraftContent>("mail_open_draft", { messageId }),
   saveAttachment: (attachmentId: number, open: boolean) =>
     invoke<string>("mail_save_attachment", { attachmentId, open }),
   onSync: (cb: (ev: SyncEvent) => void): Promise<UnlistenFn> =>

@@ -410,6 +410,32 @@ impl MailProvider for GmailProvider {
         self.api.modify_thread(&token, thread_id, add, remove).await
     }
 
+    async fn save_draft(
+        &self,
+        account: &Account,
+        raw: Vec<u8>,
+        thread_id: Option<&str>,
+        draft_id: Option<&str>,
+    ) -> Result<String> {
+        let token = self.token(account).await?;
+        self.api.save_draft(&token, &raw, thread_id, draft_id).await
+    }
+
+    async fn delete_draft(&self, account: &Account, draft_id: &str) -> Result<()> {
+        let token = self.token(account).await?;
+        self.api.delete_draft(&token, draft_id).await
+    }
+
+    async fn open_draft(&self, account: &Account, message_remote_id: &str) -> Result<DraftContent> {
+        let token = self.token(account).await?;
+        let id = self
+            .api
+            .find_draft(&token, message_remote_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("draft no longer exists on the server".into()))?;
+        self.api.get_draft(&token, &id).await
+    }
+
     async fn search(
         &self,
         account: &Account,

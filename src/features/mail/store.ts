@@ -26,6 +26,10 @@ export interface ComposerState {
   body: string;
   draft: ComposeDraft | null;
   files: string[];
+  draftId: string | null;
+  dirty: boolean;
+  saving: boolean;
+  savedAt: number | null;
 }
 
 interface SyncState {
@@ -108,6 +112,8 @@ interface MailState {
   openCompose: (mode?: ReplyMode, messageId?: number) => Promise<void>;
   updateComposer: (patch: Partial<ComposerState>) => void;
   closeCompose: () => void;
+  discardDraft: () => Promise<void>;
+  saveDraftNow: () => Promise<void>;
   send: () => Promise<void>;
   undoSend: () => void;
   openFilterEditor: (prefill?: Partial<NewFilter>) => void;
@@ -123,6 +129,42 @@ const splitList = (s: string) =>
     .filter(Boolean);
 
 let lastSelectedId: number | null = null;
+let draftTimer: number | null = null;
+
+const emptyComposer = (accountId: number): ComposerState => ({
+  accountId,
+  to: "",
+  cc: "",
+  bcc: "",
+  subject: "",
+  body: "",
+  draft: null,
+  files: [],
+  draftId: null,
+  dirty: false,
+  saving: false,
+  savedAt: null,
+});
+
+function toOutgoing(c: ComposerState): OutgoingMessage {
+  return {
+    accountId: c.accountId,
+    to: splitList(c.to),
+    cc: splitList(c.cc),
+    bcc: splitList(c.bcc),
+    subject: c.subject,
+    bodyText: c.body,
+    quotedHtml: c.draft?.quotedHtml ?? null,
+    inReplyTo: c.draft?.inReplyTo ?? null,
+    references: c.draft?.references ?? null,
+    threadId: c.draft?.threadId ?? null,
+    attachments: [
+      ...c.files.map((path) => ({ kind: "path" as const, path })),
+      ...(c.draft?.attachments ?? []),
+    ],
+    draftId: c.draftId,
+  };
+}
 
 export const useMail = create<MailState>((set, get) => ({
   accounts: [],
@@ -382,6 +424,40 @@ export const useMail = create<MailState>((set, get) => ({
     const row = get().messages.find((m) => m.id === id);
     if (!row) return;
     lastSelectedId = id;
+    if (row.labels.includes("DRAFT")) {
+      try {
+        const d = await mail.openDraft(id);
+        set({
+          composer: {
+            ...emptyComposer(row.accountId),
+            to: d.to.join(", "),
+            cc: d.cc.join(", "),
+            bcc: d.bcc.join(", "),
+            subject: d.subject,
+            body: d.bodyText,
+            draftId: d.draftId,
+            draft: d.threadId || d.inReplyTo
+              ? {
+                  accountId: row.accountId,
+                  to: [],
+                  cc: [],
+                  subject: d.subject,
+                  quotedHtml: null,
+                  quotedText: "",
+                  inReplyTo: d.inReplyTo,
+                  references: d.references,
+                  threadId: d.threadId,
+                  attachments: [],
+                  attachmentNames: [],
+                }
+              : null,
+          },
+        });
+      } catch (e) {
+        set({ error: errorMessage(e) });
+      }
+      return;
+    }
     set({ openId: id, loadingDetail: true, thread: [row], expanded: [] });
     try {
       const accountId = row.accountId;
@@ -604,21 +680,18 @@ export const useMail = create<MailState>((set, get) => ({
     const accountId = get().activeAccountId;
     if (accountId === null) return;
     if (!mode || messageId === undefined) {
-      set({ composer: { accountId, to: "", cc: "", bcc: "", subject: "", body: "", draft: null, files: [] } });
+      set({ composer: emptyComposer(accountId) });
       return;
     }
     try {
       const draft = await mail.composeDraft(messageId, mode);
       set({
         composer: {
-          accountId: draft.accountId,
+          ...emptyComposer(draft.accountId),
           to: draft.to.join(", "),
           cc: draft.cc.join(", "),
-          bcc: "",
           subject: draft.subject,
-          body: "",
           draft,
-          files: [],
         },
       });
     } catch (e) {
@@ -628,30 +701,64 @@ export const useMail = create<MailState>((set, get) => ({
 
   updateComposer: (patch) => {
     const c = get().composer;
-    if (c) set({ composer: { ...c, ...patch } });
+    if (!c) return;
+    set({ composer: { ...c, ...patch, dirty: true } });
+    // Autosave to the server a few seconds after the last keystroke.
+    if (draftTimer) window.clearTimeout(draftTimer);
+    draftTimer = window.setTimeout(() => void get().saveDraftNow(), 3000);
   },
 
-  closeCompose: () => set({ composer: null }),
+  saveDraftNow: async () => {
+    const c = get().composer;
+    if (!c || !c.dirty || c.saving) return;
+    const hasContent = c.to.trim() || c.subject.trim() || c.body.trim();
+    if (!hasContent) return;
+    set({ composer: { ...c, saving: true } });
+    try {
+      const draftId = await mail.saveDraft(toOutgoing(c));
+      const now = get().composer;
+      if (now) set({ composer: { ...now, draftId, dirty: now !== c && now.dirty, saving: false, savedAt: Date.now() } });
+    } catch (e) {
+      const now = get().composer;
+      if (now) set({ composer: { ...now, saving: false } });
+      set({ error: `Draft not saved: ${errorMessage(e)}` });
+    }
+  },
+
+  // Closing keeps the draft (saved to the server if anything changed).
+  closeCompose: () => {
+    const c = get().composer;
+    if (draftTimer) window.clearTimeout(draftTimer);
+    if (!c?.dirty) {
+      set({ composer: null });
+      return;
+    }
+    void get().saveDraftNow().then(() => {
+      set({ composer: null, notice: "Draft saved" });
+      window.setTimeout(() => set({ notice: null }), 2500);
+      void get().sync();
+    });
+  },
+
+  discardDraft: async () => {
+    const c = get().composer;
+    if (draftTimer) window.clearTimeout(draftTimer);
+    set({ composer: null });
+    if (c?.draftId) {
+      try {
+        await mail.discardDraft(c.accountId, c.draftId);
+        if (get().folder === "drafts") await get().refresh();
+      } catch (e) {
+        set({ error: errorMessage(e) });
+      }
+    }
+  },
 
   send: async () => {
     const c = get().composer;
     if (!c) return;
-    const message: OutgoingMessage = {
-      accountId: c.accountId,
-      to: splitList(c.to),
-      cc: splitList(c.cc),
-      bcc: splitList(c.bcc),
-      subject: c.subject,
-      bodyText: c.body,
-      quotedHtml: c.draft?.quotedHtml ?? null,
-      inReplyTo: c.draft?.inReplyTo ?? null,
-      references: c.draft?.references ?? null,
-      threadId: c.draft?.threadId ?? null,
-      attachments: [
-        ...c.files.map((path) => ({ kind: "path" as const, path })),
-        ...(c.draft?.attachments ?? []),
-      ],
-    };
+    if (draftTimer) window.clearTimeout(draftTimer);
+    const message = toOutgoing(c);
     if (message.to.length === 0) {
       set({ error: "Add at least one recipient." });
       return;
@@ -662,6 +769,7 @@ export const useMail = create<MailState>((set, get) => ({
         await mail.send(message);
         set({ notice: "Sent." });
         window.setTimeout(() => set({ notice: null }), 3000);
+        if (get().folder === "drafts") void get().refresh();
       } catch (e) {
         // Give the user their draft back rather than losing it.
         set({ error: errorMessage(e), composer: c });

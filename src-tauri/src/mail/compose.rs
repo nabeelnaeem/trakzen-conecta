@@ -21,6 +21,25 @@ fn mailbox(s: &str) -> Result<Mailbox> {
         .map_err(|e| AppError::Other(format!("invalid address '{s}': {e}")))
 }
 
+/// Drafts may have no recipients yet; skip anything unparsable instead of
+/// refusing to save.
+pub fn build_raw_lenient(
+    account: &Account,
+    msg: &OutgoingMessage,
+    attachments: Vec<ResolvedAttachment>,
+) -> Result<Vec<u8>> {
+    let clean = |v: &Vec<String>| -> Vec<String> {
+        v.iter().filter(|a| mailbox(a).is_ok()).cloned().collect()
+    };
+    let lenient = OutgoingMessage {
+        to: clean(&msg.to),
+        cc: clean(&msg.cc),
+        bcc: clean(&msg.bcc),
+        ..msg.clone()
+    };
+    build_raw(account, &lenient, attachments)
+}
+
 pub fn build_raw(
     account: &Account,
     msg: &OutgoingMessage,
@@ -362,6 +381,7 @@ mod tests {
             references: None,
             thread_id: None,
             attachments: vec![],
+            draft_id: None,
         };
         let raw = build_raw(&account(), &msg, vec![]).unwrap();
         let text = String::from_utf8_lossy(&raw);

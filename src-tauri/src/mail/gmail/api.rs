@@ -109,6 +109,23 @@ impl GmailApi {
         }
     }
 
+    async fn put_json(&self, token: &str, path: &str, body: &Value) -> Result<Value> {
+        let res = self
+            .http
+            .put(format!("{BASE}/{path}"))
+            .bearer_auth(token)
+            .json(body)
+            .send()
+            .await?;
+        let status = res.status().as_u16();
+        if (200..300).contains(&status) {
+            Ok(res.json().await.unwrap_or(Value::Null))
+        } else {
+            let body = res.text().await.unwrap_or_default();
+            Err(provider_error(status, &body))
+        }
+    }
+
     async fn post_json(&self, token: &str, path: &str, body: &Value) -> Result<Value> {
         let res = self
             .http
@@ -272,6 +289,77 @@ impl GmailApi {
             self.post_json(token, "messages/batchModify", &body).await?;
         }
         Ok(())
+    }
+
+    pub async fn save_draft(&self, token: &str, raw: &[u8], thread_id: Option<&str>, draft_id: Option<&str>) -> Result<String> {
+        let mut message = serde_json::json!({ "raw": B64.encode(raw) });
+        if let Some(t) = thread_id {
+            message["threadId"] = Value::String(t.to_string());
+        }
+        let body = serde_json::json!({ "message": message });
+        let v = match draft_id {
+            Some(id) => self.put_json(token, &format!("drafts/{id}"), &body).await?,
+            None => self.post_json(token, "drafts", &body).await?,
+        };
+        v["id"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| AppError::Provider("draft response had no id".into()))
+    }
+
+    pub async fn delete_draft(&self, token: &str, draft_id: &str) -> Result<()> {
+        self.delete(token, &format!("drafts/{draft_id}")).await
+    }
+
+    /// Gmail has no "draft by message id" lookup; scan the (small) draft list.
+    pub async fn find_draft(&self, token: &str, message_id: &str) -> Result<Option<String>> {
+        let mut page: Option<String> = None;
+        loop {
+            let mut q = vec![("maxResults", "100")];
+            if let Some(p) = &page {
+                q.push(("pageToken", p.as_str()));
+            }
+            let v = self.get_json(token, "drafts", &q).await?;
+            for d in v["drafts"].as_array().into_iter().flatten() {
+                if d["message"]["id"].as_str() == Some(message_id) {
+                    return Ok(d["id"].as_str().map(str::to_string));
+                }
+            }
+            match v["nextPageToken"].as_str() {
+                Some(t) => page = Some(t.to_string()),
+                None => return Ok(None),
+            }
+        }
+    }
+
+    pub async fn get_draft(&self, token: &str, draft_id: &str) -> Result<DraftContent> {
+        let v = self
+            .get_json(token, &format!("drafts/{draft_id}"), &[("format", "full")])
+            .await?;
+        let msg = &v["message"];
+        let payload = &msg["payload"];
+        let body = parse_body(msg);
+        let list = |name: &str| -> Vec<String> {
+            header(payload, name)
+                .map(crate::mail::compose::split_addresses)
+                .unwrap_or_default()
+        };
+        let body_text = body
+            .text
+            .clone()
+            .or_else(|| body.html.as_deref().map(crate::mail::sanitize::html_to_text))
+            .unwrap_or_default();
+        Ok(DraftContent {
+            draft_id: draft_id.to_string(),
+            to: list("To"),
+            cc: list("Cc"),
+            bcc: list("Bcc"),
+            subject: header(payload, "Subject").unwrap_or_default().to_string(),
+            body_text,
+            thread_id: msg["threadId"].as_str().map(str::to_string),
+            in_reply_to: header(payload, "In-Reply-To").map(str::to_string),
+            references: header(payload, "References").map(str::to_string),
+        })
     }
 
     pub async fn modify_thread(&self, token: &str, thread_id: &str, add: &[String], remove: &[String]) -> Result<()> {

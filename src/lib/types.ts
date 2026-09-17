@@ -163,6 +163,19 @@ export interface OutgoingMessage {
   references?: string | null;
   threadId?: string | null;
   attachments: OutgoingAttachment[];
+  draftId?: string | null;
+}
+
+export interface DraftContent {
+  draftId: string;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  bodyText: string;
+  threadId: string | null;
+  inReplyTo: string | null;
+  references: string | null;
 }
 
 export type ReplyMode = "reply" | "reply-all" | "forward";

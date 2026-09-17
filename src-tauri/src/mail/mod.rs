@@ -89,6 +89,20 @@ pub trait MailProvider: Send + Sync {
         remove: &[String],
     ) -> Result<()>;
 
+    /// Creates or updates a server draft; returns the draft id.
+    async fn save_draft(
+        &self,
+        account: &Account,
+        raw: Vec<u8>,
+        thread_id: Option<&str>,
+        draft_id: Option<&str>,
+    ) -> Result<String>;
+
+    async fn delete_draft(&self, account: &Account, draft_id: &str) -> Result<()>;
+
+    /// Finds the draft that wraps a given message id and returns its content.
+    async fn open_draft(&self, account: &Account, message_remote_id: &str) -> Result<DraftContent>;
+
     /// Server-side search. Returns matching remote ids, newest first, and
     /// makes sure their metadata is in the store.
     async fn search(

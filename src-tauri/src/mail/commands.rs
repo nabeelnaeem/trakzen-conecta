@@ -496,19 +496,12 @@ pub async fn mail_compose_draft(
     Ok(compose::draft_for(&account, &detail, mode))
 }
 
-#[tauri::command]
-pub async fn mail_send(state: State<'_, AppState>, mut message: OutgoingMessage) -> Result<()> {
-    if message.to.iter().all(|t| t.trim().is_empty()) {
-        return Err(AppError::Other("add at least one recipient".into()));
-    }
-    if let Some(sig) = crate::settings::get(&state.db, crate::settings::MAIL_SIGNATURE)? {
-        if !sig.trim().is_empty() {
-            message.body_text = format!("{}\n\n-- \n{}", message.body_text.trim_end(), sig.trim());
-        }
-    }
-    let account = state.mail.get_account(message.account_id)?;
-    let provider = state.providers.provider_for(&account.provider)?;
-
+async fn resolve_attachments(
+    state: &AppState,
+    account: &Account,
+    provider: &std::sync::Arc<dyn super::MailProvider>,
+    message: &OutgoingMessage,
+) -> Result<Vec<ResolvedAttachment>> {
     let mut resolved = Vec::with_capacity(message.attachments.len());
     for att in &message.attachments {
         resolved.push(match att {
@@ -539,14 +532,62 @@ pub async fn mail_send(state: State<'_, AppState>, mut message: OutgoingMessage)
             }
         });
     }
+    Ok(resolved)
+}
 
+#[tauri::command]
+pub async fn mail_send(state: State<'_, AppState>, mut message: OutgoingMessage) -> Result<()> {
+    if message.to.iter().all(|t| t.trim().is_empty()) {
+        return Err(AppError::Other("add at least one recipient".into()));
+    }
+    if let Some(sig) = crate::settings::get(&state.db, crate::settings::MAIL_SIGNATURE)? {
+        if !sig.trim().is_empty() {
+            message.body_text = format!("{}\n\n-- \n{}", message.body_text.trim_end(), sig.trim());
+        }
+    }
+    let account = state.mail.get_account(message.account_id)?;
+    let provider = state.providers.provider_for(&account.provider)?;
+    let resolved = resolve_attachments(&state, &account, &provider, &message).await?;
     let raw = compose::build_raw(&account, &message, resolved)?;
     provider
         .send(&account, raw, message.thread_id.as_deref())
         .await?;
+    if let Some(d) = &message.draft_id {
+        if let Err(e) = provider.delete_draft(&account, d).await {
+            tracing::warn!(%e, "could not delete draft after send");
+        }
+    }
     // Pull the sent copy into the local store so it shows up under Sent.
     spawn_sync(state.app.clone(), account.id);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn mail_save_draft(state: State<'_, AppState>, message: OutgoingMessage) -> Result<String> {
+    let account = state.mail.get_account(message.account_id)?;
+    let provider = state.providers.provider_for(&account.provider)?;
+    let resolved = resolve_attachments(&state, &account, &provider, &message).await?;
+    let raw = compose::build_raw_lenient(&account, &message, resolved)?;
+    provider
+        .save_draft(&account, raw, message.thread_id.as_deref(), message.draft_id.as_deref())
+        .await
+}
+
+#[tauri::command]
+pub async fn mail_discard_draft(state: State<'_, AppState>, account_id: i64, draft_id: String) -> Result<()> {
+    let account = state.mail.get_account(account_id)?;
+    let provider = state.providers.provider_for(&account.provider)?;
+    provider.delete_draft(&account, &draft_id).await?;
+    spawn_sync(state.app.clone(), account_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn mail_open_draft(state: State<'_, AppState>, message_id: i64) -> Result<DraftContent> {
+    let detail = state.mail.get_message(message_id)?;
+    let account = state.mail.get_account(detail.summary.account_id)?;
+    let provider = state.providers.provider_for(&account.provider)?;
+    provider.open_draft(&account, &detail.summary.remote_id).await
 }
 
 /// Downloads an attachment into the user's Downloads folder and returns the

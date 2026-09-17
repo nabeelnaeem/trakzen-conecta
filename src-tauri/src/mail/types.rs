@@ -135,6 +135,21 @@ pub struct MailFilter {
     pub forward: Option<String>,
 }
 
+/// A server-side draft opened for editing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftContent {
+    pub draft_id: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub bcc: Vec<String>,
+    pub subject: String,
+    pub body_text: String,
+    pub thread_id: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub references: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Contact {
@@ -384,6 +399,9 @@ pub struct OutgoingMessage {
     pub thread_id: Option<String>,
     #[serde(default)]
     pub attachments: Vec<OutgoingAttachment>,
+    /// Server draft this message was edited from; deleted after sending.
+    #[serde(default)]
+    pub draft_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
