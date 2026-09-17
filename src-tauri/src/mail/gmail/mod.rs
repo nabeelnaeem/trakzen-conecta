@@ -1,0 +1,303 @@
+mod api;
+mod auth;
+
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use futures::{stream, StreamExt};
+
+use crate::db::Db;
+use crate::error::{AppError, Result};
+
+use super::store::MailStore;
+use super::types::*;
+use super::{MailProvider, SyncObserver};
+use api::{ApiError, GmailApi};
+use auth::GmailAuth;
+
+/// How many messages the first sync pulls. Everything older is fetched on
+/// demand later (roadmap: "load more" paging against the server).
+const INITIAL_SYNC_LIMIT: usize = 300;
+const FETCH_CONCURRENCY: usize = 8;
+
+pub struct GmailProvider {
+    auth: GmailAuth,
+    api: GmailApi,
+}
+
+impl GmailProvider {
+    pub fn new(db: Arc<Db>) -> Self {
+        let http = reqwest::Client::builder()
+            .user_agent(concat!("trakzen-conecta/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("reqwest client");
+        Self {
+            auth: GmailAuth::new(db, http.clone()),
+            api: GmailApi::new(http),
+        }
+    }
+
+    async fn token(&self, account: &Account) -> Result<String> {
+        self.auth.access_token(&account.email).await
+    }
+
+    async fn fetch_and_store(
+        &self,
+        token: &str,
+        account: &Account,
+        store: &MailStore,
+        ids: Vec<String>,
+        observe: SyncObserver<'_>,
+    ) -> Result<()> {
+        let total = ids.len();
+        let mut done = 0usize;
+        let mut batch: Vec<RemoteMessage> = Vec::with_capacity(32);
+        let mut gone: Vec<String> = Vec::new();
+
+        let mut results = stream::iter(ids)
+            .map(|id| async move { (id.clone(), self.api.get_metadata(token, &id).await) })
+            .buffer_unordered(FETCH_CONCURRENCY);
+
+        while let Some((id, res)) = results.next().await {
+            match res? {
+                Some(m) => batch.push(m),
+                None => gone.push(id),
+            }
+            done += 1;
+            if batch.len() >= 32 {
+                store.upsert_messages(account.id, &batch)?;
+                batch.clear();
+                observe(SyncEvent::Progress {
+                    account_id: account.id,
+                    done,
+                    total,
+                });
+            }
+        }
+        if !batch.is_empty() {
+            store.upsert_messages(account.id, &batch)?;
+        }
+        if !gone.is_empty() {
+            store.delete_messages(account.id, &gone)?;
+        }
+        observe(SyncEvent::Progress {
+            account_id: account.id,
+            done,
+            total,
+        });
+        Ok(())
+    }
+
+    async fn full_sync(
+        &self,
+        token: &str,
+        account: &Account,
+        store: &MailStore,
+        observe: SyncObserver<'_>,
+    ) -> Result<()> {
+        // Grab the cursor *before* listing so nothing that lands mid-sync
+        // falls between the initial pull and the first history pass.
+        let profile = self.api.profile(token).await?;
+
+        let mut ids = Vec::new();
+        let mut page = None;
+        while ids.len() < INITIAL_SYNC_LIMIT {
+            let want = (INITIAL_SYNC_LIMIT - ids.len()).min(500) as u32;
+            let list = self.api.list_ids(token, None, want, page.as_deref()).await?;
+            ids.extend(list.messages.into_iter().map(|m| m.id));
+            match list.next_page_token {
+                Some(t) => page = Some(t),
+                None => break,
+            }
+        }
+
+        let known: HashSet<String> = store.known_remote_ids(account.id)?.into_iter().collect();
+        let fresh: Vec<String> = ids.iter().filter(|id| !known.contains(*id)).cloned().collect();
+        let refresh: Vec<String> = ids.iter().filter(|id| known.contains(*id)).cloned().collect();
+
+        // New messages first so the inbox fills in quickly; label refreshes
+        // for ones we already have can trail behind.
+        self.fetch_and_store(token, account, store, fresh, observe).await?;
+        self.fetch_and_store(token, account, store, refresh, observe).await?;
+
+        // One cheap ids-only query gives us the paperclip icon without
+        // pulling full payloads for every message.
+        let with_att = self
+            .api
+            .list_ids(token, Some("has:attachment"), 500, None)
+            .await?;
+        let ids: Vec<String> = with_att.messages.into_iter().map(|m| m.id).collect();
+        store.mark_has_attachments(account.id, &ids)?;
+
+        store.set_cursor(account.id, Some(&profile.history_id))?;
+        Ok(())
+    }
+
+    /// Returns `Ok(false)` when the cursor is too old and a full sync is needed.
+    async fn incremental_sync(
+        &self,
+        token: &str,
+        account: &Account,
+        store: &MailStore,
+        cursor: &str,
+        observe: SyncObserver<'_>,
+    ) -> Result<bool> {
+        let mut touched: HashSet<String> = HashSet::new();
+        let mut deleted: HashSet<String> = HashSet::new();
+        let mut latest = cursor.to_string();
+        let mut page = None;
+
+        loop {
+            let hp = match self.api.history(token, cursor, page.as_deref()).await {
+                Ok(hp) => hp,
+                Err(ApiError::NotFound) => return Ok(false),
+                Err(ApiError::Other(e)) => return Err(e),
+            };
+            if let Some(h) = hp.history_id {
+                latest = h;
+            }
+            for rec in &hp.history {
+                for key in ["messagesAdded", "labelsAdded", "labelsRemoved"] {
+                    if let Some(items) = rec[key].as_array() {
+                        for it in items {
+                            if let Some(id) = it["message"]["id"].as_str() {
+                                touched.insert(id.to_string());
+                            }
+                        }
+                    }
+                }
+                if let Some(items) = rec["messagesDeleted"].as_array() {
+                    for it in items {
+                        if let Some(id) = it["message"]["id"].as_str() {
+                            deleted.insert(id.to_string());
+                            touched.remove(id);
+                        }
+                    }
+                }
+            }
+            match hp.next_page_token {
+                Some(t) => page = Some(t),
+                None => break,
+            }
+        }
+
+        if !deleted.is_empty() {
+            store.delete_messages(account.id, &deleted.into_iter().collect::<Vec<_>>())?;
+        }
+        let ids: Vec<String> = touched.into_iter().collect();
+        self.fetch_and_store(token, account, store, ids, observe).await?;
+        store.set_cursor(account.id, Some(&latest))?;
+        Ok(true)
+    }
+}
+
+#[async_trait]
+impl MailProvider for GmailProvider {
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::Gmail
+    }
+
+    async fn login(&self, app: &tauri::AppHandle, store: &MailStore) -> Result<Account> {
+        let tokens = self.auth.login(app).await?;
+        let profile = self.api.profile(&tokens.access_token).await?;
+        self.auth.store_tokens(&profile.email_address, tokens)?;
+        store.upsert_account(ProviderKind::Gmail.as_str(), &profile.email_address, None)
+    }
+
+    async fn logout(&self, account: &Account) -> Result<()> {
+        self.auth.logout(&account.email).await
+    }
+
+    async fn sync(
+        &self,
+        account: &Account,
+        store: &MailStore,
+        observe: SyncObserver<'_>,
+    ) -> Result<()> {
+        let token = self.token(account).await?;
+        let full = match &account.sync_cursor {
+            Some(cursor) => {
+                observe(SyncEvent::Started {
+                    account_id: account.id,
+                    full: false,
+                });
+                !self
+                    .incremental_sync(&token, account, store, cursor, observe)
+                    .await?
+            }
+            None => true,
+        };
+        if full {
+            observe(SyncEvent::Started {
+                account_id: account.id,
+                full: true,
+            });
+            self.full_sync(&token, account, store, observe).await?;
+        }
+        Ok(())
+    }
+
+    async fn fetch_body(&self, account: &Account, remote_id: &str) -> Result<RemoteBody> {
+        let token = self.token(account).await?;
+        self.api.get_full(&token, remote_id).await
+    }
+
+    async fn fetch_attachment(
+        &self,
+        account: &Account,
+        remote_id: &str,
+        attachment_remote_id: &str,
+    ) -> Result<Vec<u8>> {
+        let token = self.token(account).await?;
+        self.api
+            .get_attachment(&token, remote_id, attachment_remote_id)
+            .await
+    }
+
+    async fn send(&self, account: &Account, raw: Vec<u8>, thread_id: Option<&str>) -> Result<()> {
+        let token = self.token(account).await?;
+        self.api.send(&token, &raw, thread_id).await
+    }
+
+    async fn set_flags(&self, account: &Account, remote_id: &str, flags: FlagChange) -> Result<()> {
+        let token = self.token(account).await?;
+        let mut add = Vec::new();
+        let mut remove = Vec::new();
+        match flags.read {
+            Some(true) => remove.push("UNREAD"),
+            Some(false) => add.push("UNREAD"),
+            None => {}
+        }
+        match flags.starred {
+            Some(true) => add.push("STARRED"),
+            Some(false) => remove.push("STARRED"),
+            None => {}
+        }
+        if add.is_empty() && remove.is_empty() {
+            return Ok(());
+        }
+        self.api.modify_labels(&token, remote_id, &add, &remove).await
+    }
+
+    async fn trash(&self, account: &Account, remote_id: &str) -> Result<()> {
+        let token = self.token(account).await?;
+        self.api.trash(&token, remote_id).await
+    }
+
+    async fn archive(&self, account: &Account, remote_id: &str) -> Result<()> {
+        let token = self.token(account).await?;
+        self.api
+            .modify_labels(&token, remote_id, &[], &["INBOX"])
+            .await
+    }
+}
+
+impl From<ApiError> for AppError {
+    fn from(e: ApiError) -> Self {
+        match e {
+            ApiError::NotFound => AppError::NotFound("gmail resource".into()),
+            ApiError::Other(e) => e,
+        }
+    }
+}

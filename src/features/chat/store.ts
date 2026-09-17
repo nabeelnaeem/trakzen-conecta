@@ -1,0 +1,169 @@
+import { create } from "zustand";
+import { chat, errorMessage } from "../../lib/ipc";
+import type { ChatMessage, ChatStatus, Identity, Peer, TransferProgress } from "../../lib/types";
+
+interface ChatState {
+  identity: Identity | null;
+  status: ChatStatus | null;
+  peers: Peer[];
+  activePeerId: number | null;
+  messages: ChatMessage[];
+  transfers: Record<string, TransferProgress>;
+  error: string | null;
+  initialised: boolean;
+
+  init: () => Promise<void>;
+  refreshIdentity: () => Promise<void>;
+  loadPeers: () => Promise<void>;
+  selectPeer: (id: number | null) => Promise<void>;
+  addPeer: (name: string, host: string, port?: number) => Promise<void>;
+  removePeer: (id: number) => Promise<void>;
+  sendText: (body: string) => Promise<void>;
+  sendFile: (path: string) => Promise<void>;
+  clearError: () => void;
+}
+
+function upsertMessage(list: ChatMessage[], m: ChatMessage): ChatMessage[] {
+  const i = list.findIndex((x) => x.msgId === m.msgId);
+  if (i === -1) return [...list, m];
+  const next = list.slice();
+  next[i] = m;
+  return next;
+}
+
+export const useChat = create<ChatState>((set, get) => ({
+  identity: null,
+  status: null,
+  peers: [],
+  activePeerId: null,
+  messages: [],
+  transfers: {},
+  error: null,
+  initialised: false,
+
+  init: async () => {
+    if (get().initialised) return;
+    set({ initialised: true });
+    try {
+      set({ identity: await chat.identity() });
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+    await get().loadPeers();
+
+    await chat.onStatus((status) => {
+      set({ status });
+      void chat.identity().then((identity) => set({ identity }));
+    });
+    await chat.onPeer((p) => {
+      const peers = get().peers;
+      const i = peers.findIndex((x) => x.id === p.id);
+      if (i === -1) {
+        set({ peers: [p, ...peers] });
+      } else {
+        const next = peers.slice();
+        next[i] = p;
+        set({ peers: next });
+      }
+      // A merge may have retired a duplicate row; refresh to drop it.
+      if (p.peerId && peers.some((x) => x.id !== p.id && x.peerId === p.peerId)) {
+        void get().loadPeers();
+      }
+    });
+    await chat.onMessage((m) => {
+      const { activePeerId, messages } = get();
+      if (m.peerId === activePeerId) {
+        set({ messages: upsertMessage(messages, m) });
+        if (m.direction === "in" && m.status === "unread") void chat.markRead(m.peerId);
+      }
+      void get().loadPeers();
+    });
+    await chat.onTransfer((t) => {
+      const transfers = { ...get().transfers };
+      if (t.state === "active") transfers[t.msgId] = t;
+      else delete transfers[t.msgId];
+      set({ transfers });
+    });
+  },
+
+  refreshIdentity: async () => {
+    try {
+      set({ identity: await chat.identity() });
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+  },
+
+  loadPeers: async () => {
+    try {
+      set({ peers: await chat.listPeers() });
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+  },
+
+  selectPeer: async (id) => {
+    set({ activePeerId: id, messages: [] });
+    if (id === null) return;
+    try {
+      const messages = await chat.listMessages(id, 200);
+      if (get().activePeerId !== id) return;
+      set({ messages });
+      await chat.markRead(id);
+      set({ peers: get().peers.map((p) => (p.id === id ? { ...p, unread: 0 } : p)) });
+      void chat.connectPeer(id);
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+  },
+
+  addPeer: async (name, host, port) => {
+    try {
+      const p = await chat.addPeer(name, host, port);
+      set({ peers: [p, ...get().peers.filter((x) => x.id !== p.id)] });
+      await get().selectPeer(p.id);
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+  },
+
+  removePeer: async (id) => {
+    try {
+      await chat.removePeer(id);
+      set({
+        peers: get().peers.filter((p) => p.id !== id),
+        activePeerId: get().activePeerId === id ? null : get().activePeerId,
+        messages: get().activePeerId === id ? [] : get().messages,
+      });
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+  },
+
+  sendText: async (body) => {
+    const id = get().activePeerId;
+    if (id === null || !body.trim()) return;
+    try {
+      const m = await chat.sendText(id, body);
+      set({ messages: upsertMessage(get().messages, m) });
+    } catch (e) {
+      // The failed message is already in the DB with status=failed and an
+      // event has updated the list; just surface the reason.
+      set({ error: errorMessage(e) });
+      void get().selectPeer(id);
+    }
+  },
+
+  sendFile: async (path) => {
+    const id = get().activePeerId;
+    if (id === null) return;
+    try {
+      const m = await chat.sendFile(id, path);
+      set({ messages: upsertMessage(get().messages, m) });
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+  },
+
+  clearError: () => set({ error: null }),
+}));

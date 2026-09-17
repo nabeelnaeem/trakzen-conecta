@@ -1,0 +1,172 @@
+// Mirrors the serde shapes in src-tauri/src/{mail,chat}/types.rs.
+
+// ---- mail -----------------------------------------------------------------
+
+export type ProviderKind = "gmail";
+
+export interface Account {
+  id: number;
+  provider: ProviderKind;
+  email: string;
+  displayName: string | null;
+  syncCursor: string | null;
+}
+
+export type Folder =
+  | "inbox"
+  | "starred"
+  | "sent"
+  | "drafts"
+  | "archive"
+  | "trash"
+  | "all";
+
+export interface MessageSummary {
+  id: number;
+  accountId: number;
+  remoteId: string;
+  threadId: string | null;
+  subject: string;
+  fromName: string;
+  fromAddr: string;
+  toAddrs: string;
+  ccAddrs: string;
+  snippet: string;
+  date: number;
+  labels: string[];
+  isRead: boolean;
+  isStarred: boolean;
+  hasAttachments: boolean;
+}
+
+export interface AttachmentInfo {
+  id: number;
+  remoteId: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+}
+
+export interface MessageDetail extends MessageSummary {
+  bodyHtml: string | null;
+  bodyText: string | null;
+  messageIdHdr: string | null;
+  referencesHdr: string | null;
+  attachments: AttachmentInfo[];
+}
+
+export interface FlagChange {
+  read?: boolean | null;
+  starred?: boolean | null;
+}
+
+export type SyncEvent =
+  | { type: "started"; accountId: number; full: boolean }
+  | { type: "progress"; accountId: number; done: number; total: number }
+  | { type: "finished"; accountId: number }
+  | { type: "failed"; accountId: number; error: string };
+
+export type OutgoingAttachment =
+  | { kind: "path"; path: string }
+  | { kind: "stored"; messageId: number; attachmentId: number };
+
+export interface OutgoingMessage {
+  accountId: number;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  bodyText: string;
+  quotedHtml?: string | null;
+  inReplyTo?: string | null;
+  references?: string | null;
+  threadId?: string | null;
+  attachments: OutgoingAttachment[];
+}
+
+export type ReplyMode = "reply" | "reply-all" | "forward";
+
+export interface ComposeDraft {
+  accountId: number;
+  to: string[];
+  cc: string[];
+  subject: string;
+  quotedHtml: string | null;
+  quotedText: string;
+  inReplyTo: string | null;
+  references: string | null;
+  threadId: string | null;
+  attachments: OutgoingAttachment[];
+  attachmentNames: string[];
+}
+
+// ---- chat -----------------------------------------------------------------
+
+export interface Identity {
+  peerId: string;
+  displayName: string;
+  port: number;
+  addresses: string[];
+  listening: boolean;
+}
+
+export interface Peer {
+  id: number;
+  peerId: string | null;
+  displayName: string;
+  host: string;
+  port: number;
+  lastSeen: number | null;
+  online: boolean;
+  unread: number;
+  lastMessage: string | null;
+  lastMessageAt: number | null;
+}
+
+export interface ChatMessage {
+  id: number;
+  msgId: string;
+  peerId: number;
+  direction: "in" | "out";
+  kind: "text" | "file";
+  body: string;
+  fileName: string | null;
+  filePath: string | null;
+  fileSize: number | null;
+  status: string;
+  createdAt: number;
+}
+
+export interface TransferProgress {
+  transferId: string;
+  msgId: string;
+  peerId: number;
+  direction: "in" | "out";
+  fileName: string;
+  bytesDone: number;
+  bytesTotal: number;
+  state: "active" | "done" | "failed";
+}
+
+export interface ChatStatus {
+  listening: boolean;
+  error?: string;
+}
+
+// ---- settings -------------------------------------------------------------
+
+export interface SettingsView {
+  googleClientId: string;
+  googleClientSecretSet: boolean;
+  chatDisplayName: string;
+  chatPort: number;
+  chatDownloadDir: string;
+}
+
+export interface SettingsPatch {
+  googleClientId?: string;
+  googleClientSecret?: string;
+  chatDisplayName?: string;
+  chatPort?: number;
+  chatDownloadDir?: string;
+}
