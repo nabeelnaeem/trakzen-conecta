@@ -213,7 +213,7 @@ impl MailStore {
         // View -> label predicate. Gmail semantics for now; when a second
         // provider lands this moves behind the trait.
         let filter = match (&query.label, query.folder, query.category) {
-            (Some(_), _, _) => "has_label(labels, ?4) AND NOT has_label(labels, 'TRASH')".to_string(),
+            (Some(_), _, _) => "NOT has_label(labels, 'TRASH')".to_string(),
             (None, Folder::Inbox, Some(Category::Primary)) => {
                 "has_label(labels, 'INBOX') AND NOT has_label(labels, 'TRASH')
                  AND NOT has_label(labels, 'CATEGORY_SOCIAL')
@@ -243,9 +243,10 @@ impl MailStore {
                 "NOT has_label(labels, 'TRASH') AND NOT has_label(labels, 'SPAM')".to_string()
             }
         };
+        // ?4 is bound in every branch so the parameter count is constant.
         let sql = format!(
             "SELECT {SUMMARY_COLS} FROM mail_messages
-             WHERE account_id = ?1 AND {filter}
+             WHERE account_id = ?1 AND (?4 = '' OR has_label(labels, ?4)) AND {filter}
              ORDER BY date DESC LIMIT ?2 OFFSET ?3"
         );
         let conn = self.db.conn();
@@ -529,4 +530,68 @@ pub fn register_sql_functions(conn: &rusqlite::Connection) -> rusqlite::Result<(
         Ok(serde_json::to_string(&parsed).unwrap_or_else(|_| "[]".into()))
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> MailStore {
+        let dir = std::env::temp_dir().join(format!("tc-test-{}", uuid::Uuid::new_v4()));
+        MailStore::new(Arc::new(Db::open(&dir).unwrap()))
+    }
+
+    fn msg(id: &str, labels: &[&str]) -> RemoteMessage {
+        RemoteMessage {
+            remote_id: id.into(),
+            labels: labels.iter().map(|l| l.to_string()).collect(),
+            is_read: !labels.contains(&"UNREAD"),
+            is_starred: labels.contains(&"STARRED"),
+            date: 1,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn every_view_queries_without_param_errors() {
+        let store = store();
+        let acc = store.upsert_account("gmail", "a@b.c", None).unwrap();
+        store
+            .upsert_messages(
+                acc.id,
+                &[
+                    msg("1", &["INBOX", "UNREAD"]),
+                    msg("2", &["INBOX", "CATEGORY_PROMOTIONS"]),
+                    msg("3", &["SENT"]),
+                    msg("4", &["Label_7", "STARRED"]),
+                    msg("5", &["TRASH"]),
+                ],
+            )
+            .unwrap();
+
+        let list = |folder, category, label: Option<&str>| {
+            let q = ListQuery {
+                folder,
+                category,
+                label: label.map(str::to_string),
+            };
+            store
+                .list_messages(acc.id, &q, 50, 0)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.remote_id)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(list(Folder::Inbox, None, None).len(), 2);
+        assert_eq!(list(Folder::Inbox, Some(Category::Primary), None), vec!["1"]);
+        assert_eq!(list(Folder::Inbox, Some(Category::Promotions), None), vec!["2"]);
+        assert_eq!(list(Folder::Sent, None, None), vec!["3"]);
+        assert_eq!(list(Folder::Starred, None, None), vec!["4"]);
+        assert_eq!(list(Folder::Trash, None, None), vec!["5"]);
+        assert_eq!(list(Folder::Archive, None, None), vec!["4"]);
+        assert_eq!(list(Folder::All, None, None).len(), 4);
+        assert_eq!(list(Folder::Drafts, None, None).len(), 0);
+        assert_eq!(list(Folder::Inbox, None, Some("Label_7")), vec!["4"]);
+    }
 }
