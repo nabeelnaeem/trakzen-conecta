@@ -44,8 +44,6 @@ export interface PendingSend {
   timer: number;
 }
 
-const PAGE = 100;
-
 const threadKey = (m: MessageSummary) => m.threadId ?? m.remoteId;
 
 interface MailState {
@@ -138,6 +136,7 @@ const splitList = (s: string) =>
     .filter(Boolean);
 
 let lastSelectedId: number | null = null;
+let fetchSeq = 0;
 let draftTimer: number | null = null;
 
 const emptyComposer = (accountId: number): ComposerState => ({
@@ -315,8 +314,8 @@ export const useMail = create<MailState>((set, get) => ({
     const activeAccountId =
       active !== null && accounts.some((a) => a.id === active) ? active : (accounts[0]?.id ?? null);
     set({ accounts, activeAccountId });
-    await Promise.all([get().refresh(), get().loadLabels()]);
-    void get().fetchFromServer(true);
+    await get().loadLabels();
+    await get().fetchFromServer(true);
   },
 
   loadLabels: async () => {
@@ -338,27 +337,23 @@ export const useMail = create<MailState>((set, get) => ({
   },
 
   setAccount: (id) => {
-    set({ activeAccountId: id, openId: null, thread: [], expanded: [], selected: [], search: "", label: null });
-    void get().refresh();
+    set({ activeAccountId: id, openId: null, thread: [], expanded: [], selected: [], search: "", label: null, messages: [] });
     void get().loadLabels();
     void get().fetchFromServer(true);
   },
 
   setFolder: (folder) => {
-    set({ folder, label: null, openId: null, thread: [], expanded: [], selected: [], allInView: false, viewCount: null, search: "", serverSearch: false, hasMore: true });
-    void get().refresh();
+    set({ folder, label: null, openId: null, thread: [], expanded: [], selected: [], allInView: false, viewCount: null, search: "", serverSearch: false, hasMore: true, messages: [] });
     void get().fetchFromServer(true);
   },
 
   setCategory: (category) => {
-    set({ category, folder: "inbox", label: null, openId: null, thread: [], expanded: [], selected: [], allInView: false, viewCount: null, search: "", serverSearch: false, hasMore: true });
-    void get().refresh();
+    set({ category, folder: "inbox", label: null, openId: null, thread: [], expanded: [], selected: [], allInView: false, viewCount: null, search: "", serverSearch: false, hasMore: true, messages: [] });
     void get().fetchFromServer(true);
   },
 
   setLabel: (remoteId) => {
-    set({ label: remoteId, openId: null, thread: [], expanded: [], selected: [], allInView: false, viewCount: null, search: "", serverSearch: false, hasMore: true });
-    void get().refresh();
+    set({ label: remoteId, openId: null, thread: [], expanded: [], selected: [], allInView: false, viewCount: null, search: "", serverSearch: false, hasMore: true, messages: [] });
     void get().fetchFromServer(true);
   },
 
@@ -390,7 +385,6 @@ export const useMail = create<MailState>((set, get) => ({
     }
     if (serverSearch) return;
     try {
-      const limit = Math.max(PAGE, get().messages.length);
       if (folder === "snoozed" && !search.trim()) {
         const [snoozed, unread] = await Promise.all([mail.listSnoozed(activeAccountId), mail.unreadCount(activeAccountId)]);
         set({ snoozed, messages: snoozed, unread, hasMore: false });
@@ -399,7 +393,7 @@ export const useMail = create<MailState>((set, get) => ({
       const [messages, unread] = await Promise.all([
         search.trim()
           ? mail.search(activeAccountId, search)
-          : mail.listMessages(activeAccountId, get().query(), limit, 0, conversations),
+          : mail.listMessages(activeAccountId, get().query(), 5000, 0, conversations),
         mail.unreadCount(activeAccountId),
       ]);
       set({ messages, unread });
@@ -412,33 +406,36 @@ export const useMail = create<MailState>((set, get) => ({
   // into the local cache; the list then re-reads from the cache.
   fetchFromServer: async (reset) => {
     const id = get().activeAccountId;
-    if (id === null || get().fetching || get().folder === "snoozed") return;
+    if (id === null) return;
+    if (get().folder === "snoozed") {
+      await get().refresh();
+      return;
+    }
+    // A newer request (view switch) supersedes this one; "load more" while
+    // a page is already loading is simply ignored.
+    if (!reset && get().fetching) return;
+    const seq = ++fetchSeq;
     const query = get().query();
     set({ fetching: true });
     try {
       const r = await mail.fetchMore(id, query, reset);
-      // The view may have changed while we were waiting.
-      if (JSON.stringify(get().query()) !== JSON.stringify(query)) return;
+      if (seq !== fetchSeq) return;
       set({ hasMore: r.hasMore });
-      if (r.added > 0) {
-        await get().refresh();
-        void get().loadLabels();
-      }
+      await get().refresh();
+      if (r.added > 0) void get().loadLabels();
     } catch (e) {
+      if (seq !== fetchSeq) return;
+      // Offline or failed: fall back to whatever is cached.
       set({ error: errorMessage(e), hasMore: false });
+      await get().refresh();
     } finally {
-      set({ fetching: false });
+      if (seq === fetchSeq) set({ fetching: false });
     }
   },
 
+  // Each page comes from the server so the list stays continuous by date.
   loadMore: async () => {
-    const id = get().activeAccountId;
-    if (id === null) return;
-    // Show whatever the cache already has beyond the current window first.
-    const before = get().messages.length;
-    const more = await mail.listMessages(id, get().query(), before + PAGE, 0, get().conversations);
-    set({ messages: more });
-    if (more.length < before + PAGE) await get().fetchFromServer(false);
+    await get().fetchFromServer(false);
   },
 
   open: async (id) => {

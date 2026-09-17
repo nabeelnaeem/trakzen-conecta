@@ -355,6 +355,20 @@ impl MailStore {
         offset: i64,
         conversations: bool,
     ) -> Result<Vec<MessageSummary>> {
+        self.list_messages_since(account_id, query, limit, offset, conversations, 0)
+    }
+
+    /// `min_date` hides cached rows older than what the server has been
+    /// paged to for this view, so the list never skips a gap.
+    pub fn list_messages_since(
+        &self,
+        account_id: i64,
+        query: &ListQuery,
+        limit: i64,
+        offset: i64,
+        conversations: bool,
+        min_date: i64,
+    ) -> Result<Vec<MessageSummary>> {
         // View -> label predicate. Gmail semantics for now; when a second
         // provider lands this moves behind the trait.
         let filter = match (&query.label, query.folder, query.category) {
@@ -406,7 +420,7 @@ impl MailStore {
             format!(
                 "WITH hits AS (
                     SELECT id, COALESCE(thread_id, remote_id) AS tid, date FROM mail_messages
-                    WHERE account_id = ?1 AND (?4 = '' OR has_label(labels, ?4)) AND {filter}{snooze}
+                    WHERE account_id = ?1 AND date >= ?5 AND (?4 = '' OR has_label(labels, ?4)) AND {filter}{snooze}
                  ),
                  newest AS (
                     SELECT id, tid, ROW_NUMBER() OVER (PARTITION BY tid ORDER BY date DESC, id DESC) rn
@@ -424,7 +438,7 @@ impl MailStore {
         } else {
             format!(
                 "SELECT {SUMMARY_COLS} FROM mail_messages
-                 WHERE account_id = ?1 AND (?4 = '' OR has_label(labels, ?4)) AND {filter}{snooze}
+                 WHERE account_id = ?1 AND date >= ?5 AND (?4 = '' OR has_label(labels, ?4)) AND {filter}{snooze}
                  ORDER BY date DESC LIMIT ?2 OFFSET ?3"
             )
         };
@@ -432,13 +446,27 @@ impl MailStore {
         let mut stmt = conn.prepare_cached(&sql)?;
         let label = query.label.clone().unwrap_or_default();
         let rows = if conversations {
-            stmt.query_map(params![account_id, limit, offset, label], row_to_thread_summary)?
+            stmt.query_map(params![account_id, limit, offset, label, min_date], row_to_thread_summary)?
                 .collect::<rusqlite::Result<_>>()?
         } else {
-            stmt.query_map(params![account_id, limit, offset, label], row_to_summary)?
+            stmt.query_map(params![account_id, limit, offset, label, min_date], row_to_summary)?
                 .collect::<rusqlite::Result<_>>()?
         };
         Ok(rows)
+    }
+
+    pub fn oldest_date_of(&self, account_id: i64, remote_ids: &[String]) -> Result<Option<i64>> {
+        if remote_ids.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.db.conn();
+        let json = serde_json::to_string(remote_ids)?;
+        Ok(conn.query_row(
+            "SELECT MIN(date) FROM mail_messages
+             WHERE account_id = ?1 AND remote_id IN (SELECT value FROM json_each(?2))",
+            params![account_id, json],
+            |r| r.get::<_, Option<i64>>(0),
+        )?)
     }
 
     /// Every message of a thread, oldest first (trash excluded).

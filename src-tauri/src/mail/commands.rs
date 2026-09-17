@@ -17,10 +17,29 @@ pub const EVENT_SYNC: &str = "mail://sync";
 #[derive(Default)]
 pub struct SyncGuard(Mutex<HashSet<i64>>);
 
-/// Server paging position per (account, label). Absent = not started,
-/// `None` = exhausted.
+#[derive(Clone, Default)]
+pub struct PageState {
+    /// `None` once the server has no more pages.
+    pub next: Option<String>,
+    /// The view is complete in the cache down to this date.
+    pub oldest: i64,
+    pub exhausted: bool,
+}
+
+/// Server paging position per (account, label). Absent = not started.
 #[derive(Default)]
-pub struct PageTokens(Mutex<HashMap<(i64, String), Option<String>>>);
+pub struct PageTokens(Mutex<HashMap<(i64, String), PageState>>);
+
+/// Oldest date the list may show for a view without risking a gap.
+fn view_floor(state: &AppState, account_id: i64, query: &ListQuery) -> i64 {
+    let Some(label) = query.label_id() else { return 0 };
+    let tokens = state.page_tokens.0.lock().unwrap();
+    match tokens.get(&(account_id, label)) {
+        Some(p) if p.exhausted => 0,
+        Some(p) => p.oldest,
+        None => 0,
+    }
+}
 
 #[tauri::command]
 pub async fn mail_list_accounts(state: State<'_, AppState>) -> Result<Vec<Account>> {
@@ -100,12 +119,14 @@ pub async fn mail_list_messages(
     offset: Option<i64>,
     conversations: Option<bool>,
 ) -> Result<Vec<MessageSummary>> {
-    state.mail.list_messages_grouped(
+    let floor = view_floor(&state, account_id, &query);
+    state.mail.list_messages_since(
         account_id,
         &query,
-        limit.unwrap_or(100).clamp(1, 1000),
+        limit.unwrap_or(100).clamp(1, 5000),
         offset.unwrap_or(0).max(0),
         conversations.unwrap_or(false),
+        floor,
     )
 }
 
@@ -410,25 +431,35 @@ pub async fn mail_fetch_more(
             tokens.remove(&key);
         }
         match tokens.get(&key) {
-            Some(None) => {
+            Some(p) if p.exhausted => {
                 return Ok(FetchResult {
                     added: 0,
                     has_more: false,
                 })
             }
-            Some(Some(t)) => Some(t.clone()),
+            Some(p) => p.next.clone(),
             None => None,
         }
     };
 
     let account = state.mail.get_account(account_id)?;
     let provider = state.providers.provider_for(&account.provider)?;
-    let (added, next) = provider
+    let page = provider
         .fetch_label_page(&account, &state.mail, &label_id, token.as_deref())
         .await?;
-    let has_more = next.is_some();
-    state.page_tokens.0.lock().unwrap().insert(key, next);
-    Ok(FetchResult { added, has_more })
+    let has_more = page.next_page.is_some();
+    let mut tokens = state.page_tokens.0.lock().unwrap();
+    let entry = tokens.entry(key).or_default();
+    entry.next = page.next_page;
+    entry.exhausted = !has_more;
+    // Only ever move the floor down; an empty page keeps the previous one.
+    if let Some(o) = page.oldest {
+        entry.oldest = if entry.oldest == 0 { o } else { entry.oldest.min(o) };
+    }
+    Ok(FetchResult {
+        added: page.added,
+        has_more,
+    })
 }
 
 #[tauri::command]

@@ -166,6 +166,16 @@ pub struct FetchResult {
     pub has_more: bool,
 }
 
+/// Outcome of one server page for a view.
+#[derive(Debug, Clone, Default)]
+pub struct PageFetched {
+    pub added: usize,
+    pub next_page: Option<String>,
+    /// Date of the oldest message on the page; the view is complete in the
+    /// cache down to this point.
+    pub oldest: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageSummary {

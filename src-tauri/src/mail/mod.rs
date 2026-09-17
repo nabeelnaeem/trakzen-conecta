@@ -136,15 +136,14 @@ pub trait MailProvider: Send + Sync {
     ) -> Result<Vec<String>>;
 
     /// Pulls one page of message metadata for `label_id` (newest first),
-    /// starting at `page_token`, into the store. Returns the number of
-    /// messages that were new locally and the token for the next page.
+    /// starting at `page_token`, into the store.
     async fn fetch_label_page(
         &self,
         account: &Account,
         store: &MailStore,
         label_id: &str,
         page_token: Option<&str>,
-    ) -> Result<(usize, Option<String>)>;
+    ) -> Result<PageFetched>;
 }
 
 pub struct Providers {

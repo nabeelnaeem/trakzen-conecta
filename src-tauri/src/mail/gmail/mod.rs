@@ -549,23 +549,23 @@ impl MailProvider for GmailProvider {
         store: &MailStore,
         label_id: &str,
         page_token: Option<&str>,
-    ) -> Result<(usize, Option<String>)> {
+    ) -> Result<PageFetched> {
         let token = self.token(account).await?;
         let list = self
             .api
             .list_ids_in(&token, Some(label_id), None, 100, page_token)
             .await?;
         let known: HashSet<String> = store.known_remote_ids(account.id)?.into_iter().collect();
-        let fresh: Vec<String> = list
-            .messages
-            .into_iter()
-            .map(|m| m.id)
-            .filter(|id| !known.contains(id))
-            .collect();
+        let all: Vec<String> = list.messages.into_iter().map(|m| m.id).collect();
+        let fresh: Vec<String> = all.iter().filter(|id| !known.contains(*id)).cloned().collect();
         let added = fresh.len();
         let noop = |_: SyncEvent| {};
         self.fetch_and_store(&token, account, store, fresh, &noop).await?;
-        Ok((added, list.next_page_token))
+        Ok(PageFetched {
+            added,
+            oldest: store.oldest_date_of(account.id, &all)?,
+            next_page: list.next_page_token,
+        })
     }
 }
 
