@@ -3,7 +3,7 @@ mod auth;
 
 pub use api::split_mailbox;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -158,10 +158,21 @@ impl GmailProvider {
         cursor: &str,
         observe: SyncObserver<'_>,
     ) -> Result<bool> {
-        let mut touched: HashSet<String> = HashSet::new();
+        // History records carry the message's current labelIds, so label
+        // churn (bulk mark-read, filters, archiving) costs no extra requests:
+        // apply the final snapshot per message and only fetch metadata for
+        // messages we have never seen.
+        let mut added: Vec<String> = Vec::new();
+        let mut snapshots: HashMap<String, Vec<String>> = HashMap::new();
         let mut deleted: HashSet<String> = HashSet::new();
         let mut latest = cursor.to_string();
         let mut page = None;
+
+        let labels_of = |v: &serde_json::Value| -> Option<Vec<String>> {
+            v["labelIds"].as_array().map(|a| {
+                a.iter().filter_map(|l| l.as_str().map(str::to_string)).collect()
+            })
+        };
 
         loop {
             let hp = match self.api.history(token, cursor, page.as_deref()).await {
@@ -173,11 +184,23 @@ impl GmailProvider {
                 latest = h;
             }
             for rec in &hp.history {
-                for key in ["messagesAdded", "labelsAdded", "labelsRemoved"] {
+                if let Some(items) = rec["messagesAdded"].as_array() {
+                    for it in items {
+                        if let Some(id) = it["message"]["id"].as_str() {
+                            added.push(id.to_string());
+                            if let Some(l) = labels_of(&it["message"]) {
+                                snapshots.insert(id.to_string(), l);
+                            }
+                        }
+                    }
+                }
+                for key in ["labelsAdded", "labelsRemoved"] {
                     if let Some(items) = rec[key].as_array() {
                         for it in items {
-                            if let Some(id) = it["message"]["id"].as_str() {
-                                touched.insert(id.to_string());
+                            if let (Some(id), Some(l)) =
+                                (it["message"]["id"].as_str(), labels_of(&it["message"]))
+                            {
+                                snapshots.insert(id.to_string(), l);
                             }
                         }
                     }
@@ -186,7 +209,7 @@ impl GmailProvider {
                     for it in items {
                         if let Some(id) = it["message"]["id"].as_str() {
                             deleted.insert(id.to_string());
-                            touched.remove(id);
+                            snapshots.remove(id);
                         }
                     }
                 }
@@ -198,9 +221,24 @@ impl GmailProvider {
         }
 
         if !deleted.is_empty() {
-            store.delete_messages(account.id, &deleted.into_iter().collect::<Vec<_>>())?;
+            store.delete_messages(account.id, &deleted.iter().cloned().collect::<Vec<_>>())?;
         }
-        let ids: Vec<String> = touched.into_iter().collect();
+        added.retain(|id| !deleted.contains(id));
+
+        let snaps: Vec<(String, Vec<String>)> = snapshots.into_iter().collect();
+        let unknown = store.apply_label_snapshots(account.id, &snaps)?;
+
+        // Fetch: newly added messages plus any label-changed message we do
+        // not have but which is (now) in the inbox — those are worth having.
+        let unknown: HashSet<String> = unknown.into_iter().collect();
+        let mut ids: Vec<String> = added.iter().filter(|id| unknown.contains(*id)).cloned().collect();
+        for (id, labels) in &snaps {
+            if unknown.contains(id) && !ids.contains(id) && labels.iter().any(|l| l == "INBOX") {
+                ids.push(id.clone());
+            }
+        }
+        ids.sort();
+        ids.dedup();
         let fresh = self.fetch_and_store(token, account, store, ids, observe).await?;
         store.set_cursor(account.id, Some(&latest))?;
 

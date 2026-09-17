@@ -18,6 +18,21 @@ pub static B64: GeneralPurpose = GeneralPurpose::new(
 
 pub struct GmailApi {
     http: reqwest::Client,
+    /// Next moment a request may start. Gmail allows 15,000 quota units per
+    /// user per minute; spacing calls ~25 ms apart keeps bursts of 5-unit
+    /// metadata fetches around 12,000/min with headroom for everything else.
+    next_slot: tokio::sync::Mutex<tokio::time::Instant>,
+}
+
+const PACE: std::time::Duration = std::time::Duration::from_millis(25);
+const RETRIES: u32 = 4;
+
+fn is_rate_limited(status: u16, body: &str) -> bool {
+    status == 429
+        || (status == 403
+            && (body.contains("rateLimitExceeded")
+                || body.contains("userRateLimitExceeded")
+                || body.contains("Quota exceeded")))
 }
 
 #[derive(Deserialize)]
@@ -57,7 +72,43 @@ pub enum ApiError {
 
 impl GmailApi {
     pub fn new(http: reqwest::Client) -> Self {
-        Self { http }
+        Self {
+            http,
+            next_slot: tokio::sync::Mutex::new(tokio::time::Instant::now()),
+        }
+    }
+
+    async fn pace(&self) {
+        let slot = {
+            let mut next = self.next_slot.lock().await;
+            let now = tokio::time::Instant::now();
+            let slot = if *next > now { *next } else { now };
+            *next = slot + PACE;
+            slot
+        };
+        tokio::time::sleep_until(slot).await;
+    }
+
+    /// Sends a request, backing off and retrying when Gmail throttles.
+    async fn send_with_retry(
+        &self,
+        build: impl Fn() -> reqwest::RequestBuilder,
+    ) -> Result<(u16, String)> {
+        let mut delay = std::time::Duration::from_secs(2);
+        for attempt in 0..=RETRIES {
+            self.pace().await;
+            let res = build().send().await?;
+            let status = res.status().as_u16();
+            let body = res.text().await.unwrap_or_default();
+            if is_rate_limited(status, &body) && attempt < RETRIES {
+                tracing::warn!(attempt, ?delay, "gmail rate limited, backing off");
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+                continue;
+            }
+            return Ok((status, body));
+        }
+        unreachable!()
     }
 
     async fn get_json(&self, token: &str, path: &str, query: &[(&str, &str)]) -> Result<Value> {
@@ -75,71 +126,51 @@ impl GmailApi {
         path: &str,
         query: &[(&str, &str)],
     ) -> std::result::Result<Value, ApiError> {
-        let res = self
-            .http
-            .get(format!("{BASE}/{path}"))
-            .bearer_auth(token)
-            .query(query)
-            .send()
+        let url = format!("{BASE}/{path}");
+        let (status, body) = self
+            .send_with_retry(|| self.http.get(&url).bearer_auth(token).query(query))
             .await
-            .map_err(|e| ApiError::Other(e.into()))?;
-        match res.status().as_u16() {
-            200 => res.json().await.map_err(|e| ApiError::Other(e.into())),
+            .map_err(ApiError::Other)?;
+        match status {
+            200 => serde_json::from_str(&body).map_err(|e| ApiError::Other(e.into())),
             404 => Err(ApiError::NotFound),
-            status => {
-                let body = res.text().await.unwrap_or_default();
-                Err(ApiError::Other(provider_error(status, &body)))
-            }
+            status => Err(ApiError::Other(provider_error(status, &body))),
         }
     }
 
     async fn delete(&self, token: &str, path: &str) -> Result<()> {
-        let res = self
-            .http
-            .delete(format!("{BASE}/{path}"))
-            .bearer_auth(token)
-            .send()
+        let url = format!("{BASE}/{path}");
+        let (status, body) = self
+            .send_with_retry(|| self.http.delete(&url).bearer_auth(token))
             .await?;
-        let status = res.status().as_u16();
         if (200..300).contains(&status) {
             Ok(())
         } else {
-            let body = res.text().await.unwrap_or_default();
             Err(provider_error(status, &body))
         }
     }
 
     async fn put_json(&self, token: &str, path: &str, body: &Value) -> Result<Value> {
-        let res = self
-            .http
-            .put(format!("{BASE}/{path}"))
-            .bearer_auth(token)
-            .json(body)
-            .send()
+        let url = format!("{BASE}/{path}");
+        let (status, text) = self
+            .send_with_retry(|| self.http.put(&url).bearer_auth(token).json(body))
             .await?;
-        let status = res.status().as_u16();
         if (200..300).contains(&status) {
-            Ok(res.json().await.unwrap_or(Value::Null))
+            Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
         } else {
-            let body = res.text().await.unwrap_or_default();
-            Err(provider_error(status, &body))
+            Err(provider_error(status, &text))
         }
     }
 
     async fn post_json(&self, token: &str, path: &str, body: &Value) -> Result<Value> {
-        let res = self
-            .http
-            .post(format!("{BASE}/{path}"))
-            .bearer_auth(token)
-            .json(body)
-            .send()
+        let url = format!("{BASE}/{path}");
+        let (status, text) = self
+            .send_with_retry(|| self.http.post(&url).bearer_auth(token).json(body))
             .await?;
-        let status = res.status().as_u16();
         if (200..300).contains(&status) {
-            Ok(res.json().await.unwrap_or(Value::Null))
+            Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
         } else {
-            let body = res.text().await.unwrap_or_default();
-            Err(provider_error(status, &body))
+            Err(provider_error(status, &text))
         }
     }
 
@@ -526,6 +557,9 @@ fn provider_error(status: u16, body: &str) -> AppError {
         .unwrap_or_else(|| body.chars().take(300).collect());
     match status {
         401 => AppError::Auth(format!("Gmail rejected the token: {msg}")),
+        _ if is_rate_limited(status, body) => AppError::Provider(
+            "Gmail is rate-limiting this account for a moment; the next sync will catch up.".into(),
+        ),
         _ => AppError::Provider(format!("Gmail HTTP {status}: {msg}")),
     }
 }

@@ -455,6 +455,39 @@ impl MailStore {
         Ok(rows)
     }
 
+    /// Overwrites labels for cached messages; returns which ids were unknown.
+    pub fn apply_label_snapshots(
+        &self,
+        account_id: i64,
+        snapshots: &[(String, Vec<String>)],
+    ) -> Result<Vec<String>> {
+        let mut conn = self.db.conn();
+        let tx = conn.transaction()?;
+        let mut unknown = Vec::new();
+        {
+            let mut stmt = tx.prepare_cached(
+                "UPDATE mail_messages SET labels = ?3, is_read = ?4, is_starred = ?5
+                 WHERE account_id = ?1 AND remote_id = ?2",
+            )?;
+            for (id, labels) in snapshots {
+                let is_read = !labels.iter().any(|l| l == "UNREAD");
+                let is_starred = labels.iter().any(|l| l == "STARRED");
+                let n = stmt.execute(params![
+                    account_id,
+                    id,
+                    serde_json::to_string(labels)?,
+                    is_read as i64,
+                    is_starred as i64
+                ])?;
+                if n == 0 {
+                    unknown.push(id.clone());
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(unknown)
+    }
+
     pub fn oldest_date_of(&self, account_id: i64, remote_ids: &[String]) -> Result<Option<i64>> {
         if remote_ids.is_empty() {
             return Ok(None);
