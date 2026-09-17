@@ -61,6 +61,12 @@ pub enum ControlMsg {
         transfer_id: String,
         reason: String,
     },
+    /// Sender retracted a message ("delete for everyone").
+    Delete {
+        msg_id: String,
+    },
+    /// Sender cleared the whole conversation on both sides.
+    ClearChat,
     Ping,
     Pong,
 }

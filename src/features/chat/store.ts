@@ -21,6 +21,8 @@ interface ChatState {
   removePeer: (id: number) => Promise<void>;
   sendText: (body: string) => Promise<void>;
   sendFile: (path: string) => Promise<void>;
+  deleteMessage: (msgId: string, forEveryone: boolean) => Promise<void>;
+  clearChat: (forEveryone: boolean) => Promise<void>;
   clearError: () => void;
 }
 
@@ -88,6 +90,14 @@ export const useChat = create<ChatState>((set, get) => ({
       if (m.direction === "in" && (m.status === "unread") && !viewing) {
         const who = peers.find((p) => p.id === m.peerId)?.displayName ?? "New message";
         void notify(who, m.kind === "file" ? `Sent a file: ${m.fileName ?? ""}` : m.body, "chat");
+      }
+      void get().loadPeers();
+    });
+    await chat.onDeleted((d) => {
+      if (d.peerId === get().activePeerId) {
+        set({
+          messages: d.msgIds.length === 0 ? [] : get().messages.filter((m) => !d.msgIds.includes(m.msgId)),
+        });
       }
       void get().loadPeers();
     });
@@ -176,6 +186,27 @@ export const useChat = create<ChatState>((set, get) => ({
     try {
       const m = await chat.sendFile(id, path);
       set({ messages: upsertMessage(get().messages, m) });
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+  },
+
+  deleteMessage: async (msgId, forEveryone) => {
+    try {
+      await chat.deleteMessage(msgId, forEveryone);
+      set({ messages: get().messages.filter((m) => m.msgId !== msgId) });
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+  },
+
+  clearChat: async (forEveryone) => {
+    const id = get().activePeerId;
+    if (id === null) return;
+    try {
+      await chat.clearChat(id, forEveryone);
+      set({ messages: [] });
+      void get().loadPeers();
     } catch (e) {
       set({ error: errorMessage(e) });
     }

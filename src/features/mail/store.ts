@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { errorMessage, mail, settings } from "../../lib/ipc";
-import { notify, notifyPrefs } from "../../lib/notify";
+import { asSoundName, notify, notifyPrefs } from "../../lib/notify";
 import type {
   Account,
   Category,
@@ -234,6 +234,8 @@ export const useMail = create<MailState>((set, get) => ({
       });
       notifyPrefs.notifications = s.notifications;
       notifyPrefs.sound = s.notificationSound;
+      notifyPrefs.mail = asSoundName(s.soundMail, "chime");
+      notifyPrefs.chat = asSoundName(s.soundChat, "pop");
     } catch {
       /* defaults are fine */
     }

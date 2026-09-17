@@ -16,6 +16,8 @@ pub const MAIL_POLL_SECONDS: &str = "mail_poll_seconds";
 pub const CLOSE_TO_TRAY: &str = "close_to_tray";
 pub const NOTIFICATIONS: &str = "notifications";
 pub const NOTIFICATION_SOUND: &str = "notification_sound";
+pub const SOUND_MAIL: &str = "sound_mail";
+pub const SOUND_CHAT: &str = "sound_chat";
 pub const CONVERSATION_VIEW: &str = "conversation_view";
 pub const UNDO_SEND_SECONDS: &str = "undo_send_seconds";
 
@@ -69,6 +71,8 @@ pub struct SettingsView {
     pub close_to_tray: bool,
     pub notifications: bool,
     pub notification_sound: bool,
+    pub sound_mail: String,
+    pub sound_chat: String,
     pub conversation_view: bool,
     pub undo_send_seconds: u64,
 }
@@ -90,6 +94,8 @@ pub fn view(db: &Db) -> Result<SettingsView> {
         close_to_tray: flag(db, CLOSE_TO_TRAY, true)?,
         notifications: flag(db, NOTIFICATIONS, true)?,
         notification_sound: flag(db, NOTIFICATION_SOUND, true)?,
+        sound_mail: get(db, SOUND_MAIL)?.unwrap_or_else(|| "chime".into()),
+        sound_chat: get(db, SOUND_CHAT)?.unwrap_or_else(|| "pop".into()),
         conversation_view: flag(db, CONVERSATION_VIEW, true)?,
         undo_send_seconds: get(db, UNDO_SEND_SECONDS)?
             .and_then(|v| v.parse().ok())

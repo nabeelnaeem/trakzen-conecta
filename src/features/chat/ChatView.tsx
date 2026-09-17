@@ -155,13 +155,45 @@ function AddPeer() {
   );
 }
 
+interface Pending {
+  path: string;
+  name: string;
+  preview: string | null;
+}
+
 function Conversation({ peerId, name, seed, host, online }: { peerId: number; name: string; seed: string; host: string; online: boolean }) {
-  const { messages, transfers, sendText, sendFile, removePeer } = useChat();
+  const { messages, transfers, sendText, sendFile, removePeer, clearChat } = useChat();
   const [text, setText] = useState("");
+  const [pending, setPending] = useState<Pending[]>([]);
   const [dragging, setDragging] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [menu, setMenu] = useState(false);
   const bottom = useRef<HTMLDivElement>(null);
   const area = useRef<HTMLTextAreaElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenu(false);
+    };
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, []);
+
+  // Files wait in the compose box until Enter; nothing leaves the machine
+  // on paste or drop alone.
+  const attach = async (paths: string[]) => {
+    const fresh = paths.filter((p) => !pending.some((x) => x.path === p));
+    const items: Pending[] = await Promise.all(
+      fresh.map(async (path) => ({
+        path,
+        name: path.split(/[\\/]/).pop() ?? path,
+        preview: await chatIpc.filePreview(path).catch(() => null),
+      })),
+    );
+    setPending((cur) => [...cur, ...items]);
+    area.current?.focus();
+  };
 
   // Grow with the content (toolbar inserts included), up to a cap that the
   // expand toggle raises to most of the window.
@@ -187,37 +219,42 @@ function Conversation({ peerId, name, seed, host, online }: { peerId: number; na
         else if (e.payload.type === "leave") setDragging(false);
         else if (e.payload.type === "drop") {
           setDragging(false);
-          for (const p of e.payload.paths) void sendFile(p);
+          void attach(e.payload.paths);
         }
       })
       .then((u) => (unlisten = u));
     return () => unlisten?.();
-  }, [sendFile]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [peerId]);
 
   const submit = async () => {
     const body = text.trim();
-    if (!body) return;
+    const files = pending;
+    if (!body && files.length === 0) return;
     setText("");
-    await sendText(body);
+    setPending([]);
+    if (body) await sendText(body);
+    for (const f of files) await sendFile(f.path);
     area.current?.focus();
   };
 
   const pick = async () => {
-    const picked = await open({ multiple: true, title: "Send files" });
+    const picked = await open({ multiple: true, title: "Attach files" });
     if (!picked) return;
-    for (const p of Array.isArray(picked) ? picked : [picked]) await sendFile(p);
+    await attach(Array.isArray(picked) ? picked : [picked]);
   };
 
   const onPaste = async (e: React.ClipboardEvent) => {
     const files = Array.from(e.clipboardData.files);
     if (files.length === 0) return;
     e.preventDefault();
+    const paths: string[] = [];
     for (const f of files) {
       const ext = f.type.split("/")[1] ?? "bin";
       const name = f.name && f.name !== "image.png" ? f.name : `pasted-${new Date().toISOString().replace(/[:.]/g, "-")}.${ext}`;
-      const path = await chatIpc.stashBlob(name, new Uint8Array(await f.arrayBuffer()));
-      await sendFile(path);
+      paths.push(await chatIpc.stashBlob(name, new Uint8Array(await f.arrayBuffer())));
     }
+    await attach(paths);
   };
 
   // Wrap the selection (or insert a placeholder) with Markdown markers.
@@ -267,14 +304,41 @@ function Conversation({ peerId, name, seed, host, online }: { peerId: number; na
           </div>
         </div>
         <div className="flex-1" />
-        <button
-          className="btn btn-ghost text-xs text-red-700"
-          onClick={() => {
-            if (confirm(`Remove ${name} and the chat history?`)) void removePeer(peerId);
-          }}
-        >
-          Remove
-        </button>
+        <div className="relative" ref={menuRef}>
+          <button className="btn btn-ghost" onClick={() => setMenu((v) => !v)} title="More">
+            ⋯
+          </button>
+          {menu && (
+            <div className="absolute right-0 z-10 mt-1 w-60 rounded-md border border-gray-200 bg-white py-1 shadow-lg">
+              <MenuItem
+                onClick={() => {
+                  setMenu(false);
+                  if (confirm("Clear this chat on this machine only?")) void clearChat(false);
+                }}
+              >
+                Clear chat for me
+              </MenuItem>
+              <MenuItem
+                onClick={() => {
+                  setMenu(false);
+                  if (confirm(`Clear this chat for you and ${name}?`)) void clearChat(true);
+                }}
+              >
+                Clear chat for everyone
+              </MenuItem>
+              <div className="my-1 border-t border-gray-100" />
+              <MenuItem
+                danger
+                onClick={() => {
+                  setMenu(false);
+                  if (confirm(`Remove ${name} and the chat history?`)) void removePeer(peerId);
+                }}
+              >
+                Remove peer
+              </MenuItem>
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-3">
@@ -315,8 +379,32 @@ function Conversation({ peerId, name, seed, host, online }: { peerId: number; na
             {expanded ? "⤡" : "⤢"}
           </FmtButton>
         </div>
+        {pending.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-2">
+            {pending.map((f) => (
+              <div key={f.path} className="relative rounded-md border border-gray-200 bg-gray-50 p-1">
+                {f.preview ? (
+                  <img src={f.preview} alt={f.name} className="h-20 w-20 rounded object-cover" />
+                ) : (
+                  <div className="flex h-20 w-32 flex-col items-center justify-center gap-1 text-xs text-gray-600">
+                    <span className="text-2xl">📄</span>
+                    <span className="max-w-full truncate px-1">{f.name}</span>
+                  </div>
+                )}
+                <button
+                  className="absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full bg-gray-800 text-[11px] text-white shadow hover:bg-red-600"
+                  onClick={() => setPending((cur) => cur.filter((x) => x.path !== f.path))}
+                  aria-label={`Remove ${f.name}`}
+                  title="Remove"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="flex items-end gap-2">
-          <button className="btn" onClick={() => void pick()} title="Send files">
+          <button className="btn" onClick={() => void pick()} title="Attach files">
             📎
           </button>
           <textarea
@@ -329,8 +417,8 @@ function Conversation({ peerId, name, seed, host, online }: { peerId: number; na
             onKeyDown={onKey}
             onPaste={(e) => void onPaste(e)}
           />
-          <button className="btn btn-primary" onClick={() => void submit()} disabled={!text.trim()}>
-            Send
+          <button className="btn btn-primary" onClick={() => void submit()} disabled={!text.trim() && pending.length === 0}>
+            Send{pending.length > 0 ? ` (${pending.length})` : ""}
           </button>
         </div>
       </div>
@@ -346,6 +434,14 @@ function Conversation({ peerId, name, seed, host, online }: { peerId: number; na
   );
 }
 
+function MenuItem({ children, onClick, danger }: { children: React.ReactNode; onClick: () => void; danger?: boolean }) {
+  return (
+    <button className={`block w-full px-3 py-1.5 text-left text-sm hover:bg-gray-50 ${danger ? "text-red-700" : ""}`} onClick={onClick}>
+      {children}
+    </button>
+  );
+}
+
 function FmtButton({ children, title, onClick }: { children: React.ReactNode; title: string; onClick: () => void }) {
   return (
     <button className="rounded px-1.5 py-0.5 hover:bg-gray-200" title={title} onMouseDown={(e) => e.preventDefault()} onClick={onClick}>
@@ -356,6 +452,17 @@ function FmtButton({ children, title, onClick }: { children: React.ReactNode; ti
 
 function Bubble({ m, grouped, progress }: { m: ChatMessage; grouped: boolean; progress?: { bytesDone: number; bytesTotal: number } }) {
   const mine = m.direction === "out";
+  const { deleteMessage } = useChat();
+  const [menu, setMenu] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!menu) return;
+    const onClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setMenu(false);
+    };
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, [menu]);
   const statusText =
     m.status === "sending" ? "sending…"
     : m.status === "receiving" ? "receiving…"
@@ -363,7 +470,14 @@ function Bubble({ m, grouped, progress }: { m: ChatMessage; grouped: boolean; pr
     : m.status === "delivered" ? "✓✓"
     : "";
   return (
-    <div className={`flex ${mine ? "justify-end" : "justify-start"} ${grouped ? "mt-0.5" : "mt-2"}`}>
+    <div
+      className={`group flex items-center gap-1 ${mine ? "justify-end" : "justify-start"} ${grouped ? "mt-0.5" : "mt-2"}`}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setMenu(true);
+      }}
+    >
+      {mine && <DeleteMenu open={menu} setOpen={setMenu} mine={mine} onDelete={(all) => void deleteMessage(m.msgId, all)} innerRef={ref} />}
       <div
         className={`max-w-[72%] px-3 py-1.5 text-sm ${
           mine ? "rounded-2xl rounded-br-md bg-blue-600 text-white" : "rounded-2xl rounded-bl-md bg-gray-100 text-gray-900"
@@ -375,6 +489,57 @@ function Bubble({ m, grouped, progress }: { m: ChatMessage; grouped: boolean; pr
           {statusText && ` ${statusText}`}
         </div>
       </div>
+      {!mine && <DeleteMenu open={menu} setOpen={setMenu} mine={mine} onDelete={(all) => void deleteMessage(m.msgId, all)} innerRef={ref} />}
+    </div>
+  );
+}
+
+/** Hover / right-click menu on a bubble: delete for me, or for everyone on own messages. */
+function DeleteMenu({
+  open,
+  setOpen,
+  mine,
+  onDelete,
+  innerRef,
+}: {
+  open: boolean;
+  setOpen: (v: boolean) => void;
+  mine: boolean;
+  onDelete: (forEveryone: boolean) => void;
+  innerRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  return (
+    <div className="relative self-center" ref={innerRef}>
+      <button
+        className={`rounded px-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 ${open ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+        onClick={() => setOpen(!open)}
+        aria-label="Message options"
+      >
+        ▾
+      </button>
+      {open && (
+        <div className={`absolute top-full z-10 mt-1 w-48 rounded-md border border-gray-200 bg-white py-1 shadow-lg ${mine ? "right-0" : "left-0"}`}>
+          <MenuItem
+            onClick={() => {
+              setOpen(false);
+              onDelete(false);
+            }}
+          >
+            Delete for me
+          </MenuItem>
+          {mine && (
+            <MenuItem
+              danger
+              onClick={() => {
+                setOpen(false);
+                onDelete(true);
+              }}
+            >
+              Delete for everyone
+            </MenuItem>
+          )}
+        </div>
+      )}
     </div>
   );
 }

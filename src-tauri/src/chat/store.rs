@@ -285,6 +285,48 @@ impl ChatStore {
         Ok(rows)
     }
 
+    /// Removes one message; returns it so the caller can clean up its file.
+    pub fn delete_message(&self, msg_id: &str) -> Result<Option<ChatMessage>> {
+        let m = self.get_message(msg_id)?;
+        if m.is_some() {
+            self.db
+                .conn()
+                .execute("DELETE FROM chat_messages WHERE msg_id = ?1", params![msg_id])?;
+        }
+        Ok(m)
+    }
+
+    /// Removes every message with a peer; returns the file paths involved.
+    pub fn clear_messages(&self, peer_id: i64) -> Result<Vec<String>> {
+        let mut conn = self.db.conn();
+        let tx = conn.transaction()?;
+        let paths: Vec<String> = tx
+            .prepare("SELECT file_path FROM chat_messages WHERE peer_id = ?1 AND file_path IS NOT NULL")?
+            .query_map(params![peer_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        tx.execute("DELETE FROM chat_messages WHERE peer_id = ?1", params![peer_id])?;
+        tx.commit()?;
+        Ok(paths)
+    }
+
+    /// Forgets file paths that no longer exist on disk (after a storage
+    /// clean-up) so the UI stops offering to open them.
+    pub fn forget_missing_files(&self) -> Result<usize> {
+        let conn = self.db.conn();
+        let rows: Vec<(i64, String)> = conn
+            .prepare("SELECT id, file_path FROM chat_messages WHERE file_path IS NOT NULL")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut n = 0;
+        for (id, p) in rows {
+            if !std::path::Path::new(&p).exists() {
+                conn.execute("UPDATE chat_messages SET file_path = NULL WHERE id = ?1", params![id])?;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
     pub fn mark_read(&self, peer_id: i64) -> Result<()> {
         self.db.conn().execute(
             "UPDATE chat_messages SET status = 'received'

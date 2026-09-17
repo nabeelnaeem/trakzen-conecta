@@ -22,6 +22,7 @@ pub const EVENT_MESSAGE: &str = "chat://message";
 pub const EVENT_PEER: &str = "chat://peer";
 pub const EVENT_TRANSFER: &str = "chat://transfer";
 pub const EVENT_STATUS: &str = "chat://status";
+pub const EVENT_DELETED: &str = "chat://deleted";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -47,6 +48,14 @@ pub struct ChatEngine {
     conns: Mutex<HashMap<i64, Conn>>,
     connecting: Mutex<HashSet<i64>>,
     generation: AtomicU64,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedEvent {
+    pub peer_id: i64,
+    /// Empty means the whole conversation was cleared.
+    pub msg_ids: Vec<String>,
 }
 
 struct RemoteHello {
@@ -374,6 +383,37 @@ impl ChatEngine {
                     self.emit_message(&m);
                 }
             }
+            ControlMsg::Delete { msg_id } => {
+                if let Some(m) = self.store.delete_message(&msg_id)? {
+                    if m.peer_id == row_id {
+                        self.remove_file_if_ours(m.file_path.as_deref()).await;
+                        let _ = self.app.emit(EVENT_DELETED, DeletedEvent { peer_id: row_id, msg_ids: vec![msg_id] });
+                        self.emit_peer(row_id);
+                    } else {
+                        // Never let one peer delete another peer's messages.
+                        let _ = self.store.insert_message(&NewMessage {
+                            msg_id: &m.msg_id,
+                            peer_id: m.peer_id,
+                            direction: m.direction,
+                            kind: m.kind,
+                            body: &m.body,
+                            file_name: m.file_name.as_deref(),
+                            file_path: m.file_path.as_deref(),
+                            file_size: m.file_size,
+                            status: &m.status,
+                            created_at: m.created_at,
+                        });
+                    }
+                }
+            }
+            ControlMsg::ClearChat => {
+                let paths = self.store.clear_messages(row_id)?;
+                for p in paths {
+                    self.remove_file_if_ours(Some(&p)).await;
+                }
+                let _ = self.app.emit(EVENT_DELETED, DeletedEvent { peer_id: row_id, msg_ids: vec![] });
+                self.emit_peer(row_id);
+            }
             ControlMsg::Ping => {
                 let _ = out.send(Frame::Control(ControlMsg::Pong)).await;
             }
@@ -384,6 +424,60 @@ impl ChatEngine {
                 tracing::debug!("file control frame on chat connection ignored");
             }
         }
+        Ok(())
+    }
+
+    // ---- deleting ---------------------------------------------------------
+
+    /// Files the app itself wrote (received files, pasted blobs) are removed
+    /// with their message; files the user attached from elsewhere are not.
+    async fn remove_file_if_ours(&self, path: Option<&str>) {
+        let Some(path) = path else { return };
+        let p = PathBuf::from(path);
+        let ours = [self.download_dir().ok(), self.outgoing_dir().ok()];
+        if ours.iter().flatten().any(|dir| p.starts_with(dir)) {
+            let _ = tokio::fs::remove_file(&p).await;
+        }
+    }
+
+    pub fn outgoing_dir(&self) -> Result<PathBuf> {
+        Ok(self
+            .app
+            .path()
+            .app_cache_dir()
+            .map_err(|e| AppError::Other(format!("no cache dir: {e}")))?
+            .join("outgoing"))
+    }
+
+    pub async fn delete_message(self: &Arc<Self>, msg_id: &str, for_everyone: bool) -> Result<()> {
+        let Some(m) = self.store.delete_message(msg_id)? else { return Ok(()) };
+        self.remove_file_if_ours(m.file_path.as_deref()).await;
+        if for_everyone && m.direction == Direction::Out {
+            if let Ok(tx) = self.connect_peer(m.peer_id).await {
+                let _ = tx
+                    .send(Frame::Control(ControlMsg::Delete {
+                        msg_id: msg_id.to_string(),
+                    }))
+                    .await;
+            }
+        }
+        let _ = self.app.emit(EVENT_DELETED, DeletedEvent { peer_id: m.peer_id, msg_ids: vec![msg_id.to_string()] });
+        self.emit_peer(m.peer_id);
+        Ok(())
+    }
+
+    pub async fn clear_chat(self: &Arc<Self>, row_id: i64, for_everyone: bool) -> Result<()> {
+        let paths = self.store.clear_messages(row_id)?;
+        for p in paths {
+            self.remove_file_if_ours(Some(&p)).await;
+        }
+        if for_everyone {
+            if let Ok(tx) = self.connect_peer(row_id).await {
+                let _ = tx.send(Frame::Control(ControlMsg::ClearChat)).await;
+            }
+        }
+        let _ = self.app.emit(EVENT_DELETED, DeletedEvent { peer_id: row_id, msg_ids: vec![] });
+        self.emit_peer(row_id);
         Ok(())
     }
 

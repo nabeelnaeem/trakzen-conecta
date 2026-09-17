@@ -43,6 +43,8 @@ pub struct SettingsPatch {
     close_to_tray: Option<bool>,
     notifications: Option<bool>,
     notification_sound: Option<bool>,
+    sound_mail: Option<String>,
+    sound_chat: Option<String>,
     conversation_view: Option<bool>,
     undo_send_seconds: Option<u64>,
 }
@@ -93,6 +95,12 @@ async fn settings_update(
     }
     if let Some(v) = patch.notification_sound {
         settings::set(&state.db, settings::NOTIFICATION_SOUND, flag(v))?;
+    }
+    if let Some(v) = patch.sound_mail {
+        settings::set(&state.db, settings::SOUND_MAIL, v.trim())?;
+    }
+    if let Some(v) = patch.sound_chat {
+        settings::set(&state.db, settings::SOUND_CHAT, v.trim())?;
     }
     if let Some(v) = patch.conversation_view {
         settings::set(&state.db, settings::CONVERSATION_VIEW, flag(v))?;
@@ -307,6 +315,10 @@ pub fn run() {
             chat::commands::chat_open_file,
             chat::commands::chat_stash_blob,
             chat::commands::chat_file_preview,
+            chat::commands::chat_delete_message,
+            chat::commands::chat_clear_chat,
+            chat::commands::chat_storage_stats,
+            chat::commands::chat_clear_storage,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

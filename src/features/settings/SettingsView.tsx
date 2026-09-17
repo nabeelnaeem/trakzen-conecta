@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { errorMessage, mail, settings } from "../../lib/ipc";
-import { notifyPrefs, playSound } from "../../lib/notify";
+import { asSoundName, notifyPrefs, playNamed, SOUND_NAMES, SOUNDS, type SoundName } from "../../lib/notify";
+import { bytes } from "../../lib/format";
+import { chat as chatIpc } from "../../lib/ipc";
+import type { StorageStats } from "../../lib/types";
 import { onZoom, setZoom, zoomLevel, zoomStep } from "../../lib/zoom";
 import type { Account, MailFilter, SettingsView as Settings } from "../../lib/types";
 import { useChat } from "../chat/store";
@@ -20,6 +23,8 @@ export function SettingsView() {
   const [closeToTray, setCloseToTray] = useState(true);
   const [notifications, setNotifications] = useState(true);
   const [sound, setSound] = useState(true);
+  const [soundMail, setSoundMail] = useState<SoundName>("chime");
+  const [soundChat, setSoundChat] = useState<SoundName>("pop");
   const [conversation, setConversation] = useState(true);
   const [undo, setUndo] = useState("10");
   const [zoom, setZoomState] = useState(zoomLevel());
@@ -44,6 +49,8 @@ export function SettingsView() {
         setCloseToTray(v.closeToTray);
         setNotifications(v.notifications);
         setSound(v.notificationSound);
+        setSoundMail(asSoundName(v.soundMail, "chime"));
+        setSoundChat(asSoundName(v.soundChat, "pop"));
         setConversation(v.conversationView);
         setUndo(String(v.undoSendSeconds));
       })
@@ -66,6 +73,8 @@ export function SettingsView() {
         closeToTray,
         notifications,
         notificationSound: sound,
+        soundMail,
+        soundChat,
         conversationView: conversation,
         undoSendSeconds: Math.max(0, Number(undo) || 0),
       });
@@ -74,6 +83,8 @@ export function SettingsView() {
       applyMail({ showImages: v.mailShowImages, conversations: v.conversationView, undoSeconds: v.undoSendSeconds });
       notifyPrefs.notifications = v.notifications;
       notifyPrefs.sound = v.notificationSound;
+      notifyPrefs.mail = asSoundName(v.soundMail, "chime");
+      notifyPrefs.chat = asSoundName(v.soundChat, "pop");
       setMsg("Saved." + (Number(port) !== s?.chatPort ? " Port changes apply after restart." : ""));
       void refreshIdentity();
     } catch (e) {
@@ -99,10 +110,10 @@ export function SettingsView() {
               <button className="btn btn-ghost text-xs" onClick={() => void setZoom(1)} title="Ctrl 0">Reset</button>
               <span className="text-xs text-gray-500">Ctrl + / Ctrl - / Ctrl 0, or Ctrl + mouse wheel</span>
             </div>
-            <div className="flex items-center gap-3">
-              <Toggle v={sound} on={setSound} label="Play a sound" />
-              <button className="btn btn-ghost text-xs" onClick={() => playSound("mail")}>▶ mail</button>
-              <button className="btn btn-ghost text-xs" onClick={() => playSound("chat")}>▶ chat</button>
+            <Toggle v={sound} on={setSound} label="Play a sound" />
+            <div className="ml-6 flex flex-wrap items-center gap-x-6 gap-y-2">
+              <SoundPicker label="New mail" value={soundMail} onChange={setSoundMail} />
+              <SoundPicker label="Chat message" value={soundChat} onChange={setSoundChat} />
             </div>
           </div>
         </section>
@@ -209,8 +220,79 @@ export function SettingsView() {
         </div>
 
         <FiltersSection />
+        <StorageSection />
       </div>
     </div>
+  );
+}
+
+function SoundPicker({ label, value, onChange }: { label: string; value: SoundName; onChange: (v: SoundName) => void }) {
+  return (
+    <label className="flex items-center gap-2 text-sm">
+      {label}
+      <select
+        className="input w-auto"
+        value={value}
+        onChange={(e) => {
+          const v = asSoundName(e.target.value, value);
+          onChange(v);
+          void playNamed(v);
+        }}
+      >
+        {SOUND_NAMES.map((n) => (
+          <option key={n} value={n}>
+            {SOUNDS[n].label}
+          </option>
+        ))}
+      </select>
+      <button className="btn btn-ghost text-xs" onClick={() => void playNamed(value)} title="Preview">
+        ▶
+      </button>
+    </label>
+  );
+}
+
+/** Media the chat has written to disk, with one-click clean-up. */
+function StorageSection() {
+  const [stats, setStats] = useState<StorageStats | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const load = () => chatIpc.storageStats().then(setStats).catch(() => setStats(null));
+  useEffect(() => {
+    void load();
+  }, []);
+  const clear = async (which: "received" | "outgoing", label: string) => {
+    if (!confirm(`Delete all ${label}? Messages stay, but their files will be gone.`)) return;
+    const n = await chatIpc.clearStorage(which);
+    setMsg(`${n} file${n === 1 ? "" : "s"} deleted.`);
+    void load();
+  };
+  if (!stats) return null;
+  return (
+    <section>
+      <h2 className="text-base font-semibold">Chat storage</h2>
+      <p className="mt-1 text-sm text-gray-600">Deleting a message also removes its file; this clears everything at once.</p>
+      <div className="mt-3 space-y-2 text-sm">
+        <div className="flex items-center gap-3">
+          <div className="flex-1">
+            <div>Received files — {stats.receivedFiles} file{stats.receivedFiles === 1 ? "" : "s"}, {bytes(stats.receivedBytes)}</div>
+            <div className="truncate font-mono text-[11px] text-gray-500">{stats.receivedDir}</div>
+          </div>
+          <button className="btn text-xs" disabled={stats.receivedFiles === 0} onClick={() => void clear("received", "received files")}>
+            Clear
+          </button>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="flex-1">
+            <div>Pasted &amp; dropped media — {stats.outgoingFiles} file{stats.outgoingFiles === 1 ? "" : "s"}, {bytes(stats.outgoingBytes)}</div>
+            <div className="truncate font-mono text-[11px] text-gray-500">{stats.outgoingDir}</div>
+          </div>
+          <button className="btn text-xs" disabled={stats.outgoingFiles === 0} onClick={() => void clear("outgoing", "pasted media")}>
+            Clear
+          </button>
+        </div>
+        {msg && <div className="text-xs text-green-700">{msg}</div>}
+      </div>
+    </section>
   );
 }
 

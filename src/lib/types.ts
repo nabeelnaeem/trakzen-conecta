@@ -242,6 +242,21 @@ export interface TransferProgress {
   state: "active" | "done" | "failed";
 }
 
+export interface DeletedEvent {
+  peerId: number;
+  /** Empty means the whole conversation was cleared. */
+  msgIds: string[];
+}
+
+export interface StorageStats {
+  receivedDir: string;
+  receivedFiles: number;
+  receivedBytes: number;
+  outgoingDir: string;
+  outgoingFiles: number;
+  outgoingBytes: number;
+}
+
 export interface ChatStatus {
   listening: boolean;
   error?: string;
@@ -261,6 +276,8 @@ export interface SettingsView {
   closeToTray: boolean;
   notifications: boolean;
   notificationSound: boolean;
+  soundMail: string;
+  soundChat: string;
   conversationView: boolean;
   undoSendSeconds: number;
 }
@@ -282,6 +299,8 @@ export interface SettingsPatch {
   closeToTray?: boolean;
   notifications?: boolean;
   notificationSound?: boolean;
+  soundMail?: string;
+  soundChat?: string;
   conversationView?: boolean;
   undoSendSeconds?: number;
 }

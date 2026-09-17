@@ -5,6 +5,8 @@ import type {
   ChatMessage,
   ChatStatus,
   ComposeDraft,
+  DeletedEvent,
+  StorageStats,
   Contact,
   DraftContent,
   FetchResult,
@@ -116,6 +118,13 @@ export const chat = {
   stashBlob: (name: string, bytes: Uint8Array) =>
     invoke<string>("chat_stash_blob", bytes, { headers: { "x-file-name": encodeURIComponent(name) } }),
   filePreview: (path: string) => invoke<string | null>("chat_file_preview", { path }),
+  deleteMessage: (msgId: string, forEveryone: boolean) =>
+    invoke<void>("chat_delete_message", { msgId, forEveryone }),
+  clearChat: (peerId: number, forEveryone: boolean) => invoke<void>("chat_clear_chat", { peerId, forEveryone }),
+  storageStats: () => invoke<StorageStats>("chat_storage_stats"),
+  clearStorage: (which: "received" | "outgoing") => invoke<number>("chat_clear_storage", { which }),
+  onDeleted: (cb: (d: DeletedEvent) => void) =>
+    listen<DeletedEvent>("chat://deleted", (e) => cb(e.payload)),
   onMessage: (cb: (m: ChatMessage) => void) =>
     listen<ChatMessage>("chat://message", (e) => cb(e.payload)),
   onPeer: (cb: (p: Peer) => void) => listen<Peer>("chat://peer", (e) => cb(e.payload)),

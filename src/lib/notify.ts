@@ -7,20 +7,43 @@ import {
 // that the app's asset server does not provide, so <audio src> stays
 // silent. Decoding the bytes ourselves and playing through Web Audio
 // works the same on WebView2 and WebKitGTK.
-import mailWav from "../assets/sounds/mail.wav?inline";
-import chatWav from "../assets/sounds/chat.wav?inline";
+import chime from "../assets/sounds/chime.wav?inline";
+import pop from "../assets/sounds/pop.wav?inline";
+import ding from "../assets/sounds/ding.wav?inline";
+import knock from "../assets/sounds/knock.wav?inline";
+import bubble from "../assets/sounds/bubble.wav?inline";
+import marimba from "../assets/sounds/marimba.wav?inline";
+import triple from "../assets/sounds/triple.wav?inline";
 
-let granted: boolean | null = null;
-let ctx: AudioContext | null = null;
-const buffers: Partial<Record<"mail" | "chat", AudioBuffer>> = {};
-const sources = { mail: mailWav, chat: chatWav };
+export const SOUNDS = {
+  chime: { label: "Chime", data: chime },
+  ding: { label: "Ding", data: ding },
+  pop: { label: "Pop", data: pop },
+  bubble: { label: "Bubble", data: bubble },
+  knock: { label: "Knock", data: knock },
+  marimba: { label: "Marimba", data: marimba },
+  triple: { label: "Triple", data: triple },
+} as const;
+
+export type SoundName = keyof typeof SOUNDS;
+export const SOUND_NAMES = Object.keys(SOUNDS) as SoundName[];
 
 export interface NotifyPrefs {
   notifications: boolean;
   sound: boolean;
+  mail: SoundName;
+  chat: SoundName;
 }
 
-export const notifyPrefs: NotifyPrefs = { notifications: true, sound: true };
+export const notifyPrefs: NotifyPrefs = { notifications: true, sound: true, mail: "chime", chat: "pop" };
+
+export function asSoundName(s: string | undefined, fallback: SoundName): SoundName {
+  return s && s in SOUNDS ? (s as SoundName) : fallback;
+}
+
+let granted: boolean | null = null;
+let ctx: AudioContext | null = null;
+const buffers: Partial<Record<SoundName, AudioBuffer>> = {};
 
 function bytesOf(dataUrl: string): ArrayBuffer {
   const b64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
@@ -30,9 +53,9 @@ function bytesOf(dataUrl: string): ArrayBuffer {
   return out.buffer;
 }
 
-async function buffer(name: "mail" | "chat"): Promise<AudioBuffer> {
+async function buffer(name: SoundName): Promise<AudioBuffer> {
   ctx ??= new AudioContext();
-  return (buffers[name] ??= await ctx.decodeAudioData(bytesOf(sources[name])));
+  return (buffers[name] ??= await ctx.decodeAudioData(bytesOf(SOUNDS[name].data)));
 }
 
 // Browsers keep the context suspended until the first user gesture; wake it
@@ -41,15 +64,15 @@ if (typeof document !== "undefined") {
   const unlock = () => {
     ctx ??= new AudioContext();
     void ctx.resume();
-    void buffer("mail");
-    void buffer("chat");
+    void buffer(notifyPrefs.mail);
+    void buffer(notifyPrefs.chat);
   };
   document.addEventListener("pointerdown", unlock, { once: true });
   document.addEventListener("keydown", unlock, { once: true });
 }
 
-export async function playSound(name: "mail" | "chat") {
-  if (!notifyPrefs.sound) return;
+/** Plays a specific sound regardless of preferences (for previews). */
+export async function playNamed(name: SoundName) {
   try {
     const buf = await buffer(name);
     if (ctx!.state === "suspended") await ctx!.resume();
@@ -62,8 +85,13 @@ export async function playSound(name: "mail" | "chat") {
   }
 }
 
+export function playSound(kind: "mail" | "chat") {
+  if (!notifyPrefs.sound) return;
+  void playNamed(notifyPrefs[kind]);
+}
+
 export async function notify(title: string, body: string, sound: "mail" | "chat") {
-  void playSound(sound);
+  playSound(sound);
   if (!notifyPrefs.notifications) return;
   if (granted === null) {
     granted = await isPermissionGranted();

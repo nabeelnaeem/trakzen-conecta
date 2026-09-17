@@ -121,6 +121,80 @@ pub async fn chat_open_file(app: tauri::AppHandle, path: String, reveal: bool) -
     res.map_err(|e| AppError::Other(format!("could not open: {e}")))
 }
 
+#[tauri::command]
+pub async fn chat_delete_message(state: State<'_, AppState>, msg_id: String, for_everyone: bool) -> Result<()> {
+    state.chat.delete_message(&msg_id, for_everyone).await
+}
+
+#[tauri::command]
+pub async fn chat_clear_chat(state: State<'_, AppState>, peer_id: i64, for_everyone: bool) -> Result<()> {
+    state.chat.clear_chat(peer_id, for_everyone).await
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageStats {
+    pub received_dir: String,
+    pub received_files: u64,
+    pub received_bytes: u64,
+    pub outgoing_dir: String,
+    pub outgoing_files: u64,
+    pub outgoing_bytes: u64,
+}
+
+fn dir_stats(dir: &std::path::Path) -> (u64, u64) {
+    let mut files = 0;
+    let mut bytes = 0;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            if let Ok(md) = e.metadata() {
+                if md.is_file() {
+                    files += 1;
+                    bytes += md.len();
+                }
+            }
+        }
+    }
+    (files, bytes)
+}
+
+#[tauri::command]
+pub async fn chat_storage_stats(state: State<'_, AppState>) -> Result<StorageStats> {
+    let received = state.chat.download_dir()?;
+    let outgoing = state.chat.outgoing_dir()?;
+    let (rf, rb) = dir_stats(&received);
+    let (of, ob) = dir_stats(&outgoing);
+    Ok(StorageStats {
+        received_dir: received.to_string_lossy().into_owned(),
+        received_files: rf,
+        received_bytes: rb,
+        outgoing_dir: outgoing.to_string_lossy().into_owned(),
+        outgoing_files: of,
+        outgoing_bytes: ob,
+    })
+}
+
+/// Deletes every file in the received or pasted-media folder and forgets
+/// the paths on the affected messages. `which` is "received" or "outgoing".
+#[tauri::command]
+pub async fn chat_clear_storage(state: State<'_, AppState>, which: String) -> Result<u64> {
+    let dir = match which.as_str() {
+        "received" => state.chat.download_dir()?,
+        "outgoing" => state.chat.outgoing_dir()?,
+        _ => return Err(AppError::Other("unknown storage area".into())),
+    };
+    let mut removed = 0;
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            if e.metadata().map(|m| m.is_file()).unwrap_or(false) && std::fs::remove_file(e.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    state.chat.store.forget_missing_files()?;
+    Ok(removed)
+}
+
 /// Receives raw bytes from the webview (pasted screenshots, dropped blobs)
 /// and stashes them as a file so they can go through the normal transfer.
 #[tauri::command]
