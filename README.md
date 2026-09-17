@@ -19,28 +19,49 @@ React. Storage is a single SQLite file, `trakzen-conecta.db`.
 > Status: early. Gmail read / reply / forward and LAN chat / file transfer
 > work; see [Roadmap](#roadmap) for what is still missing.
 
-## Requirements
+## Installing
+
+Prebuilt installers are attached to each
+[GitHub release](https://github.com/nabeelnaeem/trakzen-conecta/releases):
+`.exe` for Windows, `.deb` and `.AppImage` for Ubuntu/Debian, `.dmg` for
+macOS.
+
+### Ubuntu / Debian
+
+```sh
+sudo apt install ./trakzen-conecta_*_amd64.deb
+```
+
+or make the AppImage executable and run it. Two things the app expects on
+Linux:
+
+- a Secret Service provider for storing the Gmail token (GNOME Keyring or
+  KWallet – present on any desktop install);
+- for the tray icon on GNOME, the AppIndicator extension:
+  `sudo apt install gnome-shell-extension-appindicator`, then enable it in
+  Extensions and log out/in once.
+
+## Building from source
 
 - Rust (stable, 1.80+) – https://rustup.rs
 - Node.js 20+ and pnpm – `corepack enable` or `npm i -g pnpm`
 - Platform prerequisites for Tauri: https://tauri.app/start/prerequisites/
-  (on Windows that is the WebView2 runtime, already present on Windows 10/11,
-  plus the MSVC build tools)
+  On Ubuntu 22.04/24.04 that is:
 
-## Running from source
+  ```sh
+  sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file     libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev     libdbus-1-dev pkg-config
+  ```
+
+  On Windows: the WebView2 runtime (already on Windows 10/11) and the MSVC
+  build tools.
 
 ```sh
 pnpm install
-pnpm tauri dev
+pnpm tauri dev      # run with hot reload
+pnpm tauri build    # installers under src-tauri/target/release/bundle/
 ```
 
 The first Rust build takes a few minutes; later ones are incremental.
-
-To produce installers:
-
-```sh
-pnpm tauri build
-```
 
 ## Setting up Gmail
 
@@ -144,9 +165,6 @@ Design notes worth knowing:
 - Encrypted chat sessions (Noise) and mDNS peer discovery
 - Group chats
 - Inline (`cid:`) images in HTML mail
-- Paging older mail from the server, threads view
-- Drafts, labels, multiple-select actions
-- Desktop notifications
 - Second mail provider (IMAP/SMTP generic, then Outlook)
 - Rebinding the chat port without a restart
 

@@ -6,6 +6,7 @@ import { Composer } from "./Composer";
 import { FilterEditor } from "./FilterEditor";
 import { LabelChip } from "./LabelChip";
 import { useMailShortcuts } from "./useShortcuts";
+import { Spinner } from "../../lib/Spinner";
 import type { Category, Folder } from "../../lib/types";
 
 const FOLDERS: { key: Folder; label: string; icon: string }[] = [
@@ -157,21 +158,22 @@ export function MailView() {
             <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-gray-400">⌕</span>
           </div>
           <button className="btn btn-ghost" title="Sync now" onClick={() => void s.sync()} disabled={!!sync}>
-            <span className={sync ? "animate-spin inline-block" : ""}>⟳</span>
+            {sync ? <Spinner className="text-blue-600" /> : "⟳"}
           </button>
         </div>
 
         {s.selected.length > 0 ? (
-          <div className="flex items-center gap-1 border-b border-gray-200 bg-blue-50 px-2 py-1 text-xs">
+          <div className="flex flex-wrap items-center gap-x-0.5 gap-y-1 border-b border-gray-200 bg-blue-50 px-2 py-1 text-xs">
             <SelectMenu allSelected={allSelected} />
-            <span className="mr-1 font-medium">{s.selected.length} selected</span>
-            <button className="btn btn-ghost text-xs" onClick={() => void s.act("archive")}>Archive</button>
-            <button className="btn btn-ghost text-xs" onClick={() => void s.act("trash")}>Trash</button>
-            <button className="btn btn-ghost text-xs" onClick={() => void s.act("spam")}>Spam</button>
-            <button className="btn btn-ghost text-xs" onClick={() => void s.act("read")}>Read</button>
-            <button className="btn btn-ghost text-xs" onClick={() => void s.act("unread")}>Unread</button>
+            <span className="mr-2 whitespace-nowrap font-medium">{s.selected.length} selected</span>
+            <BulkButton title="Archive (e)" onClick={() => void s.act("archive")}>🗄</BulkButton>
+            <BulkButton title="Trash (#)" onClick={() => void s.act("trash")}>🗑</BulkButton>
+            <BulkButton title="Report spam (!)" onClick={() => void s.act("spam")}>⚠</BulkButton>
+            <BulkButton title="Mark as read (Shift+I)" onClick={() => void s.act("read")}>✉</BulkButton>
+            <BulkButton title="Mark as unread (Shift+U)" onClick={() => void s.act("unread")}>●</BulkButton>
             <BulkLabelMenu />
-            <button className="btn btn-ghost text-xs" onClick={() => s.selectAll(false)} title="Clear (Esc)">✕</button>
+            <div className="flex-1" />
+            <BulkButton title="Clear selection (Esc)" onClick={() => s.selectAll(false)}>✕</BulkButton>
           </div>
         ) : inboxActive ? (
           <div className="flex border-b border-gray-200 text-xs">
@@ -286,6 +288,14 @@ function SelectMenu({ allSelected }: { allSelected: boolean }) {
   );
 }
 
+function BulkButton({ children, title, onClick }: { children: React.ReactNode; title: string; onClick: () => void }) {
+  return (
+    <button className="rounded px-2 py-1 text-sm hover:bg-blue-100" title={title} onClick={onClick}>
+      {children}
+    </button>
+  );
+}
+
 function BulkLabelMenu() {
   const { labels, modifyLabels, selected } = useMail();
   const [open, setOpen] = useState(false);
@@ -300,8 +310,8 @@ function BulkLabelMenu() {
   const userLabels = labels.filter((l) => l.kind === "user");
   return (
     <div className="relative" ref={ref}>
-      <button className="btn btn-ghost text-xs" onClick={() => setOpen((v) => !v)}>
-        Label ▾
+      <button className="rounded px-2 py-1 text-xs hover:bg-blue-100" title="Labels" onClick={() => setOpen((v) => !v)}>
+        🏷 ▾
       </button>
       {open && (
         <div className="absolute left-0 z-10 mt-1 max-h-72 w-56 overflow-y-auto rounded-md border border-gray-200 bg-white py-1 shadow-lg">

@@ -2,6 +2,7 @@ import { useMail } from "./store";
 import { LabelChip } from "./LabelChip";
 import { Avatar } from "./Avatar";
 import { shortDate } from "../../lib/format";
+import { Spinner } from "../../lib/Spinner";
 import type { SnoozedMessage } from "../../lib/types";
 
 export function MessageList() {
@@ -28,8 +29,16 @@ export function MessageList() {
   if (messages.length === 0) {
     const where = label ? (labels.find((l) => l.remoteId === label)?.name ?? "this label") : folder;
     return (
-      <div className="flex flex-1 items-center justify-center p-6 text-center text-sm text-gray-500">
-        {fetching ? "Loading…" : search ? "No messages match." : `Nothing in ${where}.`}
+      <div className="flex flex-1 items-center justify-center gap-2 p-6 text-center text-sm text-gray-500">
+        {fetching ? (
+          <>
+            <Spinner className="text-blue-600" /> Loading…
+          </>
+        ) : search ? (
+          "No messages match."
+        ) : (
+          `Nothing in ${where}.`
+        )}
       </div>
     );
   }
@@ -102,11 +111,13 @@ export function MessageList() {
         );
       })}
       {!search && !serverSearch && (
-        <li className="p-3 text-center">
+        <li className="flex justify-center p-3">
           {fetching ? (
-            <span className="text-xs text-gray-500">Loading…</span>
+            <span className="inline-flex items-center gap-2 text-xs text-gray-500">
+              <Spinner size={14} className="text-blue-600" /> Loading more…
+            </span>
           ) : hasMore ? (
-            <button className="btn btn-ghost text-xs" onClick={() => void loadMore()}>
+            <button className="btn text-xs" onClick={() => void loadMore()}>
               Load more
             </button>
           ) : (

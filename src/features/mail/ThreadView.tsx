@@ -6,6 +6,7 @@ import { LabelChip } from "./LabelChip";
 import { Avatar } from "./Avatar";
 import { bytes, longDate, shortDate } from "../../lib/format";
 import { errorMessage, mail } from "../../lib/ipc";
+import { Spinner } from "../../lib/Spinner";
 import type { MessageDetail, MessageSummary } from "../../lib/types";
 
 export function ThreadView() {
@@ -51,7 +52,15 @@ export function ThreadView() {
     );
   }
   if (thread.length === 0) {
-    return <div className="flex flex-1 items-center justify-center text-sm text-gray-500">{loadingDetail ? "Loading…" : ""}</div>;
+    return (
+      <div className="flex flex-1 items-center justify-center gap-2 text-sm text-gray-500">
+        {loadingDetail && (
+          <>
+            <Spinner className="text-blue-600" /> Loading…
+          </>
+        )}
+      </div>
+    );
   }
 
   const latest = thread[thread.length - 1];
@@ -305,7 +314,9 @@ function ThreadMessage({
           {detail ? (
             <AutoHeightFrame doc={doc} />
           ) : (
-            <div className="px-4 pb-4 text-sm text-gray-500">Loading…</div>
+            <div className="flex items-center gap-2 px-4 pb-4 text-sm text-gray-500">
+              <Spinner size={14} className="text-blue-600" /> Loading…
+            </div>
           )}
           {detail && detail.attachments.length > 0 && (
             <div className="border-t border-gray-100 px-4 py-2">
