@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -16,6 +16,11 @@ pub const EVENT_SYNC: &str = "mail://sync";
 
 #[derive(Default)]
 pub struct SyncGuard(Mutex<HashSet<i64>>);
+
+/// Server paging position per (account, label). Absent = not started,
+/// `None` = exhausted.
+#[derive(Default)]
+pub struct PageTokens(Mutex<HashMap<(i64, String), Option<String>>>);
 
 #[tauri::command]
 pub async fn mail_list_accounts(state: State<'_, AppState>) -> Result<Vec<Account>> {
@@ -90,16 +95,112 @@ async fn run_sync(app: &AppHandle, state: &AppState, account_id: i64) -> Result<
 pub async fn mail_list_messages(
     state: State<'_, AppState>,
     account_id: i64,
-    folder: Folder,
+    query: ListQuery,
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<Vec<MessageSummary>> {
     state.mail.list_messages(
         account_id,
-        folder,
-        limit.unwrap_or(100).clamp(1, 500),
+        &query,
+        limit.unwrap_or(100).clamp(1, 1000),
         offset.unwrap_or(0).max(0),
     )
+}
+
+#[tauri::command]
+pub async fn mail_list_labels(state: State<'_, AppState>, account_id: i64) -> Result<Vec<Label>> {
+    state.mail.list_labels(account_id)
+}
+
+#[tauri::command]
+pub async fn mail_modify_labels(
+    state: State<'_, AppState>,
+    message_id: i64,
+    add: Vec<String>,
+    remove: Vec<String>,
+) -> Result<MessageDetail> {
+    let detail = state.mail.get_message(message_id)?;
+    let account = state.mail.get_account(detail.summary.account_id)?;
+    let provider = state.providers.provider_for(&account.provider)?;
+    provider
+        .modify_labels(&account, &detail.summary.remote_id, &add, &remove)
+        .await?;
+    let add: Vec<&str> = add.iter().map(String::as_str).collect();
+    let remove: Vec<&str> = remove.iter().map(String::as_str).collect();
+    state.mail.set_labels(message_id, &add, &remove)?;
+    state.mail.get_message(message_id)
+}
+
+/// Pulls the next page of a folder/label from the server. The UI calls this
+/// when a view is opened and again for "load more"; `reset` restarts from
+/// the newest message.
+#[tauri::command]
+pub async fn mail_fetch_more(
+    state: State<'_, AppState>,
+    account_id: i64,
+    query: ListQuery,
+    reset: bool,
+) -> Result<FetchResult> {
+    let Some(label_id) = query.label_id() else {
+        return Ok(FetchResult {
+            added: 0,
+            has_more: false,
+        });
+    };
+    let key = (account_id, label_id.clone());
+    let token = {
+        let mut tokens = state.page_tokens.0.lock().unwrap();
+        if reset {
+            tokens.remove(&key);
+        }
+        match tokens.get(&key) {
+            Some(None) => {
+                return Ok(FetchResult {
+                    added: 0,
+                    has_more: false,
+                })
+            }
+            Some(Some(t)) => Some(t.clone()),
+            None => None,
+        }
+    };
+
+    let account = state.mail.get_account(account_id)?;
+    let provider = state.providers.provider_for(&account.provider)?;
+    let (added, next) = provider
+        .fetch_label_page(&account, &state.mail, &label_id, token.as_deref())
+        .await?;
+    let has_more = next.is_some();
+    state.page_tokens.0.lock().unwrap().insert(key, next);
+    Ok(FetchResult { added, has_more })
+}
+
+#[tauri::command]
+pub async fn mail_list_filters(
+    state: State<'_, AppState>,
+    account_id: i64,
+) -> Result<Vec<MailFilter>> {
+    let account = state.mail.get_account(account_id)?;
+    let provider = state.providers.provider_for(&account.provider)?;
+    let mut filters = provider.list_filters(&account).await?;
+    // Swap label ids for the names the user knows.
+    let names = state.mail.label_names(account_id)?;
+    let pretty = |id: &String| -> String {
+        names.get(id).cloned().unwrap_or_else(|| match id.as_str() {
+            "INBOX" => "Inbox".into(),
+            "UNREAD" => "Unread".into(),
+            "STARRED" => "Starred".into(),
+            "IMPORTANT" => "Important".into(),
+            "TRASH" => "Trash".into(),
+            "SPAM" => "Spam".into(),
+            other => other.to_string(),
+        })
+    };
+    for f in &mut filters {
+        f.add_labels = f.add_labels.iter().map(pretty).collect();
+        f.remove_labels = f.remove_labels.iter().map(pretty).collect();
+    }
+    Ok(filters)
 }
 
 #[tauri::command]
@@ -203,9 +304,14 @@ pub async fn mail_compose_draft(
 }
 
 #[tauri::command]
-pub async fn mail_send(state: State<'_, AppState>, message: OutgoingMessage) -> Result<()> {
+pub async fn mail_send(state: State<'_, AppState>, mut message: OutgoingMessage) -> Result<()> {
     if message.to.iter().all(|t| t.trim().is_empty()) {
         return Err(AppError::Other("add at least one recipient".into()));
+    }
+    if let Some(sig) = crate::settings::get(&state.db, crate::settings::MAIL_SIGNATURE)? {
+        if !sig.trim().is_empty() {
+            message.body_text = format!("{}\n\n-- \n{}", message.body_text.trim_end(), sig.trim());
+        }
     }
     let account = state.mail.get_account(message.account_id)?;
     let provider = state.providers.provider_for(&account.provider)?;

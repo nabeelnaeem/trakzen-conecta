@@ -10,6 +10,8 @@ pub const CHAT_DISPLAY_NAME: &str = "chat_display_name";
 pub const CHAT_PEER_ID: &str = "chat_peer_id";
 pub const CHAT_PORT: &str = "chat_port";
 pub const CHAT_DOWNLOAD_DIR: &str = "chat_download_dir";
+pub const MAIL_SHOW_IMAGES: &str = "mail_show_images";
+pub const MAIL_SIGNATURE: &str = "mail_signature";
 
 pub const DEFAULT_CHAT_PORT: u16 = 47800;
 
@@ -52,6 +54,8 @@ pub struct SettingsView {
     pub chat_display_name: String,
     pub chat_port: u16,
     pub chat_download_dir: String,
+    pub mail_show_images: bool,
+    pub mail_signature: String,
 }
 
 pub fn view(db: &Db) -> Result<SettingsView> {
@@ -65,5 +69,7 @@ pub fn view(db: &Db) -> Result<SettingsView> {
             .and_then(|p| p.parse().ok())
             .unwrap_or(DEFAULT_CHAT_PORT),
         chat_download_dir: get(db, CHAT_DOWNLOAD_DIR)?.unwrap_or_default(),
+        mail_show_images: get(db, MAIL_SHOW_IMAGES)?.map_or(true, |v| v == "true"),
+        mail_signature: get(db, MAIL_SIGNATURE)?.unwrap_or_default(),
     })
 }

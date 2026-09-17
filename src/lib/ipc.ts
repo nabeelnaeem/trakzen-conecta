@@ -5,9 +5,12 @@ import type {
   ChatMessage,
   ChatStatus,
   ComposeDraft,
+  FetchResult,
   FlagChange,
-  Folder,
   Identity,
+  Label,
+  ListQuery,
+  MailFilter,
   MessageDetail,
   MessageSummary,
   OutgoingMessage,
@@ -31,8 +34,14 @@ export const mail = {
   addAccount: (provider: string) => invoke<Account>("mail_add_account", { provider }),
   removeAccount: (accountId: number) => invoke<void>("mail_remove_account", { accountId }),
   sync: (accountId: number) => invoke<void>("mail_sync", { accountId }),
-  listMessages: (accountId: number, folder: Folder, limit = 100, offset = 0) =>
-    invoke<MessageSummary[]>("mail_list_messages", { accountId, folder, limit, offset }),
+  listMessages: (accountId: number, query: ListQuery, limit = 100, offset = 0) =>
+    invoke<MessageSummary[]>("mail_list_messages", { accountId, query, limit, offset }),
+  listLabels: (accountId: number) => invoke<Label[]>("mail_list_labels", { accountId }),
+  modifyLabels: (messageId: number, add: string[], remove: string[]) =>
+    invoke<MessageDetail>("mail_modify_labels", { messageId, add, remove }),
+  fetchMore: (accountId: number, query: ListQuery, reset: boolean) =>
+    invoke<FetchResult>("mail_fetch_more", { accountId, query, reset }),
+  listFilters: (accountId: number) => invoke<MailFilter[]>("mail_list_filters", { accountId }),
   search: (accountId: number, query: string) =>
     invoke<MessageSummary[]>("mail_search", { accountId, query }),
   unreadCount: (accountId: number) => invoke<number>("mail_unread_count", { accountId }),

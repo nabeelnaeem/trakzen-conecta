@@ -1,9 +1,12 @@
 import { create } from "zustand";
-import { errorMessage, mail } from "../../lib/ipc";
+import { errorMessage, mail, settings } from "../../lib/ipc";
 import type {
   Account,
+  Category,
   ComposeDraft,
   Folder,
+  Label,
+  ListQuery,
   MessageDetail,
   MessageSummary,
   ReplyMode,
@@ -26,17 +29,25 @@ interface SyncState {
   total: number;
 }
 
+const PAGE = 100;
+
 interface MailState {
   accounts: Account[];
   activeAccountId: number | null;
   folder: Folder;
+  category: Category;
+  label: string | null;
+  labels: Label[];
   messages: MessageSummary[];
+  hasMore: boolean;
+  fetching: boolean;
   selectedId: number | null;
   detail: MessageDetail | null;
   loadingDetail: boolean;
   syncing: Record<number, SyncState | null>;
   unread: number;
   search: string;
+  showImages: boolean;
   error: string | null;
   composer: ComposerState | null;
   busy: boolean;
@@ -44,10 +55,17 @@ interface MailState {
 
   init: () => Promise<void>;
   loadAccounts: () => Promise<void>;
+  loadLabels: () => Promise<void>;
   setAccount: (id: number) => void;
   setFolder: (f: Folder) => void;
+  setCategory: (c: Category) => void;
+  setLabel: (remoteId: string) => void;
   setSearch: (q: string) => void;
+  setShowImages: (v: boolean) => void;
+  query: () => ListQuery;
   refresh: () => Promise<void>;
+  fetchFromServer: (reset: boolean) => Promise<void>;
+  loadMore: () => Promise<void>;
   select: (id: number | null) => Promise<void>;
   sync: () => Promise<void>;
   addAccount: () => Promise<void>;
@@ -56,6 +74,7 @@ interface MailState {
   markUnread: (id: number) => Promise<void>;
   trash: (id: number) => Promise<void>;
   archive: (id: number) => Promise<void>;
+  modifyLabels: (id: number, add: string[], remove: string[]) => Promise<void>;
   openCompose: (mode?: ReplyMode, messageId?: number) => Promise<void>;
   updateComposer: (patch: Partial<ComposerState>) => void;
   closeCompose: () => void;
@@ -73,13 +92,19 @@ export const useMail = create<MailState>((set, get) => ({
   accounts: [],
   activeAccountId: null,
   folder: "inbox",
+  category: "primary",
+  label: null,
+  labels: [],
   messages: [],
+  hasMore: true,
+  fetching: false,
   selectedId: null,
   detail: null,
   loadingDetail: false,
   syncing: {},
   unread: 0,
   search: "",
+  showImages: true,
   error: null,
   composer: null,
   busy: false,
@@ -88,6 +113,12 @@ export const useMail = create<MailState>((set, get) => ({
   init: async () => {
     if (get().initialised) return;
     set({ initialised: true });
+    try {
+      const s = await settings.get();
+      set({ showImages: s.mailShowImages });
+    } catch {
+      /* defaults are fine */
+    }
     await get().loadAccounts();
     await mail.onSync((ev: SyncEvent) => {
       const { syncing, activeAccountId } = get();
@@ -103,7 +134,10 @@ export const useMail = create<MailState>((set, get) => ({
           const next = { ...syncing };
           delete next[ev.accountId];
           set({ syncing: next });
-          if (ev.accountId === activeAccountId) void get().refresh();
+          if (ev.accountId === activeAccountId) {
+            void get().refresh();
+            void get().loadLabels();
+          }
           break;
         }
         case "failed": {
@@ -122,17 +156,51 @@ export const useMail = create<MailState>((set, get) => ({
     const activeAccountId =
       active !== null && accounts.some((a) => a.id === active) ? active : (accounts[0]?.id ?? null);
     set({ accounts, activeAccountId });
-    await get().refresh();
+    await Promise.all([get().refresh(), get().loadLabels()]);
+    void get().fetchFromServer(true);
+  },
+
+  loadLabels: async () => {
+    const id = get().activeAccountId;
+    if (id === null) {
+      set({ labels: [] });
+      return;
+    }
+    try {
+      set({ labels: await mail.listLabels(id) });
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+  },
+
+  query: () => {
+    const { folder, category, label } = get();
+    return { folder, category: folder === "inbox" ? category : null, label };
   },
 
   setAccount: (id) => {
-    set({ activeAccountId: id, selectedId: null, detail: null, search: "" });
+    set({ activeAccountId: id, selectedId: null, detail: null, search: "", label: null });
     void get().refresh();
+    void get().loadLabels();
+    void get().fetchFromServer(true);
   },
 
   setFolder: (folder) => {
-    set({ folder, selectedId: null, detail: null, search: "" });
+    set({ folder, label: null, selectedId: null, detail: null, search: "", hasMore: true });
     void get().refresh();
+    void get().fetchFromServer(true);
+  },
+
+  setCategory: (category) => {
+    set({ category, folder: "inbox", label: null, selectedId: null, detail: null, search: "", hasMore: true });
+    void get().refresh();
+    void get().fetchFromServer(true);
+  },
+
+  setLabel: (remoteId) => {
+    set({ label: remoteId, selectedId: null, detail: null, search: "", hasMore: true });
+    void get().refresh();
+    void get().fetchFromServer(true);
   },
 
   setSearch: (search) => {
@@ -140,23 +208,59 @@ export const useMail = create<MailState>((set, get) => ({
     void get().refresh();
   },
 
+  setShowImages: (showImages) => set({ showImages }),
+
   refresh: async () => {
-    const { activeAccountId, folder, search } = get();
+    const { activeAccountId, search } = get();
     if (activeAccountId === null) {
       set({ messages: [], unread: 0 });
       return;
     }
     try {
+      const limit = Math.max(PAGE, get().messages.length);
       const [messages, unread] = await Promise.all([
         search.trim()
           ? mail.search(activeAccountId, search)
-          : mail.listMessages(activeAccountId, folder, 200),
+          : mail.listMessages(activeAccountId, get().query(), limit),
         mail.unreadCount(activeAccountId),
       ]);
       set({ messages, unread });
     } catch (e) {
       set({ error: errorMessage(e) });
     }
+  },
+
+  // Asks the server for the next page of the current view and merges it
+  // into the local cache; the list then re-reads from the cache.
+  fetchFromServer: async (reset) => {
+    const id = get().activeAccountId;
+    if (id === null || get().fetching) return;
+    const query = get().query();
+    set({ fetching: true });
+    try {
+      const r = await mail.fetchMore(id, query, reset);
+      // The view may have changed while we were waiting.
+      if (JSON.stringify(get().query()) !== JSON.stringify(query)) return;
+      set({ hasMore: r.hasMore });
+      if (r.added > 0) {
+        await get().refresh();
+        void get().loadLabels();
+      }
+    } catch (e) {
+      set({ error: errorMessage(e), hasMore: false });
+    } finally {
+      set({ fetching: false });
+    }
+  },
+
+  loadMore: async () => {
+    const id = get().activeAccountId;
+    if (id === null) return;
+    // Show whatever the cache already has beyond the current window first.
+    const before = get().messages.length;
+    const more = await mail.listMessages(id, get().query(), before + PAGE);
+    set({ messages: more });
+    if (more.length < before + PAGE) await get().fetchFromServer(false);
   },
 
   select: async (id) => {
@@ -175,6 +279,7 @@ export const useMail = create<MailState>((set, get) => ({
         messages: get().messages.map((m) => (m.id === id ? { ...m, isRead: true } : m)),
         unread: wasUnread ? Math.max(0, get().unread - 1) : get().unread,
       });
+      if (wasUnread) void get().loadLabels();
     } catch (e) {
       set({ error: errorMessage(e) });
     } finally {
@@ -233,7 +338,7 @@ export const useMail = create<MailState>((set, get) => ({
     try {
       await mail.setFlags(id, { read: false });
       set({ selectedId: null, detail: null });
-      await get().refresh();
+      await Promise.all([get().refresh(), get().loadLabels()]);
     } catch (e) {
       set({ error: errorMessage(e) });
     }
@@ -243,6 +348,7 @@ export const useMail = create<MailState>((set, get) => ({
     try {
       await mail.trash(id);
       set({ selectedId: null, detail: null, messages: get().messages.filter((m) => m.id !== id) });
+      void get().loadLabels();
     } catch (e) {
       set({ error: errorMessage(e) });
     }
@@ -251,9 +357,22 @@ export const useMail = create<MailState>((set, get) => ({
   archive: async (id) => {
     try {
       await mail.archive(id);
-      if (get().folder === "inbox") {
+      if (get().folder === "inbox" && !get().label) {
         set({ selectedId: null, detail: null, messages: get().messages.filter((m) => m.id !== id) });
       }
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+  },
+
+  modifyLabels: async (id, add, remove) => {
+    try {
+      const detail = await mail.modifyLabels(id, add, remove);
+      set({
+        detail: get().detail?.id === id ? detail : get().detail,
+        messages: get().messages.map((m) => (m.id === id ? { ...m, labels: detail.labels } : m)),
+      });
+      void get().loadLabels();
     } catch (e) {
       set({ error: errorMessage(e) });
     }

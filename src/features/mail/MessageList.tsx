@@ -1,19 +1,18 @@
 import { useMail } from "./store";
+import { LabelChip } from "./LabelChip";
 import { shortDate } from "../../lib/format";
 
 export function MessageList() {
-  const { messages, selectedId, select, toggleStar, search, folder, syncing, activeAccountId } =
+  const { messages, selectedId, select, toggleStar, search, folder, label, labels, fetching, hasMore, loadMore } =
     useMail();
 
+  const userLabelIds = new Set(labels.filter((l) => l.kind === "user").map((l) => l.remoteId));
+
   if (messages.length === 0) {
-    const syncingNow = activeAccountId !== null && !!syncing[activeAccountId];
+    const where = label ? (labels.find((l) => l.remoteId === label)?.name ?? "this label") : folder;
     return (
       <div className="flex flex-1 items-center justify-center p-6 text-center text-sm text-gray-500">
-        {search
-          ? "No messages match."
-          : syncingNow
-            ? "Fetching messages…"
-            : `Nothing in ${folder}.`}
+        {search ? "No messages match." : fetching ? "Loading from server…" : `Nothing in ${where}.`}
       </div>
     );
   }
@@ -22,6 +21,7 @@ export function MessageList() {
     <ul className="flex-1 overflow-y-auto">
       {messages.map((m) => {
         const selected = m.id === selectedId;
+        const chips = m.labels.filter((l) => userLabelIds.has(l) && l !== label).slice(0, 2);
         return (
           <li
             key={m.id}
@@ -53,13 +53,31 @@ export function MessageList() {
                 {shortDate(m.date)}
               </span>
             </div>
-            <div className={`truncate pl-6 ${m.isRead ? "text-gray-700" : "font-medium text-gray-900"}`}>
-              {m.subject || "(no subject)"}
+            <div className="flex items-center gap-1 pl-6">
+              {chips.map((id) => (
+                <LabelChip key={id} remoteId={id} />
+              ))}
+              <span className={`min-w-0 truncate ${m.isRead ? "text-gray-700" : "font-medium text-gray-900"}`}>
+                {m.subject || "(no subject)"}
+              </span>
             </div>
             <div className="truncate pl-6 text-xs text-gray-500">{m.snippet}</div>
           </li>
         );
       })}
+      {!search && (
+        <li className="p-3 text-center">
+          {fetching ? (
+            <span className="text-xs text-gray-500">Loading…</span>
+          ) : hasMore ? (
+            <button className="btn btn-ghost text-xs" onClick={() => void loadMore()}>
+              Load more
+            </button>
+          ) : (
+            <span className="text-xs text-gray-400">No more messages</span>
+          )}
+        </li>
+      )}
     </ul>
   );
 }

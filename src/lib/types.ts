@@ -21,6 +21,38 @@ export type Folder =
   | "trash"
   | "all";
 
+export type Category = "primary" | "social" | "promotions" | "updates" | "forums";
+
+export interface ListQuery {
+  folder: Folder;
+  category?: Category | null;
+  label?: string | null;
+}
+
+export interface Label {
+  id: number;
+  remoteId: string;
+  name: string;
+  kind: "system" | "user";
+  bgColor: string | null;
+  fgColor: string | null;
+  unread: number;
+  total: number;
+}
+
+export interface MailFilter {
+  id: string;
+  criteria: [string, string][];
+  addLabels: string[];
+  removeLabels: string[];
+  forward: string | null;
+}
+
+export interface FetchResult {
+  added: number;
+  hasMore: boolean;
+}
+
 export interface MessageSummary {
   id: number;
   accountId: number;
@@ -161,6 +193,8 @@ export interface SettingsView {
   chatDisplayName: string;
   chatPort: number;
   chatDownloadDir: string;
+  mailShowImages: boolean;
+  mailSignature: string;
 }
 
 export interface SettingsPatch {
@@ -169,4 +203,6 @@ export interface SettingsPatch {
   chatDisplayName?: string;
   chatPort?: number;
   chatDownloadDir?: string;
+  mailShowImages?: boolean;
+  mailSignature?: string;
 }

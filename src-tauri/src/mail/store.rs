@@ -206,24 +206,42 @@ impl MailStore {
     pub fn list_messages(
         &self,
         account_id: i64,
-        folder: Folder,
+        query: &ListQuery,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<MessageSummary>> {
-        // Folder -> label predicate. Gmail semantics for now; when a second
+        // View -> label predicate. Gmail semantics for now; when a second
         // provider lands this moves behind the trait.
-        let filter = match folder {
-            Folder::Inbox => "has_label(labels, 'INBOX') AND NOT has_label(labels, 'TRASH')",
-            Folder::Starred => "is_starred = 1 AND NOT has_label(labels, 'TRASH')",
-            Folder::Sent => "has_label(labels, 'SENT')",
-            Folder::Drafts => "has_label(labels, 'DRAFT')",
-            Folder::Archive => {
+        let filter = match (&query.label, query.folder, query.category) {
+            (Some(_), _, _) => "has_label(labels, ?4) AND NOT has_label(labels, 'TRASH')".to_string(),
+            (None, Folder::Inbox, Some(Category::Primary)) => {
+                "has_label(labels, 'INBOX') AND NOT has_label(labels, 'TRASH')
+                 AND NOT has_label(labels, 'CATEGORY_SOCIAL')
+                 AND NOT has_label(labels, 'CATEGORY_PROMOTIONS')
+                 AND NOT has_label(labels, 'CATEGORY_UPDATES')
+                 AND NOT has_label(labels, 'CATEGORY_FORUMS')"
+                    .to_string()
+            }
+            (None, Folder::Inbox, Some(cat)) => format!(
+                "has_label(labels, 'INBOX') AND NOT has_label(labels, 'TRASH') AND has_label(labels, '{}')",
+                cat.label_id()
+            ),
+            (None, Folder::Inbox, None) => {
+                "has_label(labels, 'INBOX') AND NOT has_label(labels, 'TRASH')".to_string()
+            }
+            (None, Folder::Starred, _) => "is_starred = 1 AND NOT has_label(labels, 'TRASH')".to_string(),
+            (None, Folder::Sent, _) => "has_label(labels, 'SENT')".to_string(),
+            (None, Folder::Drafts, _) => "has_label(labels, 'DRAFT')".to_string(),
+            (None, Folder::Archive, _) => {
                 "NOT has_label(labels, 'INBOX') AND NOT has_label(labels, 'TRASH')
                  AND NOT has_label(labels, 'SPAM') AND NOT has_label(labels, 'SENT')
                  AND NOT has_label(labels, 'DRAFT')"
+                    .to_string()
             }
-            Folder::Trash => "has_label(labels, 'TRASH')",
-            Folder::All => "NOT has_label(labels, 'TRASH') AND NOT has_label(labels, 'SPAM')",
+            (None, Folder::Trash, _) => "has_label(labels, 'TRASH')".to_string(),
+            (None, Folder::All, _) => {
+                "NOT has_label(labels, 'TRASH') AND NOT has_label(labels, 'SPAM')".to_string()
+            }
         };
         let sql = format!(
             "SELECT {SUMMARY_COLS} FROM mail_messages
@@ -232,7 +250,82 @@ impl MailStore {
         );
         let conn = self.db.conn();
         let mut stmt = conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map(params![account_id, limit, offset], row_to_summary)?;
+        let label = query.label.clone().unwrap_or_default();
+        let rows = stmt.query_map(params![account_id, limit, offset, label], row_to_summary)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // ---- labels ---------------------------------------------------------
+
+    pub fn replace_labels(&self, account_id: i64, labels: &[RemoteLabel]) -> Result<()> {
+        let mut conn = self.db.conn();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO mail_labels(account_id, remote_id, name, kind, bg_color, fg_color, visible)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(account_id, remote_id) DO UPDATE SET
+                    name = excluded.name, kind = excluded.kind, bg_color = excluded.bg_color,
+                    fg_color = excluded.fg_color, visible = excluded.visible",
+            )?;
+            for l in labels {
+                stmt.execute(params![
+                    account_id,
+                    l.remote_id,
+                    l.name,
+                    l.kind,
+                    l.bg_color,
+                    l.fg_color,
+                    l.visible as i64
+                ])?;
+            }
+        }
+        // Drop labels that no longer exist server-side.
+        let keep: Vec<String> = labels.iter().map(|l| l.remote_id.clone()).collect();
+        let keep_json = serde_json::to_string(&keep)?;
+        tx.execute(
+            "DELETE FROM mail_labels WHERE account_id = ?1
+             AND remote_id NOT IN (SELECT value FROM json_each(?2))",
+            params![account_id, keep_json],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// User labels plus the category labels, each with local counts.
+    pub fn list_labels(&self, account_id: i64) -> Result<Vec<Label>> {
+        let conn = self.db.conn();
+        let mut stmt = conn.prepare_cached(
+            "SELECT l.id, l.remote_id, l.name, l.kind, l.bg_color, l.fg_color,
+                (SELECT COUNT(*) FROM mail_messages m WHERE m.account_id = l.account_id
+                    AND m.is_read = 0 AND has_label(m.labels, l.remote_id) AND NOT has_label(m.labels, 'TRASH')),
+                (SELECT COUNT(*) FROM mail_messages m WHERE m.account_id = l.account_id
+                    AND has_label(m.labels, l.remote_id) AND NOT has_label(m.labels, 'TRASH'))
+             FROM mail_labels l
+             WHERE l.account_id = ?1 AND l.visible = 1
+               AND (l.kind = 'user' OR l.remote_id LIKE 'CATEGORY_%')
+             ORDER BY l.kind DESC, l.name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![account_id], |r| {
+            Ok(Label {
+                id: r.get(0)?,
+                remote_id: r.get(1)?,
+                name: r.get(2)?,
+                kind: r.get(3)?,
+                bg_color: r.get(4)?,
+                fg_color: r.get(5)?,
+                unread: r.get(6)?,
+                total: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn label_names(&self, account_id: i64) -> Result<std::collections::HashMap<String, String>> {
+        let conn = self.db.conn();
+        let mut stmt =
+            conn.prepare_cached("SELECT remote_id, name FROM mail_labels WHERE account_id = ?1")?;
+        let rows = stmt.query_map(params![account_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 

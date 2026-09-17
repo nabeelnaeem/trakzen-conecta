@@ -38,6 +38,108 @@ pub enum Folder {
     All,
 }
 
+/// Gmail inbox tabs. `Primary` is everything in the inbox that carries no
+/// other category label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Category {
+    Primary,
+    Social,
+    Promotions,
+    Updates,
+    Forums,
+}
+
+impl Category {
+    pub fn label_id(self) -> &'static str {
+        match self {
+            Category::Primary => "CATEGORY_PERSONAL",
+            Category::Social => "CATEGORY_SOCIAL",
+            Category::Promotions => "CATEGORY_PROMOTIONS",
+            Category::Updates => "CATEGORY_UPDATES",
+            Category::Forums => "CATEGORY_FORUMS",
+        }
+    }
+}
+
+/// What the message list is showing. `label` (a provider label id) wins
+/// over `folder`; `category` only applies to the inbox.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListQuery {
+    pub folder: Folder,
+    #[serde(default)]
+    pub category: Option<Category>,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+impl ListQuery {
+    /// The provider label that backs this view, for server-side paging.
+    pub fn label_id(&self) -> Option<String> {
+        if let Some(l) = &self.label {
+            return Some(l.clone());
+        }
+        let id = match self.folder {
+            Folder::Inbox => match self.category {
+                Some(c) if c != Category::Primary => return Some(c.label_id().into()),
+                _ => "INBOX",
+            },
+            Folder::Starred => "STARRED",
+            Folder::Sent => "SENT",
+            Folder::Drafts => "DRAFT",
+            Folder::Trash => "TRASH",
+            Folder::Archive | Folder::All => return None,
+        };
+        Some(id.into())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Label {
+    pub id: i64,
+    pub remote_id: String,
+    pub name: String,
+    /// `system` or `user`
+    pub kind: String,
+    pub bg_color: Option<String>,
+    pub fg_color: Option<String>,
+    pub unread: i64,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RemoteLabel {
+    pub remote_id: String,
+    pub name: String,
+    pub kind: String,
+    pub bg_color: Option<String>,
+    pub fg_color: Option<String>,
+    pub visible: bool,
+}
+
+/// A server-side filter rule (Gmail "Filters and blocked addresses").
+/// Read-only for now; shown in Settings so users can see what the account
+/// does to incoming mail.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MailFilter {
+    pub id: String,
+    /// Human-readable criteria, e.g. "from: alerts@x.com" — ordered.
+    pub criteria: Vec<(String, String)>,
+    pub add_labels: Vec<String>,
+    pub remove_labels: Vec<String>,
+    pub forward: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchResult {
+    pub added: usize,
+    pub has_more: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageSummary {

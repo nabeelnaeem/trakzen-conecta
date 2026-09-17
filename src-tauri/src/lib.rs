@@ -24,6 +24,7 @@ pub struct AppState {
     pub providers: Providers,
     pub chat: Arc<ChatEngine>,
     pub sync_guard: mail::commands::SyncGuard,
+    pub page_tokens: mail::commands::PageTokens,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -34,6 +35,8 @@ pub struct SettingsPatch {
     chat_display_name: Option<String>,
     chat_port: Option<u16>,
     chat_download_dir: Option<String>,
+    mail_show_images: Option<bool>,
+    mail_signature: Option<String>,
 }
 
 #[tauri::command]
@@ -62,6 +65,12 @@ async fn settings_update(
     }
     if let Some(v) = patch.chat_download_dir {
         settings::set(&state.db, settings::CHAT_DOWNLOAD_DIR, v.trim())?;
+    }
+    if let Some(v) = patch.mail_show_images {
+        settings::set(&state.db, settings::MAIL_SHOW_IMAGES, if v { "true" } else { "false" })?;
+    }
+    if let Some(v) = patch.mail_signature {
+        settings::set(&state.db, settings::MAIL_SIGNATURE, v.trim_end())?;
     }
     settings::view(&state.db)
 }
@@ -97,6 +106,7 @@ pub fn run() {
                 },
                 chat: chat.clone(),
                 sync_guard: Default::default(),
+                page_tokens: Default::default(),
                 db,
             };
             app.manage(state);
@@ -128,6 +138,10 @@ pub fn run() {
             mail::commands::mail_compose_draft,
             mail::commands::mail_send,
             mail::commands::mail_save_attachment,
+            mail::commands::mail_list_labels,
+            mail::commands::mail_modify_labels,
+            mail::commands::mail_fetch_more,
+            mail::commands::mail_list_filters,
             chat::commands::chat_identity,
             chat::commands::chat_set_display_name,
             chat::commands::chat_list_peers,

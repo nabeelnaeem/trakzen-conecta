@@ -121,8 +121,27 @@ impl GmailApi {
         max: u32,
         page_token: Option<&str>,
     ) -> Result<IdList> {
+        self.list_ids_in(token, None, query, max, page_token).await
+    }
+
+    pub async fn list_ids_in(
+        &self,
+        token: &str,
+        label_id: Option<&str>,
+        query: Option<&str>,
+        max: u32,
+        page_token: Option<&str>,
+    ) -> Result<IdList> {
         let max = max.to_string();
         let mut q = vec![("maxResults", max.as_str())];
+        if let Some(l) = label_id {
+            q.push(("labelIds", l));
+            // Trash and spam are hidden by default; when the user opens
+            // Trash itself they must be included.
+            if l == "TRASH" || l == "SPAM" {
+                q.push(("includeSpamTrash", "true"));
+            }
+        }
         if let Some(query) = query {
             q.push(("q", query));
         }
@@ -130,6 +149,79 @@ impl GmailApi {
             q.push(("pageToken", pt));
         }
         Ok(serde_json::from_value(self.get_json(token, "messages", &q).await?)?)
+    }
+
+    pub async fn list_labels(&self, token: &str) -> Result<Vec<RemoteLabel>> {
+        let v = self.get_json(token, "labels", &[]).await?;
+        let mut out = Vec::new();
+        for l in v["labels"].as_array().into_iter().flatten() {
+            let id = l["id"].as_str().unwrap_or_default().to_string();
+            let name = l["name"].as_str().unwrap_or_default().to_string();
+            let kind = l["type"].as_str().unwrap_or("user").to_string();
+            // Categories are system labels but Gmail names them
+            // "CATEGORY_SOCIAL"; give them the tab names users know.
+            let name = match id.as_str() {
+                "CATEGORY_PERSONAL" => "Primary".into(),
+                "CATEGORY_SOCIAL" => "Social".into(),
+                "CATEGORY_PROMOTIONS" => "Promotions".into(),
+                "CATEGORY_UPDATES" => "Updates".into(),
+                "CATEGORY_FORUMS" => "Forums".into(),
+                _ => name,
+            };
+            let visible = l["labelListVisibility"]
+                .as_str()
+                .map_or(true, |v| v != "labelHide");
+            out.push(RemoteLabel {
+                remote_id: id,
+                name,
+                kind,
+                bg_color: l["color"]["backgroundColor"].as_str().map(str::to_string),
+                fg_color: l["color"]["textColor"].as_str().map(str::to_string),
+                visible,
+            });
+        }
+        Ok(out)
+    }
+
+    pub async fn list_filters(&self, token: &str) -> Result<Vec<MailFilter>> {
+        let v = self.get_json(token, "settings/filters", &[]).await?;
+        let mut out = Vec::new();
+        for f in v["filter"].as_array().into_iter().flatten() {
+            let c = &f["criteria"];
+            let mut criteria = Vec::new();
+            for (key, label) in [
+                ("from", "from"),
+                ("to", "to"),
+                ("subject", "subject"),
+                ("query", "has the words"),
+                ("negatedQuery", "doesn't have"),
+            ] {
+                if let Some(val) = c[key].as_str() {
+                    criteria.push((label.to_string(), val.to_string()));
+                }
+            }
+            if c["hasAttachment"].as_bool() == Some(true) {
+                criteria.push(("has attachment".into(), "yes".into()));
+            }
+            if let Some(sz) = c["size"].as_i64() {
+                let cmp = c["sizeComparison"].as_str().unwrap_or("larger");
+                criteria.push((format!("size {cmp} than"), format!("{sz} bytes")));
+            }
+            let a = &f["action"];
+            let strings = |v: &Value| -> Vec<String> {
+                v.as_array()
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default()
+            };
+            out.push(MailFilter {
+                id: f["id"].as_str().unwrap_or_default().to_string(),
+                criteria,
+                add_labels: strings(&a["addLabelIds"]),
+                remove_labels: strings(&a["removeLabelIds"]),
+                forward: a["forward"].as_str().map(str::to_string),
+            });
+        }
+        Ok(out)
     }
 
     /// Metadata only: headers, labels, snippet. Returns `None` when the

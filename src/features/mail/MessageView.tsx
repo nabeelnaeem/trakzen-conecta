@@ -1,20 +1,35 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMail } from "./store";
 import { buildFrameDoc } from "./frame";
+import { LabelChip } from "./LabelChip";
 import { bytes, longDate } from "../../lib/format";
 import { errorMessage, mail } from "../../lib/ipc";
 
 export function MessageView() {
-  const { detail, loadingDetail, selectedId, openCompose, toggleStar, trash, archive, markUnread } =
-    useMail();
-  const [showImages, setShowImages] = useState(false);
+  const {
+    detail,
+    loadingDetail,
+    selectedId,
+    openCompose,
+    toggleStar,
+    trash,
+    archive,
+    markUnread,
+    showImages: showImagesDefault,
+    labels,
+    modifyLabels,
+  } = useMail();
+  const [showImagesOnce, setShowImagesOnce] = useState(false);
   const [attError, setAttError] = useState<string | null>(null);
+  const [labelMenu, setLabelMenu] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   // Reset the per-message image choice whenever a different message opens.
   useEffect(() => {
-    setShowImages(false);
+    setShowImagesOnce(false);
     setAttError(null);
+    setLabelMenu(false);
   }, [selectedId]);
 
   useEffect(() => {
@@ -23,9 +38,18 @@ export function MessageView() {
       if (data?.type !== "tc-open" || typeof data.href !== "string") return;
       if (/^(https?:|mailto:)/i.test(data.href)) void openUrl(data.href);
     };
+    const onClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setLabelMenu(false);
+    };
     window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
+    document.addEventListener("mousedown", onClick);
+    return () => {
+      window.removeEventListener("message", onMessage);
+      document.removeEventListener("mousedown", onClick);
+    };
   }, []);
+
+  const showImages = showImagesDefault || showImagesOnce;
 
   const doc = useMemo(() => {
     if (!detail) return "";
@@ -53,6 +77,9 @@ export function MessageView() {
     );
   }
 
+  const userLabels = labels.filter((l) => l.kind === "user");
+  const applied = detail.labels.filter((id) => userLabels.some((l) => l.remoteId === id));
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center gap-1 border-b border-gray-200 px-3 py-2">
@@ -66,6 +93,34 @@ export function MessageView() {
           Forward
         </button>
         <div className="flex-1" />
+        <div className="relative" ref={menuRef}>
+          <button className="btn btn-ghost" onClick={() => setLabelMenu((v) => !v)} title="Labels">
+            Label ▾
+          </button>
+          {labelMenu && (
+            <div className="absolute right-0 z-10 mt-1 max-h-72 w-56 overflow-y-auto rounded-md border border-gray-200 bg-white py-1 shadow-lg">
+              {userLabels.length === 0 && (
+                <div className="px-3 py-2 text-xs text-gray-500">No labels in this account</div>
+              )}
+              {userLabels.map((l) => {
+                const on = detail.labels.includes(l.remoteId);
+                return (
+                  <label key={l.id} className="flex cursor-pointer items-center gap-2 px-3 py-1 text-sm hover:bg-gray-50">
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      onChange={() =>
+                        void modifyLabels(detail.id, on ? [] : [l.remoteId], on ? [l.remoteId] : [])
+                      }
+                    />
+                    <span className="h-2.5 w-2.5 rounded-sm" style={{ background: l.bgColor ?? "#9ca3af" }} />
+                    <span className="truncate">{l.name}</span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
         <button
           className={`btn btn-ghost ${detail.isStarred ? "text-amber-500" : ""}`}
           onClick={() => void toggleStar(detail)}
@@ -87,7 +142,12 @@ export function MessageView() {
       </div>
 
       <div className="border-b border-gray-200 px-4 py-3">
-        <h1 className="text-lg font-semibold leading-snug">{detail.subject || "(no subject)"}</h1>
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-lg font-semibold leading-snug">{detail.subject || "(no subject)"}</h1>
+          {applied.map((id) => (
+            <LabelChip key={id} remoteId={id} onRemove={() => void modifyLabels(detail.id, [], [id])} />
+          ))}
+        </div>
         <div className="mt-1 flex flex-wrap items-baseline gap-x-2 text-sm">
           <span className="font-medium">{detail.fromName}</span>
           <span className="text-gray-500">&lt;{detail.fromAddr}&gt;</span>
@@ -100,7 +160,7 @@ export function MessageView() {
         {hasRemoteImages && !showImages && (
           <div className="mt-2 flex items-center gap-2 rounded bg-amber-50 px-2 py-1 text-xs text-amber-900">
             Remote images are blocked.
-            <button className="underline" onClick={() => setShowImages(true)}>
+            <button className="underline" onClick={() => setShowImagesOnce(true)}>
               Show images
             </button>
           </div>

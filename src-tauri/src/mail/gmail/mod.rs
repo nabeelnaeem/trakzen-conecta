@@ -134,6 +134,11 @@ impl GmailProvider {
         Ok(())
     }
 
+    async fn refresh_labels(&self, token: &str, account: &Account, store: &MailStore) -> Result<()> {
+        let labels = self.api.list_labels(token).await?;
+        store.replace_labels(account.id, &labels)
+    }
+
     /// Returns `Ok(false)` when the cursor is too old and a full sync is needed.
     async fn incremental_sync(
         &self,
@@ -216,6 +221,9 @@ impl MailProvider for GmailProvider {
         observe: SyncObserver<'_>,
     ) -> Result<()> {
         let token = self.token(account).await?;
+        // Labels are cheap and change rarely; refresh them on every pass so
+        // a label created on the web shows up on the next sync.
+        self.refresh_labels(&token, account, store).await?;
         let full = match &account.sync_cursor {
             Some(cursor) => {
                 observe(SyncEvent::Started {
@@ -290,6 +298,54 @@ impl MailProvider for GmailProvider {
         self.api
             .modify_labels(&token, remote_id, &[], &["INBOX"])
             .await
+    }
+
+    async fn modify_labels(
+        &self,
+        account: &Account,
+        remote_id: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        let token = self.token(account).await?;
+        let add: Vec<&str> = add.iter().map(String::as_str).collect();
+        let remove: Vec<&str> = remove.iter().map(String::as_str).collect();
+        self.api.modify_labels(&token, remote_id, &add, &remove).await
+    }
+
+    async fn list_labels(&self, account: &Account) -> Result<Vec<RemoteLabel>> {
+        let token = self.token(account).await?;
+        self.api.list_labels(&token).await
+    }
+
+    async fn list_filters(&self, account: &Account) -> Result<Vec<MailFilter>> {
+        let token = self.token(account).await?;
+        self.api.list_filters(&token).await
+    }
+
+    async fn fetch_label_page(
+        &self,
+        account: &Account,
+        store: &MailStore,
+        label_id: &str,
+        page_token: Option<&str>,
+    ) -> Result<(usize, Option<String>)> {
+        let token = self.token(account).await?;
+        let list = self
+            .api
+            .list_ids_in(&token, Some(label_id), None, 100, page_token)
+            .await?;
+        let known: HashSet<String> = store.known_remote_ids(account.id)?.into_iter().collect();
+        let fresh: Vec<String> = list
+            .messages
+            .into_iter()
+            .map(|m| m.id)
+            .filter(|id| !known.contains(id))
+            .collect();
+        let added = fresh.len();
+        let noop = |_: SyncEvent| {};
+        self.fetch_and_store(&token, account, store, fresh, &noop).await?;
+        Ok((added, list.next_page_token))
     }
 }
 

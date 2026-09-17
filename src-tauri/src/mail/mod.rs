@@ -53,6 +53,29 @@ pub trait MailProvider: Send + Sync {
     async fn trash(&self, account: &Account, remote_id: &str) -> Result<()>;
 
     async fn archive(&self, account: &Account, remote_id: &str) -> Result<()>;
+
+    async fn modify_labels(
+        &self,
+        account: &Account,
+        remote_id: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()>;
+
+    async fn list_labels(&self, account: &Account) -> Result<Vec<RemoteLabel>>;
+
+    async fn list_filters(&self, account: &Account) -> Result<Vec<MailFilter>>;
+
+    /// Pulls one page of message metadata for `label_id` (newest first),
+    /// starting at `page_token`, into the store. Returns the number of
+    /// messages that were new locally and the token for the next page.
+    async fn fetch_label_page(
+        &self,
+        account: &Account,
+        store: &MailStore,
+        label_id: &str,
+        page_token: Option<&str>,
+    ) -> Result<(usize, Option<String>)>;
 }
 
 pub struct Providers {

@@ -80,6 +80,20 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX chat_messages_peer ON chat_messages(peer_id, created_at);
     ",
+    // 2: provider labels (Gmail labels, later IMAP folders)
+    "
+    CREATE TABLE mail_labels (
+        id         INTEGER PRIMARY KEY,
+        account_id INTEGER NOT NULL REFERENCES mail_accounts(id) ON DELETE CASCADE,
+        remote_id  TEXT    NOT NULL,
+        name       TEXT    NOT NULL,
+        kind       TEXT    NOT NULL,
+        bg_color   TEXT,
+        fg_color   TEXT,
+        visible    INTEGER NOT NULL DEFAULT 1,
+        UNIQUE(account_id, remote_id)
+    );
+    ",
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
