@@ -406,7 +406,7 @@ impl MailStore {
                     WHERE account_id = ?1 AND (?4 = '' OR has_label(labels, ?4)) AND {filter}{snooze}
                  ),
                  newest AS (
-                    SELECT id, tid, date, ROW_NUMBER() OVER (PARTITION BY tid ORDER BY date DESC, id DESC) rn
+                    SELECT id, tid, ROW_NUMBER() OVER (PARTITION BY tid ORDER BY date DESC, id DESC) rn
                     FROM hits
                  )
                  SELECT {SUMMARY_COLS},
@@ -416,7 +416,7 @@ impl MailStore {
                         AND COALESCE(t.thread_id, t.remote_id) = newest.tid AND t.is_read = 0 AND NOT has_label(t.labels, 'TRASH'))
                  FROM newest JOIN mail_messages USING (id)
                  WHERE rn = 1
-                 ORDER BY newest.date DESC LIMIT ?2 OFFSET ?3"
+                 ORDER BY mail_messages.date DESC LIMIT ?2 OFFSET ?3"
             )
         } else {
             format!(
@@ -903,6 +903,29 @@ mod tests {
         assert_eq!(list(Folder::All, None, None).len(), 4);
         assert_eq!(list(Folder::Drafts, None, None).len(), 0);
         assert_eq!(list(Folder::Inbox, None, Some("Label_7")), vec!["4"]);
+
+        // Conversation mode: two inbox messages in one thread collapse to the
+        // newest, carrying the thread's counts.
+        let mut a = msg("6", &["INBOX"]);
+        a.thread_id = Some("T".into());
+        a.date = 5;
+        let mut b = msg("7", &["INBOX", "UNREAD"]);
+        b.thread_id = Some("T".into());
+        b.date = 9;
+        store.upsert_messages(acc.id, &[a, b]).unwrap();
+        let q = ListQuery { folder: Folder::Inbox, category: None, label: None };
+        let rows = store.list_messages_grouped(acc.id, &q, 50, 0, true).unwrap();
+        let t = rows.iter().find(|m| m.remote_id == "7").expect("thread row");
+        assert_eq!(t.thread_count, 2);
+        assert_eq!(t.thread_unread, 1);
+        assert!(!rows.iter().any(|m| m.remote_id == "6"));
+        assert_eq!(rows[0].remote_id, "7");
+        assert_eq!(store.list_thread(acc.id, "T").unwrap().len(), 2);
+        // Every folder works in conversation mode too.
+        for f in [Folder::Starred, Folder::Sent, Folder::Drafts, Folder::Archive, Folder::Trash, Folder::Spam, Folder::All] {
+            let q = ListQuery { folder: f, category: None, label: None };
+            store.list_messages_grouped(acc.id, &q, 50, 0, true).unwrap();
+        }
     }
 }
 

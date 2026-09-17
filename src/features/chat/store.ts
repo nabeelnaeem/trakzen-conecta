@@ -126,7 +126,10 @@ export const useChat = create<ChatState>((set, get) => ({
       set({ peers: get().peers.map((p) => (p.id === id ? { ...p, unread: 0 } : p)) });
       void chat.connectPeer(id);
     } catch (e) {
-      set({ error: errorMessage(e) });
+      // A peer that vanished underneath us (removed elsewhere) means the
+      // list is stale; reload it rather than showing a dead conversation.
+      set({ error: errorMessage(e), activePeerId: null, messages: [] });
+      void get().loadPeers();
     }
   },
 
