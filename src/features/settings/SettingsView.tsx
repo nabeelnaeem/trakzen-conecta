@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { errorMessage, mail, settings } from "../../lib/ipc";
+import { notifyPrefs, playSound } from "../../lib/notify";
 import type { Account, MailFilter, SettingsView as Settings } from "../../lib/types";
 import { useChat } from "../chat/store";
 import { useMail } from "../mail/store";
@@ -15,10 +16,15 @@ export function SettingsView() {
   const [showImages, setShowImages] = useState(true);
   const [signature, setSignature] = useState("");
   const [poll, setPoll] = useState("60");
+  const [closeToTray, setCloseToTray] = useState(true);
+  const [notifications, setNotifications] = useState(true);
+  const [sound, setSound] = useState(true);
+  const [conversation, setConversation] = useState(true);
+  const [undo, setUndo] = useState("10");
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const refreshIdentity = useChat((c) => c.refreshIdentity);
-  const setMailShowImages = useMail((m) => m.setShowImages);
+  const applyMail = useMail((m) => m.applySettings);
 
   useEffect(() => {
     settings
@@ -32,6 +38,11 @@ export function SettingsView() {
         setShowImages(v.mailShowImages);
         setSignature(v.mailSignature);
         setPoll(String(v.mailPollSeconds));
+        setCloseToTray(v.closeToTray);
+        setNotifications(v.notifications);
+        setSound(v.notificationSound);
+        setConversation(v.conversationView);
+        setUndo(String(v.undoSendSeconds));
       })
       .catch((e) => setErr(errorMessage(e)));
   }, []);
@@ -49,10 +60,17 @@ export function SettingsView() {
         mailShowImages: showImages,
         mailSignature: signature,
         mailPollSeconds: Math.max(0, Number(poll) || 0),
+        closeToTray,
+        notifications,
+        notificationSound: sound,
+        conversationView: conversation,
+        undoSendSeconds: Math.max(0, Number(undo) || 0),
       });
       setS(v);
       setClientSecret("");
-      setMailShowImages(v.mailShowImages);
+      applyMail({ showImages: v.mailShowImages, conversations: v.conversationView, undoSeconds: v.undoSendSeconds });
+      notifyPrefs.notifications = v.notifications;
+      notifyPrefs.sound = v.notificationSound;
       setMsg("Saved." + (Number(port) !== s?.chatPort ? " Port changes apply after restart." : ""));
       void refreshIdentity();
     } catch (e) {
@@ -66,27 +84,55 @@ export function SettingsView() {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-2xl space-y-8 p-6">
         <section>
+          <h2 className="text-base font-semibold">General</h2>
+          <div className="mt-3 space-y-2 text-sm">
+            <Toggle v={closeToTray} on={setCloseToTray} label="Keep running in the system tray when the window is closed" hint="Quit from the tray icon's menu." />
+            <Toggle v={notifications} on={setNotifications} label="Desktop notifications for new mail and chat messages" />
+            <div className="flex items-center gap-3">
+              <Toggle v={sound} on={setSound} label="Play a sound" />
+              <button className="btn btn-ghost text-xs" onClick={() => playSound("mail")}>▶ mail</button>
+              <button className="btn btn-ghost text-xs" onClick={() => playSound("chat")}>▶ chat</button>
+            </div>
+          </div>
+        </section>
+
+        <section>
           <h2 className="text-base font-semibold">Mail</h2>
-          <div className="mt-3 space-y-3">
-            <label className="flex items-center gap-2 text-sm">
-              <input type="checkbox" checked={showImages} onChange={(e) => setShowImages(e.target.checked)} />
-              Always show remote images
-            </label>
-            <p className="-mt-2 text-xs text-gray-500">
-              Off means senders can't tell when you open a message; you can still show images per message.
-            </p>
-            <div>
-              <label className="label">Check for new mail every (seconds)</label>
-              <input className="input w-32" value={poll} onChange={(e) => setPoll(e.target.value.replace(/\D/g, ""))} />
-              <p className="mt-1 text-xs text-gray-500">
-                Each check is one small request per account. Minimum 15; 0 turns background checks off
-                (the app still syncs when you return to the window or press ⟳).
-              </p>
+          <div className="mt-3 space-y-3 text-sm">
+            <Toggle v={conversation} on={setConversation} label="Conversation view (group replies into threads)" />
+            <Toggle v={showImages} on={setShowImages} label="Always show remote images" hint="Off means senders can't tell when you open a message; you can still show images per message." />
+            <div className="flex gap-6">
+              <div>
+                <label className="label">Undo send window (seconds)</label>
+                <input className="input w-28" value={undo} onChange={(e) => setUndo(e.target.value.replace(/\D/g, ""))} />
+                <p className="mt-1 text-xs text-gray-500">0 sends immediately. Max 60.</p>
+              </div>
+              <div>
+                <label className="label">Check for new mail every (seconds)</label>
+                <input className="input w-28" value={poll} onChange={(e) => setPoll(e.target.value.replace(/\D/g, ""))} />
+                <p className="mt-1 text-xs text-gray-500">Minimum 15; 0 turns background checks off.</p>
+              </div>
             </div>
             <div>
               <label className="label">Signature (appended to messages you send)</label>
               <textarea className="input min-h-[72px]" value={signature} onChange={(e) => setSignature(e.target.value)} />
             </div>
+            <details className="text-xs text-gray-600">
+              <summary className="cursor-pointer">Keyboard shortcuts</summary>
+              <div className="mt-1 grid grid-cols-2 gap-x-6 gap-y-0.5 font-mono">
+                <span>j / k</span><span className="font-sans">next / previous</span>
+                <span>e</span><span className="font-sans">archive</span>
+                <span># or Del</span><span className="font-sans">trash</span>
+                <span>!</span><span className="font-sans">spam</span>
+                <span>r / a / f</span><span className="font-sans">reply / reply all / forward</span>
+                <span>c</span><span className="font-sans">compose</span>
+                <span>s</span><span className="font-sans">star</span>
+                <span>x / *</span><span className="font-sans">select / select all</span>
+                <span>Shift+U / Shift+I</span><span className="font-sans">mark unread / read</span>
+                <span>/</span><span className="font-sans">search</span>
+                <span>u or Esc</span><span className="font-sans">back to list</span>
+              </div>
+            </details>
           </div>
         </section>
 
@@ -157,19 +203,42 @@ export function SettingsView() {
   );
 }
 
-/** Read-only view of the server-side filter rules for each account. */
+function Toggle({ v, on, label, hint }: { v: boolean; on: (v: boolean) => void; label: string; hint?: string }) {
+  return (
+    <div>
+      <label className="flex items-center gap-2 text-sm">
+        <input type="checkbox" checked={v} onChange={(e) => on(e.target.checked)} />
+        {label}
+      </label>
+      {hint && <p className="ml-6 text-xs text-gray-500">{hint}</p>}
+    </div>
+  );
+}
+
+/** Server-side filter rules for each account: list, delete, create. */
 function FiltersSection() {
   const accounts = useMail((m) => m.accounts);
+  const openFilterEditor = useMail((m) => m.openFilterEditor);
+  const filterEditor = useMail((m) => m.filterEditor);
+  const setAccount = useMail((m) => m.setAccount);
   const [byAccount, setByAccount] = useState<Record<number, MailFilter[] | string>>({});
+  const [reauthMsg, setReauthMsg] = useState<string | null>(null);
+
+  const load = (a: Account) =>
+    mail
+      .listFilters(a.id)
+      .then((f) => setByAccount((prev) => ({ ...prev, [a.id]: f })))
+      .catch((e) => setByAccount((prev) => ({ ...prev, [a.id]: errorMessage(e) })));
 
   useEffect(() => {
-    for (const a of accounts) {
-      mail
-        .listFilters(a.id)
-        .then((f) => setByAccount((prev) => ({ ...prev, [a.id]: f })))
-        .catch((e) => setByAccount((prev) => ({ ...prev, [a.id]: errorMessage(e) })));
-    }
+    for (const a of accounts) void load(a);
   }, [accounts]);
+
+  // Reload after the editor closes (a filter may have been created).
+  useEffect(() => {
+    if (!filterEditor) for (const a of accounts) void load(a);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterEditor]);
 
   if (accounts.length === 0) return null;
 
@@ -177,25 +246,53 @@ function FiltersSection() {
     <section>
       <h2 className="text-base font-semibold">Mail filters</h2>
       <p className="mt-1 text-sm text-gray-600">
-        Rules your provider applies to incoming mail. Edit them in Gmail's settings; they apply
-        before messages reach this app.
+        Rules the provider applies to incoming mail before it reaches this app. Accounts connected
+        before filter management was added need to be signed in again once to grant the extra
+        permission.
       </p>
+      {reauthMsg && <div className="mt-2 text-xs text-green-700">{reauthMsg}</div>}
       {accounts.map((a) => (
-        <AccountFilters key={a.id} account={a} filters={byAccount[a.id]} />
+        <div key={a.id} className="mt-3">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium">{a.email}</span>
+            <button
+              className="btn btn-ghost text-xs"
+              onClick={() => {
+                setAccount(a.id);
+                openFilterEditor();
+              }}
+            >
+              + Create filter
+            </button>
+            <button
+              className="btn btn-ghost text-xs"
+              onClick={() =>
+                mail
+                  .reauth(a.id)
+                  .then(() => {
+                    setReauthMsg(`${a.email} signed in again.`);
+                    void load(a);
+                  })
+                  .catch((e) => setByAccount((prev) => ({ ...prev, [a.id]: errorMessage(e) })))
+              }
+            >
+              Sign in again
+            </button>
+          </div>
+          <AccountFilters account={a} filters={byAccount[a.id]} onDeleted={() => void load(a)} />
+        </div>
       ))}
     </section>
   );
 }
 
-function AccountFilters({ account, filters }: { account: Account; filters: MailFilter[] | string | undefined }) {
+function AccountFilters({ account, filters, onDeleted }: { account: Account; filters: MailFilter[] | string | undefined; onDeleted: () => void }) {
+  const [err, setErr] = useState<string | null>(null);
   return (
-    <div className="mt-3">
-      <div className="text-sm font-medium">{account.email}</div>
+    <div className="mt-1">
       {filters === undefined && <div className="text-xs text-gray-500">Loading…</div>}
       {typeof filters === "string" && <div className="text-xs text-red-700">{filters}</div>}
-      {Array.isArray(filters) && filters.length === 0 && (
-        <div className="text-xs text-gray-500">No filters.</div>
-      )}
+      {Array.isArray(filters) && filters.length === 0 && <div className="text-xs text-gray-500">No filters.</div>}
       {Array.isArray(filters) && filters.length > 0 && (
         <ul className="mt-1 divide-y divide-gray-100 rounded-md border border-gray-200 text-xs">
           {filters.map((f) => (
@@ -210,7 +307,7 @@ function AccountFilters({ account, filters }: { account: Account; filters: MailF
                     ))}
               </span>
               <span className="text-gray-400">→</span>
-              <span>
+              <span className="flex-1">
                 {f.addLabels.map((l) => (
                   <span key={`+${l}`} className="mr-1 rounded bg-green-50 px-1 text-green-800">
                     +{l}
@@ -223,10 +320,20 @@ function AccountFilters({ account, filters }: { account: Account; filters: MailF
                 ))}
                 {f.forward && <span className="rounded bg-blue-50 px-1 text-blue-800">forward to {f.forward}</span>}
               </span>
+              <button
+                className="text-red-700 hover:underline"
+                onClick={() => {
+                  if (!confirm("Delete this filter?")) return;
+                  mail.deleteFilter(account.id, f.id).then(onDeleted).catch((e) => setErr(errorMessage(e)));
+                }}
+              >
+                delete
+              </button>
             </li>
           ))}
         </ul>
       )}
+      {err && <div className="mt-1 text-xs text-red-700">{err}</div>}
     </div>
   );
 }

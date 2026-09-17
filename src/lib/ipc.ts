@@ -14,7 +14,9 @@ import type {
   MailFilter,
   MessageDetail,
   MessageSummary,
+  NewFilter,
   OutgoingMessage,
+  SnoozedMessage,
   Peer,
   ReplyMode,
   SettingsPatch,
@@ -35,8 +37,27 @@ export const mail = {
   addAccount: (provider: string) => invoke<Account>("mail_add_account", { provider }),
   removeAccount: (accountId: number) => invoke<void>("mail_remove_account", { accountId }),
   sync: (accountId: number) => invoke<void>("mail_sync", { accountId }),
-  listMessages: (accountId: number, query: ListQuery, limit = 100, offset = 0) =>
-    invoke<MessageSummary[]>("mail_list_messages", { accountId, query, limit, offset }),
+  listMessages: (accountId: number, query: ListQuery, limit = 100, offset = 0, conversations = false) =>
+    invoke<MessageSummary[]>("mail_list_messages", { accountId, query, limit, offset, conversations }),
+  listThread: (accountId: number, threadId: string) =>
+    invoke<MessageSummary[]>("mail_list_thread", { accountId, threadId }),
+  bulkModify: (messageIds: number[], add: string[], remove: string[]) =>
+    invoke<void>("mail_bulk_modify", { messageIds, add, remove }),
+  threadModify: (accountId: number, threadId: string, add: string[], remove: string[]) =>
+    invoke<void>("mail_thread_modify", { accountId, threadId, add, remove }),
+  createLabel: (accountId: number, name: string) => invoke<Label>("mail_create_label", { accountId, name }),
+  createFilter: (accountId: number, filter: NewFilter) =>
+    invoke<MailFilter>("mail_create_filter", { accountId, filter }),
+  deleteFilter: (accountId: number, filterId: string) =>
+    invoke<void>("mail_delete_filter", { accountId, filterId }),
+  reauth: (accountId: number) => invoke<Account>("mail_reauth", { accountId }),
+  searchServer: (accountId: number, query: string) =>
+    invoke<MessageSummary[]>("mail_search_server", { accountId, query }),
+  snooze: (messageId: number, until: number) => invoke<void>("mail_snooze", { messageId, until }),
+  unsnooze: (messageId: number) => invoke<void>("mail_unsnooze", { messageId }),
+  listSnoozed: (accountId: number) => invoke<SnoozedMessage[]>("mail_list_snoozed", { accountId }),
+  onUnsnoozed: (cb: (m: MessageSummary[]) => void) =>
+    listen<MessageSummary[]>("mail://unsnoozed", (e) => cb(e.payload)),
   listLabels: (accountId: number) => invoke<Label[]>("mail_list_labels", { accountId }),
   modifyLabels: (messageId: number, add: string[], remove: string[]) =>
     invoke<MessageDetail>("mail_modify_labels", { messageId, add, remove }),
@@ -87,6 +108,10 @@ export const chat = {
     listen<TransferProgress>("chat://transfer", (e) => cb(e.payload)),
   onStatus: (cb: (s: ChatStatus) => void) =>
     listen<ChatStatus>("chat://status", (e) => cb(e.payload)),
+};
+
+export const app = {
+  quit: () => invoke<void>("app_quit"),
 };
 
 export function errorMessage(e: unknown): string {

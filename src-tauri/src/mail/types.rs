@@ -35,6 +35,7 @@ pub enum Folder {
     Drafts,
     Archive,
     Trash,
+    Spam,
     All,
 }
 
@@ -89,6 +90,7 @@ impl ListQuery {
             Folder::Sent => "SENT",
             Folder::Drafts => "DRAFT",
             Folder::Trash => "TRASH",
+            Folder::Spam => "SPAM",
             Folder::Archive | Folder::All => return None,
         };
         Some(id.into())
@@ -165,6 +167,15 @@ pub struct MessageSummary {
     pub is_read: bool,
     pub is_starred: bool,
     pub has_attachments: bool,
+    /// Populated by conversation-grouped listings; 1 / 0 otherwise.
+    #[serde(default = "one")]
+    pub thread_count: i64,
+    #[serde(default)]
+    pub thread_unread: i64,
+}
+
+fn one() -> i64 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,12 +243,113 @@ pub struct FlagChange {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewMailInfo {
+    pub id: i64,
+    pub from_name: String,
+    pub subject: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum SyncEvent {
     Started { account_id: i64, full: bool },
     Progress { account_id: i64, done: usize, total: usize },
     Finished { account_id: i64 },
     Failed { account_id: i64, error: String },
+    /// Unread inbox messages that arrived since the previous pass.
+    NewMail { account_id: i64, messages: Vec<NewMailInfo> },
+}
+
+/// Filter definition as entered in the UI. Mirrors Gmail's dialog; the
+/// provider maps it onto its own criteria/action shape.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewFilter {
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub to: String,
+    #[serde(default)]
+    pub subject: String,
+    #[serde(default)]
+    pub has_words: String,
+    #[serde(default)]
+    pub not_words: String,
+    #[serde(default)]
+    pub has_attachment: bool,
+    #[serde(default)]
+    pub skip_inbox: bool,
+    #[serde(default)]
+    pub mark_read: bool,
+    #[serde(default)]
+    pub star: bool,
+    #[serde(default)]
+    pub add_label: Option<String>,
+    #[serde(default)]
+    pub delete: bool,
+    #[serde(default)]
+    pub never_spam: bool,
+    #[serde(default)]
+    pub mark_important: bool,
+    /// Also run the action over matching mail already in the mailbox.
+    #[serde(default)]
+    pub apply_to_existing: bool,
+}
+
+impl NewFilter {
+    /// Gmail search string equivalent to the criteria.
+    pub fn as_query(&self) -> String {
+        let mut q = Vec::new();
+        if !self.from.trim().is_empty() {
+            q.push(format!("from:({})", self.from.trim()));
+        }
+        if !self.to.trim().is_empty() {
+            q.push(format!("to:({})", self.to.trim()));
+        }
+        if !self.subject.trim().is_empty() {
+            q.push(format!("subject:({})", self.subject.trim()));
+        }
+        if !self.has_words.trim().is_empty() {
+            q.push(self.has_words.trim().to_string());
+        }
+        if !self.not_words.trim().is_empty() {
+            q.push(format!("-({})", self.not_words.trim()));
+        }
+        if self.has_attachment {
+            q.push("has:attachment".into());
+        }
+        q.join(" ")
+    }
+
+    pub fn label_changes(&self) -> (Vec<String>, Vec<String>) {
+        let mut add = Vec::new();
+        let mut remove = Vec::new();
+        if self.skip_inbox {
+            remove.push("INBOX".into());
+        }
+        if self.mark_read {
+            remove.push("UNREAD".into());
+        }
+        if self.star {
+            add.push("STARRED".into());
+        }
+        if let Some(l) = &self.add_label {
+            if !l.is_empty() {
+                add.push(l.clone());
+            }
+        }
+        if self.delete {
+            add.push("TRASH".into());
+        }
+        if self.never_spam {
+            remove.push("SPAM".into());
+        }
+        if self.mark_important {
+            add.push("IMPORTANT".into());
+        }
+        (add, remove)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { chat, errorMessage } from "../../lib/ipc";
+import { notify } from "../../lib/notify";
 import type { ChatMessage, ChatStatus, Identity, Peer, TransferProgress } from "../../lib/types";
 
 interface ChatState {
@@ -50,6 +51,13 @@ export const useChat = create<ChatState>((set, get) => ({
       set({ error: errorMessage(e) });
     }
     await get().loadPeers();
+    // Messages that arrived while the window was in the background are
+    // only marked read once the user is actually looking at them.
+    window.addEventListener("focus", () => {
+      const id = get().activePeerId;
+      if (id === null) return;
+      void chat.markRead(id).then(() => get().loadPeers());
+    });
 
     await chat.onStatus((status) => {
       set({ status });
@@ -71,10 +79,15 @@ export const useChat = create<ChatState>((set, get) => ({
       }
     });
     await chat.onMessage((m) => {
-      const { activePeerId, messages } = get();
+      const { activePeerId, messages, peers } = get();
+      const viewing = m.peerId === activePeerId && document.hasFocus();
       if (m.peerId === activePeerId) {
         set({ messages: upsertMessage(messages, m) });
-        if (m.direction === "in" && m.status === "unread") void chat.markRead(m.peerId);
+        if (viewing && m.direction === "in" && m.status === "unread") void chat.markRead(m.peerId);
+      }
+      if (m.direction === "in" && (m.status === "unread") && !viewing) {
+        const who = peers.find((p) => p.id === m.peerId)?.displayName ?? "New message";
+        void notify(who, m.kind === "file" ? `Sent a file: ${m.fileName ?? ""}` : m.body, "chat");
       }
       void get().loadPeers();
     });

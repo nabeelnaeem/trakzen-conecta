@@ -9,7 +9,9 @@ mod util;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
 use chat::ChatEngine;
 use db::Db;
@@ -38,6 +40,11 @@ pub struct SettingsPatch {
     mail_show_images: Option<bool>,
     mail_signature: Option<String>,
     mail_poll_seconds: Option<u64>,
+    close_to_tray: Option<bool>,
+    notifications: Option<bool>,
+    notification_sound: Option<bool>,
+    conversation_view: Option<bool>,
+    undo_send_seconds: Option<u64>,
 }
 
 #[tauri::command]
@@ -77,7 +84,36 @@ async fn settings_update(
         // Picked up by the poll loop on its next tick; 0 pauses it.
         settings::set(&state.db, settings::MAIL_POLL_SECONDS, &v.to_string())?;
     }
+    let flag = |b: bool| if b { "true" } else { "false" };
+    if let Some(v) = patch.close_to_tray {
+        settings::set(&state.db, settings::CLOSE_TO_TRAY, flag(v))?;
+    }
+    if let Some(v) = patch.notifications {
+        settings::set(&state.db, settings::NOTIFICATIONS, flag(v))?;
+    }
+    if let Some(v) = patch.notification_sound {
+        settings::set(&state.db, settings::NOTIFICATION_SOUND, flag(v))?;
+    }
+    if let Some(v) = patch.conversation_view {
+        settings::set(&state.db, settings::CONVERSATION_VIEW, flag(v))?;
+    }
+    if let Some(v) = patch.undo_send_seconds {
+        settings::set(&state.db, settings::UNDO_SEND_SECONDS, &v.min(60).to_string())?;
+    }
     settings::view(&state.db)
+}
+
+fn show_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+#[tauri::command]
+async fn app_quit(app: AppHandle) {
+    app.exit(0);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -92,7 +128,51 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .on_window_event(|window, event| {
+            // Closing the main window hides it to the tray unless the user
+            // turned that off; the tray menu has an explicit Quit.
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() != "main" {
+                    return;
+                }
+                let state = window.state::<AppState>();
+                let to_tray = settings::get(&state.db, settings::CLOSE_TO_TRAY)
+                    .ok()
+                    .flatten()
+                    .map_or(true, |v| v == "true");
+                if to_tray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
+            let show = MenuItem::with_id(app, "show", "Open Trakzen Conecta", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            TrayIconBuilder::with_id("main")
+                .icon(app.default_window_icon().cloned().expect("bundled icon"))
+                .tooltip("Trakzen Conecta")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show_main(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_main(tray.app_handle());
+                    }
+                })
+                .build(app)?;
+
             // Override lets a second instance run against its own database
             // (handy for testing chat on a single machine).
             let data_dir = match std::env::var("TRAKZEN_CONECTA_DATA_DIR") {
@@ -130,6 +210,22 @@ pub fn run() {
                 mail::commands::spawn_sync(handle.clone(), a.id);
             }
 
+            // Snoozed mail comes back on a timer; the UI refreshes on the event.
+            let snoozer = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    let due = snoozer
+                        .state::<AppState>()
+                        .mail
+                        .pop_due_snoozes(db::now_ms())
+                        .unwrap_or_default();
+                    if !due.is_empty() {
+                        let _ = snoozer.emit("mail://unsnoozed", &due);
+                    }
+                }
+            });
+
             // Gmail has no push for installed apps short of Pub/Sub, so poll
             // the history API. Each tick is one small request per account.
             let poller = app.handle().clone();
@@ -159,6 +255,18 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             settings_get,
             settings_update,
+            app_quit,
+            mail::commands::mail_list_thread,
+            mail::commands::mail_bulk_modify,
+            mail::commands::mail_thread_modify,
+            mail::commands::mail_create_label,
+            mail::commands::mail_create_filter,
+            mail::commands::mail_delete_filter,
+            mail::commands::mail_reauth,
+            mail::commands::mail_search_server,
+            mail::commands::mail_snooze,
+            mail::commands::mail_unsnooze,
+            mail::commands::mail_list_snoozed,
             mail::commands::mail_list_accounts,
             mail::commands::mail_add_account,
             mail::commands::mail_remove_account,

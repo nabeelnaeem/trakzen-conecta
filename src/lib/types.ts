@@ -19,6 +19,8 @@ export type Folder =
   | "drafts"
   | "archive"
   | "trash"
+  | "spam"
+  | "snoozed"
   | "all";
 
 export type Category = "primary" | "social" | "promotions" | "updates" | "forums";
@@ -69,6 +71,52 @@ export interface MessageSummary {
   isRead: boolean;
   isStarred: boolean;
   hasAttachments: boolean;
+  threadCount: number;
+  threadUnread: number;
+}
+
+export interface SnoozedMessage extends MessageSummary {
+  until: number;
+}
+
+export interface NewFilter {
+  from: string;
+  to: string;
+  subject: string;
+  hasWords: string;
+  notWords: string;
+  hasAttachment: boolean;
+  skipInbox: boolean;
+  markRead: boolean;
+  star: boolean;
+  addLabel: string | null;
+  delete: boolean;
+  neverSpam: boolean;
+  markImportant: boolean;
+  applyToExisting: boolean;
+}
+
+export const emptyFilter = (): NewFilter => ({
+  from: "",
+  to: "",
+  subject: "",
+  hasWords: "",
+  notWords: "",
+  hasAttachment: false,
+  skipInbox: false,
+  markRead: false,
+  star: false,
+  addLabel: null,
+  delete: false,
+  neverSpam: false,
+  markImportant: false,
+  applyToExisting: true,
+});
+
+export interface NewMailInfo {
+  id: number;
+  fromName: string;
+  subject: string;
 }
 
 export interface AttachmentInfo {
@@ -96,7 +144,8 @@ export type SyncEvent =
   | { type: "started"; accountId: number; full: boolean }
   | { type: "progress"; accountId: number; done: number; total: number }
   | { type: "finished"; accountId: number }
-  | { type: "failed"; accountId: number; error: string };
+  | { type: "failed"; accountId: number; error: string }
+  | { type: "newMail"; accountId: number; messages: NewMailInfo[] };
 
 export type OutgoingAttachment =
   | { kind: "path"; path: string }
@@ -196,6 +245,11 @@ export interface SettingsView {
   mailShowImages: boolean;
   mailSignature: string;
   mailPollSeconds: number;
+  closeToTray: boolean;
+  notifications: boolean;
+  notificationSound: boolean;
+  conversationView: boolean;
+  undoSendSeconds: number;
 }
 
 export interface Contact {
@@ -212,4 +266,9 @@ export interface SettingsPatch {
   mailShowImages?: boolean;
   mailSignature?: string;
   mailPollSeconds?: number;
+  closeToTray?: boolean;
+  notifications?: boolean;
+  notificationSound?: boolean;
+  conversationView?: boolean;
+  undoSendSeconds?: number;
 }

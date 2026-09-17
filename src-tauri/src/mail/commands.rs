@@ -98,13 +98,194 @@ pub async fn mail_list_messages(
     query: ListQuery,
     limit: Option<i64>,
     offset: Option<i64>,
+    conversations: Option<bool>,
 ) -> Result<Vec<MessageSummary>> {
-    state.mail.list_messages(
+    state.mail.list_messages_grouped(
         account_id,
         &query,
         limit.unwrap_or(100).clamp(1, 1000),
         offset.unwrap_or(0).max(0),
+        conversations.unwrap_or(false),
     )
+}
+
+#[tauri::command]
+pub async fn mail_list_thread(
+    state: State<'_, AppState>,
+    account_id: i64,
+    thread_id: String,
+) -> Result<Vec<MessageSummary>> {
+    state.mail.list_thread(account_id, &thread_id)
+}
+
+/// Label change applied to a set of local message ids (one account) with a
+/// single batched provider call. Used by multi-select and by thread-level
+/// actions, which pass every message of the thread.
+#[tauri::command]
+pub async fn mail_bulk_modify(
+    state: State<'_, AppState>,
+    message_ids: Vec<i64>,
+    add: Vec<String>,
+    remove: Vec<String>,
+) -> Result<()> {
+    if message_ids.is_empty() {
+        return Ok(());
+    }
+    let rows = state.mail.remote_ids(&message_ids)?;
+    let Some(&(_, account_id, _)) = rows.first() else {
+        return Ok(());
+    };
+    if rows.iter().any(|(_, a, _)| *a != account_id) {
+        return Err(AppError::Other("selection spans multiple accounts".into()));
+    }
+    let account = state.mail.get_account(account_id)?;
+    let provider = state.providers.provider_for(&account.provider)?;
+    let remote: Vec<String> = rows.iter().map(|(_, _, r)| r.clone()).collect();
+    provider.batch_modify(&account, &remote, &add, &remove).await?;
+    let ids: Vec<i64> = rows.iter().map(|(id, _, _)| *id).collect();
+    let add: Vec<&str> = add.iter().map(String::as_str).collect();
+    let remove: Vec<&str> = remove.iter().map(String::as_str).collect();
+    state.mail.set_labels_bulk(&ids, &add, &remove)
+}
+
+#[tauri::command]
+pub async fn mail_thread_modify(
+    state: State<'_, AppState>,
+    account_id: i64,
+    thread_id: String,
+    add: Vec<String>,
+    remove: Vec<String>,
+) -> Result<()> {
+    let account = state.mail.get_account(account_id)?;
+    let provider = state.providers.provider_for(&account.provider)?;
+    provider
+        .modify_thread(&account, &thread_id, &add, &remove)
+        .await?;
+    let ids = state.mail.thread_local_ids(account_id, &thread_id)?;
+    let add: Vec<&str> = add.iter().map(String::as_str).collect();
+    let remove: Vec<&str> = remove.iter().map(String::as_str).collect();
+    state.mail.set_labels_bulk(&ids, &add, &remove)
+}
+
+#[tauri::command]
+pub async fn mail_create_label(
+    state: State<'_, AppState>,
+    account_id: i64,
+    name: String,
+) -> Result<Label> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::Other("label name is required".into()));
+    }
+    let account = state.mail.get_account(account_id)?;
+    let provider = state.providers.provider_for(&account.provider)?;
+    provider.create_label(&account, name).await?;
+    let labels = provider.list_labels(&account).await?;
+    state.mail.replace_labels(account_id, &labels)?;
+    state
+        .mail
+        .list_labels(account_id)?
+        .into_iter()
+        .find(|l| l.name == name)
+        .ok_or_else(|| AppError::Other("label created but not found".into()))
+}
+
+#[tauri::command]
+pub async fn mail_create_filter(
+    state: State<'_, AppState>,
+    account_id: i64,
+    filter: NewFilter,
+) -> Result<MailFilter> {
+    let account = state.mail.get_account(account_id)?;
+    let provider = state.providers.provider_for(&account.provider)?;
+    let created = provider.create_filter(&account, &filter).await.map_err(|e| match e {
+        // Accounts connected before the settings scope was added must
+        // re-consent; make that actionable instead of a bare 403.
+        AppError::Provider(msg) if msg.contains("insufficient") || msg.contains("403") => {
+            AppError::Auth("This account needs to be signed in again to manage filters (Settings → Sign in again).".into())
+        }
+        other => other,
+    })?;
+    if filter.apply_to_existing {
+        spawn_sync(state.app.clone(), account_id);
+    }
+    Ok(created)
+}
+
+#[tauri::command]
+pub async fn mail_delete_filter(
+    state: State<'_, AppState>,
+    account_id: i64,
+    filter_id: String,
+) -> Result<()> {
+    let account = state.mail.get_account(account_id)?;
+    let provider = state.providers.provider_for(&account.provider)?;
+    provider.delete_filter(&account, &filter_id).await
+}
+
+/// Re-runs the consent flow for an existing account, e.g. after the app
+/// started asking for an additional scope.
+#[tauri::command]
+pub async fn mail_reauth(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    account_id: i64,
+) -> Result<Account> {
+    let account = state.mail.get_account(account_id)?;
+    let provider = state.providers.provider_for(&account.provider)?;
+    let fresh = provider.login(&app, &state.mail).await?;
+    if fresh.email != account.email {
+        return Err(AppError::Auth(format!(
+            "you signed in as {} but this account is {}",
+            fresh.email, account.email
+        )));
+    }
+    Ok(fresh)
+}
+
+#[tauri::command]
+pub async fn mail_search_server(
+    state: State<'_, AppState>,
+    account_id: i64,
+    query: String,
+) -> Result<Vec<MessageSummary>> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let account = state.mail.get_account(account_id)?;
+    let provider = state.providers.provider_for(&account.provider)?;
+    let ids = provider
+        .search(&account, &state.mail, query.trim(), 100)
+        .await?;
+    state.mail.summaries_by_remote_ids(account_id, &ids)
+}
+
+#[tauri::command]
+pub async fn mail_snooze(state: State<'_, AppState>, message_id: i64, until: i64) -> Result<()> {
+    state.mail.snooze(message_id, until)
+}
+
+#[tauri::command]
+pub async fn mail_unsnooze(state: State<'_, AppState>, message_id: i64) -> Result<()> {
+    state.mail.unsnooze(message_id)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Snoozed {
+    #[serde(flatten)]
+    pub message: MessageSummary,
+    pub until: i64,
+}
+
+#[tauri::command]
+pub async fn mail_list_snoozed(state: State<'_, AppState>, account_id: i64) -> Result<Vec<Snoozed>> {
+    Ok(state
+        .mail
+        .list_snoozed(account_id)?
+        .into_iter()
+        .map(|(message, until)| Snoozed { message, until })
+        .collect())
 }
 
 #[tauri::command]

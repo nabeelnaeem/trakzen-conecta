@@ -64,7 +64,40 @@ pub trait MailProvider: Send + Sync {
 
     async fn list_labels(&self, account: &Account) -> Result<Vec<RemoteLabel>>;
 
+    async fn create_label(&self, account: &Account, name: &str) -> Result<RemoteLabel>;
+
     async fn list_filters(&self, account: &Account) -> Result<Vec<MailFilter>>;
+
+    async fn create_filter(&self, account: &Account, filter: &NewFilter) -> Result<MailFilter>;
+
+    async fn delete_filter(&self, account: &Account, filter_id: &str) -> Result<()>;
+
+    /// Label change over many messages in as few requests as possible.
+    async fn batch_modify(
+        &self,
+        account: &Account,
+        remote_ids: &[String],
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()>;
+
+    async fn modify_thread(
+        &self,
+        account: &Account,
+        thread_id: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()>;
+
+    /// Server-side search. Returns matching remote ids, newest first, and
+    /// makes sure their metadata is in the store.
+    async fn search(
+        &self,
+        account: &Account,
+        store: &MailStore,
+        query: &str,
+        max: u32,
+    ) -> Result<Vec<String>>;
 
     /// Pulls one page of message metadata for `label_id` (newest first),
     /// starting at `page_token`, into the store. Returns the number of

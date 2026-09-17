@@ -107,6 +107,14 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX mail_contacts_lookup ON mail_contacts(account_id, count DESC, last_seen DESC);
     ",
+    // 4: local snooze (Gmail does not expose snooze through its API)
+    "
+    CREATE TABLE mail_snoozes (
+        message_id INTEGER PRIMARY KEY REFERENCES mail_messages(id) ON DELETE CASCADE,
+        until      INTEGER NOT NULL
+    );
+    CREATE INDEX mail_snoozes_until ON mail_snoozes(until);
+    ",
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

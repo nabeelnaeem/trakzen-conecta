@@ -13,6 +13,11 @@ pub const CHAT_DOWNLOAD_DIR: &str = "chat_download_dir";
 pub const MAIL_SHOW_IMAGES: &str = "mail_show_images";
 pub const MAIL_SIGNATURE: &str = "mail_signature";
 pub const MAIL_POLL_SECONDS: &str = "mail_poll_seconds";
+pub const CLOSE_TO_TRAY: &str = "close_to_tray";
+pub const NOTIFICATIONS: &str = "notifications";
+pub const NOTIFICATION_SOUND: &str = "notification_sound";
+pub const CONVERSATION_VIEW: &str = "conversation_view";
+pub const UNDO_SEND_SECONDS: &str = "undo_send_seconds";
 
 pub const DEFAULT_MAIL_POLL_SECONDS: u64 = 60;
 
@@ -61,6 +66,11 @@ pub struct SettingsView {
     pub mail_signature: String,
     /// 0 disables background polling.
     pub mail_poll_seconds: u64,
+    pub close_to_tray: bool,
+    pub notifications: bool,
+    pub notification_sound: bool,
+    pub conversation_view: bool,
+    pub undo_send_seconds: u64,
 }
 
 pub fn view(db: &Db) -> Result<SettingsView> {
@@ -77,7 +87,18 @@ pub fn view(db: &Db) -> Result<SettingsView> {
         mail_show_images: get(db, MAIL_SHOW_IMAGES)?.map_or(true, |v| v == "true"),
         mail_signature: get(db, MAIL_SIGNATURE)?.unwrap_or_default(),
         mail_poll_seconds: poll_seconds(db)?,
+        close_to_tray: flag(db, CLOSE_TO_TRAY, true)?,
+        notifications: flag(db, NOTIFICATIONS, true)?,
+        notification_sound: flag(db, NOTIFICATION_SOUND, true)?,
+        conversation_view: flag(db, CONVERSATION_VIEW, true)?,
+        undo_send_seconds: get(db, UNDO_SEND_SECONDS)?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10),
     })
+}
+
+fn flag(db: &Db, key: &str, default: bool) -> Result<bool> {
+    Ok(get(db, key)?.map_or(default, |v| v == "true"))
 }
 
 pub fn poll_seconds(db: &Db) -> Result<u64> {

@@ -21,8 +21,9 @@ const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const REVOKE_URL: &str = "https://oauth2.googleapis.com/revoke";
 // `gmail.modify` covers read, send, label changes and trash; it excludes
-// permanent delete, which the app never does.
-const SCOPES: &str = "https://www.googleapis.com/auth/gmail.modify";
+// permanent delete, which the app never does. `gmail.settings.basic` is
+// needed to create and delete filters.
+const SCOPES: &str = "https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.settings.basic";
 
 fn secret_key(email: &str) -> String {
     format!("gmail:refresh:{email}")

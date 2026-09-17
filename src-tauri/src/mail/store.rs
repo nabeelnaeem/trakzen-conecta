@@ -32,7 +32,16 @@ fn row_to_summary(r: &Row) -> rusqlite::Result<MessageSummary> {
         is_read: r.get::<_, i64>(12)? != 0,
         is_starred: r.get::<_, i64>(13)? != 0,
         has_attachments: r.get::<_, i64>(14)? != 0,
+        thread_count: 1,
+        thread_unread: 0,
     })
+}
+
+fn row_to_thread_summary(r: &Row) -> rusqlite::Result<MessageSummary> {
+    let mut m = row_to_summary(r)?;
+    m.thread_count = r.get(15)?;
+    m.thread_unread = r.get(16)?;
+    Ok(m)
 }
 
 fn row_to_account(r: &Row) -> rusqlite::Result<Account> {
@@ -335,6 +344,17 @@ impl MailStore {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<MessageSummary>> {
+        self.list_messages_grouped(account_id, query, limit, offset, false)
+    }
+
+    pub fn list_messages_grouped(
+        &self,
+        account_id: i64,
+        query: &ListQuery,
+        limit: i64,
+        offset: i64,
+        conversations: bool,
+    ) -> Result<Vec<MessageSummary>> {
         // View -> label predicate. Gmail semantics for now; when a second
         // provider lands this moves behind the trait.
         let filter = match (&query.label, query.folder, query.category) {
@@ -364,21 +384,186 @@ impl MailStore {
                     .to_string()
             }
             (None, Folder::Trash, _) => "has_label(labels, 'TRASH')".to_string(),
+            (None, Folder::Spam, _) => "has_label(labels, 'SPAM')".to_string(),
             (None, Folder::All, _) => {
                 "NOT has_label(labels, 'TRASH') AND NOT has_label(labels, 'SPAM')".to_string()
             }
         };
+        // Snoozed mail hides from the inbox (and tabs) until it is due.
+        let snooze = match (&query.label, query.folder) {
+            (None, Folder::Inbox) => {
+                " AND NOT EXISTS (SELECT 1 FROM mail_snoozes s WHERE s.message_id = mail_messages.id)"
+            }
+            _ => "",
+        };
         // ?4 is bound in every branch so the parameter count is constant.
-        let sql = format!(
-            "SELECT {SUMMARY_COLS} FROM mail_messages
-             WHERE account_id = ?1 AND (?4 = '' OR has_label(labels, ?4)) AND {filter}
-             ORDER BY date DESC LIMIT ?2 OFFSET ?3"
-        );
+        let sql = if conversations {
+            // One row per thread: the newest matching message represents it,
+            // with counts over the whole thread (not just matching members).
+            format!(
+                "WITH hits AS (
+                    SELECT id, COALESCE(thread_id, remote_id) AS tid, date FROM mail_messages
+                    WHERE account_id = ?1 AND (?4 = '' OR has_label(labels, ?4)) AND {filter}{snooze}
+                 ),
+                 newest AS (
+                    SELECT id, tid, date, ROW_NUMBER() OVER (PARTITION BY tid ORDER BY date DESC, id DESC) rn
+                    FROM hits
+                 )
+                 SELECT {SUMMARY_COLS},
+                    (SELECT COUNT(*) FROM mail_messages t WHERE t.account_id = ?1
+                        AND COALESCE(t.thread_id, t.remote_id) = newest.tid AND NOT has_label(t.labels, 'TRASH')),
+                    (SELECT COUNT(*) FROM mail_messages t WHERE t.account_id = ?1
+                        AND COALESCE(t.thread_id, t.remote_id) = newest.tid AND t.is_read = 0 AND NOT has_label(t.labels, 'TRASH'))
+                 FROM newest JOIN mail_messages USING (id)
+                 WHERE rn = 1
+                 ORDER BY newest.date DESC LIMIT ?2 OFFSET ?3"
+            )
+        } else {
+            format!(
+                "SELECT {SUMMARY_COLS} FROM mail_messages
+                 WHERE account_id = ?1 AND (?4 = '' OR has_label(labels, ?4)) AND {filter}{snooze}
+                 ORDER BY date DESC LIMIT ?2 OFFSET ?3"
+            )
+        };
         let conn = self.db.conn();
         let mut stmt = conn.prepare_cached(&sql)?;
         let label = query.label.clone().unwrap_or_default();
-        let rows = stmt.query_map(params![account_id, limit, offset, label], row_to_summary)?;
+        let rows = if conversations {
+            stmt.query_map(params![account_id, limit, offset, label], row_to_thread_summary)?
+                .collect::<rusqlite::Result<_>>()?
+        } else {
+            stmt.query_map(params![account_id, limit, offset, label], row_to_summary)?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        Ok(rows)
+    }
+
+    /// Every message of a thread, oldest first (trash excluded).
+    pub fn list_thread(&self, account_id: i64, thread_id: &str) -> Result<Vec<MessageSummary>> {
+        let conn = self.db.conn();
+        let sql = format!(
+            "SELECT {SUMMARY_COLS} FROM mail_messages
+             WHERE account_id = ?1 AND COALESCE(thread_id, remote_id) = ?2 AND NOT has_label(labels, 'TRASH')
+             ORDER BY date ASC, id ASC"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params![account_id, thread_id], row_to_summary)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Local (id, remote_id) pairs for a set of local ids, all in one account.
+    pub fn remote_ids(&self, ids: &[i64]) -> Result<Vec<(i64, i64, String)>> {
+        let conn = self.db.conn();
+        let json = serde_json::to_string(ids)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, account_id, remote_id FROM mail_messages
+             WHERE id IN (SELECT value FROM json_each(?1))",
+        )?;
+        let rows = stmt.query_map(params![json], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn thread_local_ids(&self, account_id: i64, thread_id: &str) -> Result<Vec<i64>> {
+        let conn = self.db.conn();
+        let mut stmt = conn.prepare_cached(
+            "SELECT id FROM mail_messages WHERE account_id = ?1 AND COALESCE(thread_id, remote_id) = ?2",
+        )?;
+        let rows = stmt.query_map(params![account_id, thread_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_labels_bulk(&self, ids: &[i64], add: &[&str], remove: &[&str]) -> Result<()> {
+        let mut conn = self.db.conn();
+        let tx = conn.transaction()?;
+        for id in ids {
+            let labels: Option<String> = tx
+                .query_row(
+                    "SELECT labels FROM mail_messages WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(labels) = labels else { continue };
+            let mut labels: Vec<String> = serde_json::from_str(&labels).unwrap_or_default();
+            labels.retain(|l| !remove.contains(&l.as_str()));
+            for a in add {
+                if !labels.iter().any(|l| l == a) {
+                    labels.push(a.to_string());
+                }
+            }
+            let is_read = !labels.iter().any(|l| l == "UNREAD");
+            let is_starred = labels.iter().any(|l| l == "STARRED");
+            tx.execute(
+                "UPDATE mail_messages SET labels = ?2, is_read = ?3, is_starred = ?4 WHERE id = ?1",
+                params![id, serde_json::to_string(&labels)?, is_read as i64, is_starred as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn summaries_by_remote_ids(&self, account_id: i64, remote_ids: &[String]) -> Result<Vec<MessageSummary>> {
+        let conn = self.db.conn();
+        let json = serde_json::to_string(remote_ids)?;
+        let sql = format!(
+            "SELECT {SUMMARY_COLS} FROM mail_messages
+             WHERE account_id = ?1 AND remote_id IN (SELECT value FROM json_each(?2))"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let mut rows: Vec<MessageSummary> = stmt
+            .query_map(params![account_id, json], row_to_summary)?
+            .collect::<rusqlite::Result<_>>()?;
+        // Keep the server's ranking.
+        let order: std::collections::HashMap<&str, usize> =
+            remote_ids.iter().enumerate().map(|(i, id)| (id.as_str(), i)).collect();
+        rows.sort_by_key(|m| order.get(m.remote_id.as_str()).copied().unwrap_or(usize::MAX));
+        Ok(rows)
+    }
+
+    // ---- snooze ---------------------------------------------------------
+
+    pub fn snooze(&self, message_id: i64, until: i64) -> Result<()> {
+        self.db.conn().execute(
+            "INSERT INTO mail_snoozes(message_id, until) VALUES(?1, ?2)
+             ON CONFLICT(message_id) DO UPDATE SET until = excluded.until",
+            params![message_id, until],
+        )?;
+        Ok(())
+    }
+
+    pub fn unsnooze(&self, message_id: i64) -> Result<()> {
+        self.db
+            .conn()
+            .execute("DELETE FROM mail_snoozes WHERE message_id = ?1", params![message_id])?;
+        Ok(())
+    }
+
+    pub fn list_snoozed(&self, account_id: i64) -> Result<Vec<(MessageSummary, i64)>> {
+        let conn = self.db.conn();
+        let sql = format!(
+            "SELECT {SUMMARY_COLS}, s.until FROM mail_messages JOIN mail_snoozes s ON s.message_id = mail_messages.id
+             WHERE account_id = ?1 ORDER BY s.until ASC"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params![account_id], |r| Ok((row_to_summary(r)?, r.get(15)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Removes expired snoozes and returns the messages that just came back.
+    pub fn pop_due_snoozes(&self, now: i64) -> Result<Vec<MessageSummary>> {
+        let mut conn = self.db.conn();
+        let tx = conn.transaction()?;
+        let sql = format!(
+            "SELECT {SUMMARY_COLS} FROM mail_messages
+             WHERE id IN (SELECT message_id FROM mail_snoozes WHERE until <= ?1)"
+        );
+        let due: Vec<MessageSummary> = tx
+            .prepare(&sql)?
+            .query_map(params![now], row_to_summary)?
+            .collect::<rusqlite::Result<_>>()?;
+        tx.execute("DELETE FROM mail_snoozes WHERE until <= ?1", params![now])?;
+        tx.commit()?;
+        Ok(due)
     }
 
     // ---- labels ---------------------------------------------------------

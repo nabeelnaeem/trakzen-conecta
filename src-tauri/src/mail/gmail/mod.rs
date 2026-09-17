@@ -44,6 +44,7 @@ impl GmailProvider {
         self.auth.access_token(&account.email).await
     }
 
+    /// Returns the messages that were not in the store before this call.
     async fn fetch_and_store(
         &self,
         token: &str,
@@ -51,11 +52,13 @@ impl GmailProvider {
         store: &MailStore,
         ids: Vec<String>,
         observe: SyncObserver<'_>,
-    ) -> Result<()> {
+    ) -> Result<Vec<RemoteMessage>> {
         let total = ids.len();
         let mut done = 0usize;
         let mut batch: Vec<RemoteMessage> = Vec::with_capacity(32);
         let mut gone: Vec<String> = Vec::new();
+        let known: HashSet<String> = store.known_remote_ids(account.id)?.into_iter().collect();
+        let mut fresh: Vec<RemoteMessage> = Vec::new();
 
         let mut results = stream::iter(ids)
             .map(|id| async move { (id.clone(), self.api.get_metadata(token, &id).await) })
@@ -63,7 +66,12 @@ impl GmailProvider {
 
         while let Some((id, res)) = results.next().await {
             match res? {
-                Some(m) => batch.push(m),
+                Some(m) => {
+                    if !known.contains(&m.remote_id) {
+                        fresh.push(m.clone());
+                    }
+                    batch.push(m)
+                }
                 None => gone.push(id),
             }
             done += 1;
@@ -88,7 +96,7 @@ impl GmailProvider {
             done,
             total,
         });
-        Ok(())
+        Ok(fresh)
     }
 
     async fn full_sync(
@@ -193,8 +201,28 @@ impl GmailProvider {
             store.delete_messages(account.id, &deleted.into_iter().collect::<Vec<_>>())?;
         }
         let ids: Vec<String> = touched.into_iter().collect();
-        self.fetch_and_store(token, account, store, ids, observe).await?;
+        let fresh = self.fetch_and_store(token, account, store, ids, observe).await?;
         store.set_cursor(account.id, Some(&latest))?;
+
+        let arrivals: Vec<&RemoteMessage> = fresh
+            .iter()
+            .filter(|m| !m.is_read && m.labels.iter().any(|l| l == "INBOX"))
+            .collect();
+        if !arrivals.is_empty() {
+            let remote_ids: Vec<String> = arrivals.iter().map(|m| m.remote_id.clone()).collect();
+            let rows = store.summaries_by_remote_ids(account.id, &remote_ids)?;
+            observe(SyncEvent::NewMail {
+                account_id: account.id,
+                messages: rows
+                    .into_iter()
+                    .map(|m| NewMailInfo {
+                        id: m.id,
+                        from_name: if m.from_name.is_empty() { m.from_addr } else { m.from_name },
+                        subject: m.subject,
+                    })
+                    .collect(),
+            });
+        }
         Ok(true)
     }
 }
@@ -320,9 +348,81 @@ impl MailProvider for GmailProvider {
         self.api.list_labels(&token).await
     }
 
+    async fn create_label(&self, account: &Account, name: &str) -> Result<RemoteLabel> {
+        let token = self.token(account).await?;
+        self.api.create_label(&token, name).await
+    }
+
     async fn list_filters(&self, account: &Account) -> Result<Vec<MailFilter>> {
         let token = self.token(account).await?;
         self.api.list_filters(&token).await
+    }
+
+    async fn create_filter(&self, account: &Account, filter: &NewFilter) -> Result<MailFilter> {
+        let token = self.token(account).await?;
+        let created = self.api.create_filter(&token, filter).await?;
+        if filter.apply_to_existing {
+            let (add, remove) = filter.label_changes();
+            let q = filter.as_query();
+            let mut page = None;
+            let mut rounds = 0;
+            loop {
+                let list = self.api.list_ids_in(&token, None, Some(&q), 500, page.as_deref()).await?;
+                let ids: Vec<String> = list.messages.into_iter().map(|m| m.id).collect();
+                if !ids.is_empty() {
+                    self.api.batch_modify(&token, &ids, &add, &remove).await?;
+                }
+                rounds += 1;
+                match list.next_page_token {
+                    // Cap the sweep so a very broad filter cannot run for minutes.
+                    Some(t) if rounds < 10 => page = Some(t),
+                    _ => break,
+                }
+            }
+        }
+        Ok(created)
+    }
+
+    async fn delete_filter(&self, account: &Account, filter_id: &str) -> Result<()> {
+        let token = self.token(account).await?;
+        self.api.delete_filter(&token, filter_id).await
+    }
+
+    async fn batch_modify(
+        &self,
+        account: &Account,
+        remote_ids: &[String],
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        let token = self.token(account).await?;
+        self.api.batch_modify(&token, remote_ids, add, remove).await
+    }
+
+    async fn modify_thread(
+        &self,
+        account: &Account,
+        thread_id: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        let token = self.token(account).await?;
+        self.api.modify_thread(&token, thread_id, add, remove).await
+    }
+
+    async fn search(
+        &self,
+        account: &Account,
+        store: &MailStore,
+        query: &str,
+        max: u32,
+    ) -> Result<Vec<String>> {
+        let token = self.token(account).await?;
+        let list = self.api.list_ids_in(&token, None, Some(query), max, None).await?;
+        let ids: Vec<String> = list.messages.into_iter().map(|m| m.id).collect();
+        let noop = |_: SyncEvent| {};
+        self.fetch_and_store(&token, account, store, ids.clone(), &noop).await?;
+        Ok(ids)
     }
 
     async fn fetch_label_page(

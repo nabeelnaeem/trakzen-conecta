@@ -93,6 +93,22 @@ impl GmailApi {
         }
     }
 
+    async fn delete(&self, token: &str, path: &str) -> Result<()> {
+        let res = self
+            .http
+            .delete(format!("{BASE}/{path}"))
+            .bearer_auth(token)
+            .send()
+            .await?;
+        let status = res.status().as_u16();
+        if (200..300).contains(&status) {
+            Ok(())
+        } else {
+            let body = res.text().await.unwrap_or_default();
+            Err(provider_error(status, &body))
+        }
+    }
+
     async fn post_json(&self, token: &str, path: &str, body: &Value) -> Result<Value> {
         let res = self
             .http
@@ -185,43 +201,84 @@ impl GmailApi {
 
     pub async fn list_filters(&self, token: &str) -> Result<Vec<MailFilter>> {
         let v = self.get_json(token, "settings/filters", &[]).await?;
-        let mut out = Vec::new();
-        for f in v["filter"].as_array().into_iter().flatten() {
-            let c = &f["criteria"];
-            let mut criteria = Vec::new();
-            for (key, label) in [
-                ("from", "from"),
-                ("to", "to"),
-                ("subject", "subject"),
-                ("query", "has the words"),
-                ("negatedQuery", "doesn't have"),
-            ] {
-                if let Some(val) = c[key].as_str() {
-                    criteria.push((label.to_string(), val.to_string()));
-                }
+        Ok(v["filter"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(parse_filter)
+            .collect())
+    }
+
+    pub async fn create_label(&self, token: &str, name: &str) -> Result<RemoteLabel> {
+        let body = serde_json::json!({
+            "name": name,
+            "labelListVisibility": "labelShow",
+            "messageListVisibility": "show",
+        });
+        let v = self.post_json(token, "labels", &body).await?;
+        Ok(RemoteLabel {
+            remote_id: v["id"].as_str().unwrap_or_default().to_string(),
+            name: v["name"].as_str().unwrap_or(name).to_string(),
+            kind: "user".into(),
+            bg_color: None,
+            fg_color: None,
+            visible: true,
+        })
+    }
+
+    pub async fn create_filter(&self, token: &str, f: &NewFilter) -> Result<MailFilter> {
+        let mut criteria = serde_json::Map::new();
+        for (key, val) in [
+            ("from", &f.from),
+            ("to", &f.to),
+            ("subject", &f.subject),
+            ("query", &f.has_words),
+            ("negatedQuery", &f.not_words),
+        ] {
+            if !val.trim().is_empty() {
+                criteria.insert(key.into(), Value::String(val.trim().into()));
             }
-            if c["hasAttachment"].as_bool() == Some(true) {
-                criteria.push(("has attachment".into(), "yes".into()));
-            }
-            if let Some(sz) = c["size"].as_i64() {
-                let cmp = c["sizeComparison"].as_str().unwrap_or("larger");
-                criteria.push((format!("size {cmp} than"), format!("{sz} bytes")));
-            }
-            let a = &f["action"];
-            let strings = |v: &Value| -> Vec<String> {
-                v.as_array()
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
-                    .unwrap_or_default()
-            };
-            out.push(MailFilter {
-                id: f["id"].as_str().unwrap_or_default().to_string(),
-                criteria,
-                add_labels: strings(&a["addLabelIds"]),
-                remove_labels: strings(&a["removeLabelIds"]),
-                forward: a["forward"].as_str().map(str::to_string),
-            });
         }
-        Ok(out)
+        if f.has_attachment {
+            criteria.insert("hasAttachment".into(), Value::Bool(true));
+        }
+        if criteria.is_empty() {
+            return Err(AppError::Other("a filter needs at least one condition".into()));
+        }
+        let (add, remove) = f.label_changes();
+        if add.is_empty() && remove.is_empty() {
+            return Err(AppError::Other("a filter needs at least one action".into()));
+        }
+        let body = serde_json::json!({
+            "criteria": criteria,
+            "action": { "addLabelIds": add, "removeLabelIds": remove },
+        });
+        let v = self.post_json(token, "settings/filters", &body).await?;
+        Ok(parse_filter(&v))
+    }
+
+    pub async fn delete_filter(&self, token: &str, id: &str) -> Result<()> {
+        self.delete(token, &format!("settings/filters/{id}")).await
+    }
+
+    /// One request per 1000 ids.
+    pub async fn batch_modify(&self, token: &str, ids: &[String], add: &[String], remove: &[String]) -> Result<()> {
+        for chunk in ids.chunks(1000) {
+            let body = serde_json::json!({
+                "ids": chunk,
+                "addLabelIds": add,
+                "removeLabelIds": remove,
+            });
+            self.post_json(token, "messages/batchModify", &body).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn modify_thread(&self, token: &str, thread_id: &str, add: &[String], remove: &[String]) -> Result<()> {
+        let body = serde_json::json!({ "addLabelIds": add, "removeLabelIds": remove });
+        self.post_json(token, &format!("threads/{thread_id}/modify"), &body)
+            .await?;
+        Ok(())
     }
 
     /// Metadata only: headers, labels, snippet. Returns `None` when the
@@ -306,6 +363,42 @@ impl GmailApi {
         self.post_json(token, &format!("messages/{id}/trash"), &Value::Null)
             .await?;
         Ok(())
+    }
+}
+
+fn parse_filter(f: &Value) -> MailFilter {
+    let c = &f["criteria"];
+    let mut criteria = Vec::new();
+    for (key, label) in [
+        ("from", "from"),
+        ("to", "to"),
+        ("subject", "subject"),
+        ("query", "has the words"),
+        ("negatedQuery", "doesn't have"),
+    ] {
+        if let Some(val) = c[key].as_str() {
+            criteria.push((label.to_string(), val.to_string()));
+        }
+    }
+    if c["hasAttachment"].as_bool() == Some(true) {
+        criteria.push(("has attachment".into(), "yes".into()));
+    }
+    if let Some(sz) = c["size"].as_i64() {
+        let cmp = c["sizeComparison"].as_str().unwrap_or("larger");
+        criteria.push((format!("size {cmp} than"), format!("{sz} bytes")));
+    }
+    let a = &f["action"];
+    let strings = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+    MailFilter {
+        id: f["id"].as_str().unwrap_or_default().to_string(),
+        criteria,
+        add_labels: strings(&a["addLabelIds"]),
+        remove_labels: strings(&a["removeLabelIds"]),
+        forward: a["forward"].as_str().map(str::to_string),
     }
 }
 

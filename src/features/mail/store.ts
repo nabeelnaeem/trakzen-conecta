@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { errorMessage, mail, settings } from "../../lib/ipc";
+import { notify, notifyPrefs } from "../../lib/notify";
 import type {
   Account,
   Category,
@@ -9,7 +10,10 @@ import type {
   ListQuery,
   MessageDetail,
   MessageSummary,
+  NewFilter,
+  OutgoingMessage,
   ReplyMode,
+  SnoozedMessage,
   SyncEvent,
 } from "../../lib/types";
 
@@ -29,7 +33,16 @@ interface SyncState {
   total: number;
 }
 
+export interface PendingSend {
+  message: OutgoingMessage;
+  composer: ComposerState;
+  sendAt: number;
+  timer: number;
+}
+
 const PAGE = 100;
+
+const threadKey = (m: MessageSummary) => m.threadId ?? m.remoteId;
 
 interface MailState {
   accounts: Account[];
@@ -39,16 +52,28 @@ interface MailState {
   label: string | null;
   labels: Label[];
   messages: MessageSummary[];
+  snoozed: SnoozedMessage[];
   hasMore: boolean;
   fetching: boolean;
-  selectedId: number | null;
-  detail: MessageDetail | null;
+  conversations: boolean;
+  // Reading pane: the open thread (one message in flat mode).
+  openId: number | null;
+  thread: MessageSummary[];
+  expanded: number[];
+  details: Record<number, MessageDetail>;
   loadingDetail: boolean;
+  // Multi-select (ids of list rows).
+  selected: number[];
   syncing: Record<number, SyncState | null>;
   unread: number;
   search: string;
+  serverSearch: boolean;
   showImages: boolean;
+  undoSeconds: number;
+  pendingSend: PendingSend | null;
+  filterEditor: NewFilter | null;
   error: string | null;
+  notice: string | null;
   composer: ComposerState | null;
   busy: boolean;
   initialised: boolean;
@@ -61,24 +86,33 @@ interface MailState {
   setCategory: (c: Category) => void;
   setLabel: (remoteId: string) => void;
   setSearch: (q: string) => void;
-  setShowImages: (v: boolean) => void;
+  searchOnServer: () => Promise<void>;
+  applySettings: (s: { showImages: boolean; conversations: boolean; undoSeconds: number }) => void;
   query: () => ListQuery;
   refresh: () => Promise<void>;
   fetchFromServer: (reset: boolean) => Promise<void>;
   loadMore: () => Promise<void>;
-  select: (id: number | null) => Promise<void>;
+  open: (id: number | null) => Promise<void>;
+  openNext: (delta: number) => Promise<void>;
+  expand: (id: number, on?: boolean) => Promise<void>;
   sync: () => Promise<void>;
   addAccount: () => Promise<void>;
   removeAccount: (id: number) => Promise<void>;
   toggleStar: (m: MessageSummary) => Promise<void>;
-  markUnread: (id: number) => Promise<void>;
-  trash: (id: number) => Promise<void>;
-  archive: (id: number) => Promise<void>;
-  modifyLabels: (id: number, add: string[], remove: string[]) => Promise<void>;
+  // Thread-level actions on the open thread (or a specific row).
+  act: (action: "archive" | "trash" | "spam" | "notSpam" | "unread" | "read" | "inbox", ids?: number[]) => Promise<void>;
+  modifyLabels: (ids: number[], add: string[], remove: string[]) => Promise<void>;
+  snooze: (ids: number[], until: number | null) => Promise<void>;
+  toggleSelect: (id: number, range?: boolean) => void;
+  selectAll: (on: boolean) => void;
   openCompose: (mode?: ReplyMode, messageId?: number) => Promise<void>;
   updateComposer: (patch: Partial<ComposerState>) => void;
   closeCompose: () => void;
   send: () => Promise<void>;
+  undoSend: () => void;
+  openFilterEditor: (prefill?: Partial<NewFilter>) => void;
+  closeFilterEditor: () => void;
+  createFilter: (f: NewFilter) => Promise<boolean>;
   clearError: () => void;
 }
 
@@ -88,6 +122,8 @@ const splitList = (s: string) =>
     .map((x) => x.trim())
     .filter(Boolean);
 
+let lastSelectedId: number | null = null;
+
 export const useMail = create<MailState>((set, get) => ({
   accounts: [],
   activeAccountId: null,
@@ -96,16 +132,26 @@ export const useMail = create<MailState>((set, get) => ({
   label: null,
   labels: [],
   messages: [],
+  snoozed: [],
   hasMore: true,
   fetching: false,
-  selectedId: null,
-  detail: null,
+  conversations: true,
+  openId: null,
+  thread: [],
+  expanded: [],
+  details: {},
   loadingDetail: false,
+  selected: [],
   syncing: {},
   unread: 0,
   search: "",
+  serverSearch: false,
   showImages: true,
+  undoSeconds: 10,
+  pendingSend: null,
+  filterEditor: null,
   error: null,
+  notice: null,
   composer: null,
   busy: false,
   initialised: false,
@@ -115,7 +161,13 @@ export const useMail = create<MailState>((set, get) => ({
     set({ initialised: true });
     try {
       const s = await settings.get();
-      set({ showImages: s.mailShowImages });
+      get().applySettings({
+        showImages: s.mailShowImages,
+        conversations: s.conversationView,
+        undoSeconds: s.undoSendSeconds,
+      });
+      notifyPrefs.notifications = s.notifications;
+      notifyPrefs.sound = s.notificationSound;
     } catch {
       /* defaults are fine */
     }
@@ -127,6 +179,10 @@ export const useMail = create<MailState>((set, get) => ({
       if (now - lastFocusSync < 15_000) return;
       lastFocusSync = now;
       void get().sync();
+    });
+    await mail.onUnsnoozed((due) => {
+      void get().refresh();
+      for (const m of due) void notify(m.fromName || m.fromAddr, m.subject || "(no subject)", "mail");
     });
     await mail.onSync((ev: SyncEvent) => {
       const { syncing, activeAccountId } = get();
@@ -154,8 +210,36 @@ export const useMail = create<MailState>((set, get) => ({
           set({ syncing: next, error: `Sync failed: ${ev.error}` });
           break;
         }
+        case "newMail": {
+          const account = get().accounts.find((a) => a.id === ev.accountId);
+          const focused = document.hasFocus();
+          if (ev.messages.length === 1) {
+            const m = ev.messages[0];
+            void notify(m.fromName, m.subject || "(no subject)", "mail").then(() => undefined);
+          } else if (ev.messages.length > 1) {
+            void notify(
+              `${ev.messages.length} new messages${account ? ` · ${account.email}` : ""}`,
+              ev.messages
+                .slice(0, 4)
+                .map((m) => `${m.fromName}: ${m.subject}`)
+                .join("\n"),
+              "mail",
+            );
+          }
+          void focused;
+          break;
+        }
       }
     });
+  },
+
+  applySettings: ({ showImages, conversations, undoSeconds }) => {
+    const changed = conversations !== get().conversations;
+    set({ showImages, conversations, undoSeconds });
+    if (changed) {
+      set({ openId: null, thread: [], expanded: [], selected: [] });
+      void get().refresh();
+    }
   },
 
   loadAccounts: async () => {
@@ -187,49 +271,68 @@ export const useMail = create<MailState>((set, get) => ({
   },
 
   setAccount: (id) => {
-    set({ activeAccountId: id, selectedId: null, detail: null, search: "", label: null });
+    set({ activeAccountId: id, openId: null, thread: [], expanded: [], selected: [], search: "", label: null });
     void get().refresh();
     void get().loadLabels();
     void get().fetchFromServer(true);
   },
 
   setFolder: (folder) => {
-    set({ folder, label: null, selectedId: null, detail: null, search: "", hasMore: true });
+    set({ folder, label: null, openId: null, thread: [], expanded: [], selected: [], search: "", serverSearch: false, hasMore: true });
     void get().refresh();
     void get().fetchFromServer(true);
   },
 
   setCategory: (category) => {
-    set({ category, folder: "inbox", label: null, selectedId: null, detail: null, search: "", hasMore: true });
+    set({ category, folder: "inbox", label: null, openId: null, thread: [], expanded: [], selected: [], search: "", serverSearch: false, hasMore: true });
     void get().refresh();
     void get().fetchFromServer(true);
   },
 
   setLabel: (remoteId) => {
-    set({ label: remoteId, selectedId: null, detail: null, search: "", hasMore: true });
+    set({ label: remoteId, openId: null, thread: [], expanded: [], selected: [], search: "", serverSearch: false, hasMore: true });
     void get().refresh();
     void get().fetchFromServer(true);
   },
 
   setSearch: (search) => {
-    set({ search });
+    set({ search, serverSearch: false, selected: [] });
     void get().refresh();
   },
 
-  setShowImages: (showImages) => set({ showImages }),
+  searchOnServer: async () => {
+    const id = get().activeAccountId;
+    const q = get().search.trim();
+    if (id === null || !q) return;
+    set({ fetching: true, serverSearch: true });
+    try {
+      const messages = await mail.searchServer(id, q);
+      if (get().search.trim() === q) set({ messages, hasMore: false });
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    } finally {
+      set({ fetching: false });
+    }
+  },
 
   refresh: async () => {
-    const { activeAccountId, search } = get();
+    const { activeAccountId, search, folder, conversations, serverSearch } = get();
     if (activeAccountId === null) {
-      set({ messages: [], unread: 0 });
+      set({ messages: [], unread: 0, snoozed: [] });
       return;
     }
+    if (serverSearch) return;
     try {
       const limit = Math.max(PAGE, get().messages.length);
+      if (folder === "snoozed" && !search.trim()) {
+        const [snoozed, unread] = await Promise.all([mail.listSnoozed(activeAccountId), mail.unreadCount(activeAccountId)]);
+        set({ snoozed, messages: snoozed, unread, hasMore: false });
+        return;
+      }
       const [messages, unread] = await Promise.all([
         search.trim()
           ? mail.search(activeAccountId, search)
-          : mail.listMessages(activeAccountId, get().query(), limit),
+          : mail.listMessages(activeAccountId, get().query(), limit, 0, conversations),
         mail.unreadCount(activeAccountId),
       ]);
       set({ messages, unread });
@@ -242,7 +345,7 @@ export const useMail = create<MailState>((set, get) => ({
   // into the local cache; the list then re-reads from the cache.
   fetchFromServer: async (reset) => {
     const id = get().activeAccountId;
-    if (id === null || get().fetching) return;
+    if (id === null || get().fetching || get().folder === "snoozed") return;
     const query = get().query();
     set({ fetching: true });
     try {
@@ -266,32 +369,73 @@ export const useMail = create<MailState>((set, get) => ({
     if (id === null) return;
     // Show whatever the cache already has beyond the current window first.
     const before = get().messages.length;
-    const more = await mail.listMessages(id, get().query(), before + PAGE);
+    const more = await mail.listMessages(id, get().query(), before + PAGE, 0, get().conversations);
     set({ messages: more });
     if (more.length < before + PAGE) await get().fetchFromServer(false);
   },
 
-  select: async (id) => {
+  open: async (id) => {
     if (id === null) {
-      set({ selectedId: null, detail: null });
+      set({ openId: null, thread: [], expanded: [] });
       return;
     }
-    set({ selectedId: id, loadingDetail: true });
+    const row = get().messages.find((m) => m.id === id);
+    if (!row) return;
+    lastSelectedId = id;
+    set({ openId: id, loadingDetail: true, thread: [row], expanded: [] });
     try {
-      const detail = await mail.getMessage(id);
-      // The user may have moved on while the body was loading.
-      if (get().selectedId !== id) return;
-      const wasUnread = get().messages.some((m) => m.id === id && !m.isRead);
+      const accountId = row.accountId;
+      const thread = get().conversations && row.threadCount > 1
+        ? await mail.listThread(accountId, threadKey(row))
+        : [row];
+      if (get().openId !== id) return;
+      // Gmail expands the newest message plus anything unread.
+      const last = thread[thread.length - 1];
+      const toExpand = thread.filter((m) => !m.isRead || m.id === last.id).map((m) => m.id);
+      set({ thread, expanded: [] });
+      for (const mid of toExpand) await get().expand(mid, true);
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    } finally {
+      if (get().openId === id) set({ loadingDetail: false });
+    }
+  },
+
+  openNext: async (delta) => {
+    const { messages, openId } = get();
+    if (messages.length === 0) return;
+    const i = messages.findIndex((m) => m.id === openId);
+    const next = i === -1 ? (delta > 0 ? 0 : messages.length - 1) : Math.min(messages.length - 1, Math.max(0, i + delta));
+    await get().open(messages[next].id);
+  },
+
+  expand: async (mid, on) => {
+    const isOpen = get().expanded.includes(mid);
+    const want = on ?? !isOpen;
+    if (!want) {
+      set({ expanded: get().expanded.filter((x) => x !== mid) });
+      return;
+    }
+    set({ expanded: [...get().expanded, mid] });
+    if (get().details[mid]) return;
+    try {
+      const detail = await mail.getMessage(mid);
+      const wasUnread = get().thread.some((m) => m.id === mid && !m.isRead) || get().messages.some((m) => m.id === mid && !m.isRead);
       set({
-        detail,
-        messages: get().messages.map((m) => (m.id === id ? { ...m, isRead: true } : m)),
+        details: { ...get().details, [mid]: detail },
+        thread: get().thread.map((m) => (m.id === mid ? { ...m, isRead: true } : m)),
+        messages: get().messages.map((m) =>
+          m.id === mid
+            ? { ...m, isRead: true, threadUnread: Math.max(0, m.threadUnread - 1) }
+            : get().conversations && threadKey(m) === threadKey(detail) && wasUnread
+              ? { ...m, threadUnread: Math.max(0, m.threadUnread - 1) }
+              : m,
+        ),
         unread: wasUnread ? Math.max(0, get().unread - 1) : get().unread,
       });
       if (wasUnread) void get().loadLabels();
     } catch (e) {
       set({ error: errorMessage(e) });
-    } finally {
-      if (get().selectedId === id) set({ loadingDetail: false });
     }
   },
 
@@ -321,7 +465,7 @@ export const useMail = create<MailState>((set, get) => ({
   removeAccount: async (id) => {
     try {
       await mail.removeAccount(id);
-      set({ activeAccountId: null, selectedId: null, detail: null });
+      set({ activeAccountId: null, openId: null, thread: [], expanded: [] });
       await get().loadAccounts();
     } catch (e) {
       set({ error: errorMessage(e) });
@@ -330,10 +474,8 @@ export const useMail = create<MailState>((set, get) => ({
 
   toggleStar: async (m) => {
     const starred = !m.isStarred;
-    set({
-      messages: get().messages.map((x) => (x.id === m.id ? { ...x, isStarred: starred } : x)),
-      detail: get().detail?.id === m.id ? { ...get().detail!, isStarred: starred } : get().detail,
-    });
+    const patchRow = (x: MessageSummary) => (x.id === m.id ? { ...x, isStarred: starred } : x);
+    set({ messages: get().messages.map(patchRow), thread: get().thread.map(patchRow) });
     try {
       await mail.setFlags(m.id, { starred });
     } catch (e) {
@@ -342,49 +484,121 @@ export const useMail = create<MailState>((set, get) => ({
     }
   },
 
-  markUnread: async (id) => {
-    try {
-      await mail.setFlags(id, { read: false });
-      set({ selectedId: null, detail: null });
-      await Promise.all([get().refresh(), get().loadLabels()]);
-    } catch (e) {
-      set({ error: errorMessage(e) });
-    }
-  },
-
-  trash: async (id) => {
-    try {
-      await mail.trash(id);
-      set({ selectedId: null, detail: null, messages: get().messages.filter((m) => m.id !== id) });
-      void get().loadLabels();
-    } catch (e) {
-      set({ error: errorMessage(e) });
-    }
-  },
-
-  archive: async (id) => {
-    try {
-      await mail.archive(id);
-      if (get().folder === "inbox" && !get().label) {
-        set({ selectedId: null, detail: null, messages: get().messages.filter((m) => m.id !== id) });
-      }
-    } catch (e) {
-      set({ error: errorMessage(e) });
-    }
-  },
-
-  modifyLabels: async (id, add, remove) => {
-    try {
-      const detail = await mail.modifyLabels(id, add, remove);
+  // Resolves row ids to every message they stand for (whole threads in
+  // conversation mode) and applies one batched label change.
+  act: async (action, ids) => {
+    const targets = ids ?? (get().selected.length ? get().selected : get().openId !== null ? [get().openId!] : []);
+    if (targets.length === 0) return;
+    const [add, remove] = {
+      archive: [[], ["INBOX"]],
+      trash: [["TRASH"], ["INBOX"]],
+      spam: [["SPAM"], ["INBOX"]],
+      notSpam: [[], ["SPAM"]],
+      unread: [["UNREAD"], []],
+      read: [[], ["UNREAD"]],
+      inbox: [["INBOX"], ["TRASH", "SPAM"]],
+    }[action] as [string[], string[]];
+    await get().modifyLabels(targets, add, remove);
+    const removesFromView =
+      (action === "archive" && get().folder === "inbox" && !get().label) ||
+      (action === "trash" && get().folder !== "trash") ||
+      (action === "spam" && get().folder !== "spam") ||
+      (action === "notSpam" && get().folder === "spam") ||
+      (action === "inbox" && (get().folder === "trash" || get().folder === "spam"));
+    if (removesFromView) {
+      const gone = new Set(targets);
       set({
-        detail: get().detail?.id === id ? detail : get().detail,
-        messages: get().messages.map((m) => (m.id === id ? { ...m, labels: detail.labels } : m)),
+        messages: get().messages.filter((m) => !gone.has(m.id)),
+        selected: [],
+        openId: gone.has(get().openId ?? -1) ? null : get().openId,
+        thread: gone.has(get().openId ?? -1) ? [] : get().thread,
       });
-      void get().loadLabels();
+    } else if (action === "unread") {
+      set({ openId: null, thread: [], expanded: [], selected: [] });
+      await get().refresh();
+    } else {
+      set({ selected: [] });
+      await get().refresh();
+    }
+    void get().loadLabels();
+  },
+
+  modifyLabels: async (ids, add, remove) => {
+    const rows = get().messages.filter((m) => ids.includes(m.id));
+    const rowsFromThread = get().thread.filter((m) => ids.includes(m.id) && !rows.some((r) => r.id === m.id));
+    const all = [...rows, ...rowsFromThread];
+    try {
+      if (get().conversations) {
+        // Whole threads: one call per thread, like Gmail.
+        const seen = new Set<string>();
+        for (const m of all) {
+          const key = threadKey(m);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          await mail.threadModify(m.accountId, key, add, remove);
+        }
+      } else {
+        await mail.bulkModify(ids, add, remove);
+      }
+      // Reflect locally without a full refresh so the pane doesn't flicker.
+      const apply = (m: MessageSummary) => {
+        if (!ids.includes(m.id) && !(get().conversations && all.some((r) => threadKey(r) === threadKey(m)))) return m;
+        const labels = m.labels.filter((l) => !remove.includes(l)).concat(add.filter((l) => !m.labels.includes(l)));
+        return { ...m, labels, isRead: !labels.includes("UNREAD"), isStarred: labels.includes("STARRED") };
+      };
+      const details = { ...get().details };
+      for (const k of Object.keys(details)) details[Number(k)] = apply(details[Number(k)]) as MessageDetail;
+      set({ messages: get().messages.map(apply), thread: get().thread.map(apply), details });
+    } catch (e) {
+      set({ error: errorMessage(e) });
+      await get().refresh();
+    }
+  },
+
+  snooze: async (ids, until) => {
+    try {
+      const rows = [...get().messages, ...get().thread].filter((m) => ids.includes(m.id));
+      const targets = new Set<number>(ids);
+      if (get().conversations) {
+        for (const r of rows) {
+          for (const t of await mail.listThread(r.accountId, threadKey(r))) targets.add(t.id);
+        }
+      }
+      for (const id of targets) {
+        if (until === null) await mail.unsnooze(id);
+        else await mail.snooze(id, until);
+      }
+      const gone = new Set(ids);
+      set({
+        messages: get().messages.filter((m) => !gone.has(m.id)),
+        selected: [],
+        openId: gone.has(get().openId ?? -1) ? null : get().openId,
+        thread: gone.has(get().openId ?? -1) ? [] : get().thread,
+        notice: until === null ? "Moved back to the inbox." : `Snoozed until ${new Date(until).toLocaleString()}`,
+      });
+      window.setTimeout(() => set({ notice: null }), 4000);
     } catch (e) {
       set({ error: errorMessage(e) });
     }
   },
+
+  toggleSelect: (id, range) => {
+    const { selected, messages } = get();
+    if (range && lastSelectedId !== null) {
+      const a = messages.findIndex((m) => m.id === lastSelectedId);
+      const b = messages.findIndex((m) => m.id === id);
+      if (a !== -1 && b !== -1) {
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        const ids = messages.slice(lo, hi + 1).map((m) => m.id);
+        set({ selected: Array.from(new Set([...selected, ...ids])) });
+        return;
+      }
+    }
+    lastSelectedId = id;
+    set({ selected: selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id] });
+  },
+
+  selectAll: (on) => set({ selected: on ? get().messages.map((m) => m.id) : [] }),
 
   openCompose: async (mode, messageId) => {
     const accountId = get().activeAccountId;
@@ -422,29 +636,90 @@ export const useMail = create<MailState>((set, get) => ({
   send: async () => {
     const c = get().composer;
     if (!c) return;
-    set({ busy: true, error: null });
+    const message: OutgoingMessage = {
+      accountId: c.accountId,
+      to: splitList(c.to),
+      cc: splitList(c.cc),
+      bcc: splitList(c.bcc),
+      subject: c.subject,
+      bodyText: c.body,
+      quotedHtml: c.draft?.quotedHtml ?? null,
+      inReplyTo: c.draft?.inReplyTo ?? null,
+      references: c.draft?.references ?? null,
+      threadId: c.draft?.threadId ?? null,
+      attachments: [
+        ...c.files.map((path) => ({ kind: "path" as const, path })),
+        ...(c.draft?.attachments ?? []),
+      ],
+    };
+    if (message.to.length === 0) {
+      set({ error: "Add at least one recipient." });
+      return;
+    }
+    const doSend = async () => {
+      set({ pendingSend: null, busy: true, error: null });
+      try {
+        await mail.send(message);
+        set({ notice: "Sent." });
+        window.setTimeout(() => set({ notice: null }), 3000);
+      } catch (e) {
+        // Give the user their draft back rather than losing it.
+        set({ error: errorMessage(e), composer: c });
+      } finally {
+        set({ busy: false });
+      }
+    };
+    const delay = get().undoSeconds;
+    if (delay <= 0) {
+      await doSend();
+      return;
+    }
+    if (get().pendingSend) window.clearTimeout(get().pendingSend!.timer);
+    const timer = window.setTimeout(() => void doSend(), delay * 1000);
+    set({ composer: null, pendingSend: { message, composer: c, sendAt: Date.now() + delay * 1000, timer } });
+  },
+
+  undoSend: () => {
+    const p = get().pendingSend;
+    if (!p) return;
+    window.clearTimeout(p.timer);
+    set({ pendingSend: null, composer: p.composer });
+  },
+
+  openFilterEditor: (prefill) =>
+    set({
+      filterEditor: {
+        from: "",
+        to: "",
+        subject: "",
+        hasWords: "",
+        notWords: "",
+        hasAttachment: false,
+        skipInbox: false,
+        markRead: false,
+        star: false,
+        addLabel: null,
+        delete: false,
+        neverSpam: false,
+        markImportant: false,
+        applyToExisting: true,
+        ...prefill,
+      },
+    }),
+
+  closeFilterEditor: () => set({ filterEditor: null }),
+
+  createFilter: async (f) => {
+    const id = get().activeAccountId;
+    if (id === null) return false;
     try {
-      await mail.send({
-        accountId: c.accountId,
-        to: splitList(c.to),
-        cc: splitList(c.cc),
-        bcc: splitList(c.bcc),
-        subject: c.subject,
-        bodyText: c.body,
-        quotedHtml: c.draft?.quotedHtml ?? null,
-        inReplyTo: c.draft?.inReplyTo ?? null,
-        references: c.draft?.references ?? null,
-        threadId: c.draft?.threadId ?? null,
-        attachments: [
-          ...c.files.map((path) => ({ kind: "path" as const, path })),
-          ...(c.draft?.attachments ?? []),
-        ],
-      });
-      set({ composer: null });
+      await mail.createFilter(id, f);
+      set({ filterEditor: null, notice: "Filter created." });
+      window.setTimeout(() => set({ notice: null }), 3000);
+      return true;
     } catch (e) {
       set({ error: errorMessage(e) });
-    } finally {
-      set({ busy: false });
+      return false;
     }
   },
 

@@ -287,6 +287,8 @@ mod tests {
                 is_read: true,
                 is_starred: false,
                 has_attachments: true,
+                thread_count: 1,
+                thread_unread: 0,
             },
             body_html: Some("<p>numbers</p>".into()),
             body_text: Some("numbers".into()),
