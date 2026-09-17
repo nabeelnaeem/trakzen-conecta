@@ -227,6 +227,29 @@ impl GmailProvider {
     }
 }
 
+/// Maps a UI view onto Gmail list parameters: label ids (ANDed) plus an
+/// optional search string for the parts labels cannot express.
+fn view_params(query: &ListQuery) -> (Vec<&'static str>, Option<String>, Vec<String>) {
+    // Returns (static labels, q, owned labels) – owned for user label ids.
+    if let Some(l) = &query.label {
+        return (vec![], None, vec![l.clone()]);
+    }
+    match query.folder {
+        Folder::Inbox => match query.category {
+            Some(Category::Primary) => (vec!["INBOX"], Some("category:primary".into()), vec![]),
+            Some(c) => (vec!["INBOX", c.label_id()], None, vec![]),
+            None => (vec!["INBOX"], None, vec![]),
+        },
+        Folder::Starred => (vec!["STARRED"], None, vec![]),
+        Folder::Sent => (vec!["SENT"], None, vec![]),
+        Folder::Drafts => (vec!["DRAFT"], None, vec![]),
+        Folder::Trash => (vec!["TRASH"], None, vec![]),
+        Folder::Spam => (vec!["SPAM"], None, vec![]),
+        Folder::Archive => (vec![], Some("-in:inbox -in:sent -in:drafts -in:spam -in:trash".into()), vec![]),
+        Folder::All | Folder::Snoozed => (vec![], None, vec![]),
+    }
+}
+
 #[async_trait]
 impl MailProvider for GmailProvider {
     fn kind(&self) -> ProviderKind {
@@ -434,6 +457,75 @@ impl MailProvider for GmailProvider {
             .await?
             .ok_or_else(|| AppError::NotFound("draft no longer exists on the server".into()))?;
         self.api.get_draft(&token, &id).await
+    }
+
+    async fn modify_threads(
+        &self,
+        account: &Account,
+        thread_ids: &[String],
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        let token = self.token(account).await?;
+        // Chunked rather than buffer_unordered: keeps the closure lifetimes
+        // simple under async-trait and stays under Gmail's per-second quota.
+        for chunk in thread_ids.chunks(FETCH_CONCURRENCY) {
+            let mut set = futures::stream::FuturesUnordered::new();
+            for t in chunk {
+                set.push(self.api.modify_thread(&token, t, add, remove));
+            }
+            while let Some(r) = set.next().await {
+                r?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn count_view(&self, account: &Account, query: &ListQuery) -> Result<u64> {
+        if query.folder == Folder::Snoozed {
+            return Ok(0);
+        }
+        let token = self.token(account).await?;
+        let (labels, q, owned) = view_params(query);
+        let mut all: Vec<&str> = labels;
+        all.extend(owned.iter().map(String::as_str));
+        self.api.estimate(&token, &all, q.as_deref()).await
+    }
+
+    async fn modify_view(
+        &self,
+        account: &Account,
+        query: &ListQuery,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<usize> {
+        if query.folder == Folder::Snoozed {
+            return Ok(0);
+        }
+        let token = self.token(account).await?;
+        let (labels, q, owned) = view_params(query);
+        let mut all: Vec<&str> = labels;
+        all.extend(owned.iter().map(String::as_str));
+        let mut page: Option<String> = None;
+        let mut touched = 0usize;
+        loop {
+            let list = self
+                .api
+                .list_ids_labels(&token, &all, q.as_deref(), 500, page.as_deref())
+                .await?;
+            let ids: Vec<String> = list.messages.into_iter().map(|m| m.id).collect();
+            if ids.is_empty() {
+                break;
+            }
+            touched += ids.len();
+            self.api.batch_modify(&token, &ids, add, remove).await?;
+            match list.next_page_token {
+                // 20 pages = 10k messages; beyond that the user should narrow the view.
+                Some(t) if touched < 10_000 => page = Some(t),
+                _ => break,
+            }
+        }
+        Ok(touched)
     }
 
     async fn search(

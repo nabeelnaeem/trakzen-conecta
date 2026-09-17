@@ -78,6 +78,11 @@ interface MailState {
   filterEditor: NewFilter | null;
   error: string | null;
   notice: string | null;
+  /// Label of the long-running action in flight, for the progress toast.
+  working: string | null;
+  /// "Select all N conversations in <view>" state.
+  viewCount: number | null;
+  allInView: boolean;
   composer: ComposerState | null;
   busy: boolean;
   initialised: boolean;
@@ -105,12 +110,14 @@ interface MailState {
   toggleStar: (m: MessageSummary) => Promise<void>;
   // Thread-level actions on the open thread (or a specific row).
   act: (action: "archive" | "trash" | "spam" | "notSpam" | "unread" | "read" | "inbox", ids?: number[]) => Promise<void>;
-  modifyLabels: (ids: number[], add: string[], remove: string[]) => Promise<void>;
+  modifyLabels: (ids: number[], add: string[], remove: string[]) => Promise<boolean>;
   snooze: (ids: number[], until: number | null) => Promise<void>;
   toggleSelect: (id: number, range?: boolean) => void;
   selectAll: (on: boolean) => void;
   selectWhere: (which: "read" | "unread") => void;
+  selectEntireView: () => Promise<void>;
   markView: (read: boolean) => Promise<void>;
+  run: <T>(label: string, fn: () => Promise<T>) => Promise<T | undefined>;
   openCompose: (mode?: ReplyMode, messageId?: number) => Promise<void>;
   updateComposer: (patch: Partial<ComposerState>) => void;
   closeCompose: () => void;
@@ -196,9 +203,25 @@ export const useMail = create<MailState>((set, get) => ({
   filterEditor: null,
   error: null,
   notice: null,
+  working: null,
+  viewCount: null,
+  allInView: false,
   composer: null,
   busy: false,
   initialised: false,
+
+  // Wraps a slow action: shows the progress toast, surfaces errors.
+  run: async (label, fn) => {
+    set({ working: label, error: null });
+    try {
+      return await fn();
+    } catch (e) {
+      set({ error: errorMessage(e) });
+      return undefined;
+    } finally {
+      set({ working: null });
+    }
+  },
 
   init: async () => {
     if (get().initialised) return;
@@ -322,25 +345,25 @@ export const useMail = create<MailState>((set, get) => ({
   },
 
   setFolder: (folder) => {
-    set({ folder, label: null, openId: null, thread: [], expanded: [], selected: [], search: "", serverSearch: false, hasMore: true });
+    set({ folder, label: null, openId: null, thread: [], expanded: [], selected: [], allInView: false, viewCount: null, search: "", serverSearch: false, hasMore: true });
     void get().refresh();
     void get().fetchFromServer(true);
   },
 
   setCategory: (category) => {
-    set({ category, folder: "inbox", label: null, openId: null, thread: [], expanded: [], selected: [], search: "", serverSearch: false, hasMore: true });
+    set({ category, folder: "inbox", label: null, openId: null, thread: [], expanded: [], selected: [], allInView: false, viewCount: null, search: "", serverSearch: false, hasMore: true });
     void get().refresh();
     void get().fetchFromServer(true);
   },
 
   setLabel: (remoteId) => {
-    set({ label: remoteId, openId: null, thread: [], expanded: [], selected: [], search: "", serverSearch: false, hasMore: true });
+    set({ label: remoteId, openId: null, thread: [], expanded: [], selected: [], allInView: false, viewCount: null, search: "", serverSearch: false, hasMore: true });
     void get().refresh();
     void get().fetchFromServer(true);
   },
 
   setSearch: (search) => {
-    set({ search, serverSearch: false, selected: [] });
+    set({ search, serverSearch: false, selected: [], allInView: false, viewCount: null });
     void get().refresh();
   },
 
@@ -565,8 +588,6 @@ export const useMail = create<MailState>((set, get) => ({
   // Resolves row ids to every message they stand for (whole threads in
   // conversation mode) and applies one batched label change.
   act: async (action, ids) => {
-    const targets = ids ?? (get().selected.length ? get().selected : get().openId !== null ? [get().openId!] : []);
-    if (targets.length === 0) return;
     const [add, remove] = {
       archive: [[], ["INBOX"]],
       trash: [["TRASH"], ["INBOX"]],
@@ -576,7 +597,23 @@ export const useMail = create<MailState>((set, get) => ({
       read: [[], ["UNREAD"]],
       inbox: [["INBOX"], ["TRASH", "SPAM"]],
     }[action] as [string[], string[]];
-    await get().modifyLabels(targets, add, remove);
+    const verb = { archive: "Archiving", trash: "Deleting", spam: "Reporting spam", notSpam: "Restoring", unread: "Marking unread", read: "Marking read", inbox: "Moving to inbox" }[action];
+
+    // Whole-view selection: server-side over every message in the view.
+    if (!ids && get().allInView && get().activeAccountId !== null) {
+      const accountId = get().activeAccountId!;
+      const n = await get().run(`${verb}…`, () => mail.modifyView(accountId, get().query(), add, remove));
+      if (n === undefined) return;
+      set({ selected: [], allInView: false, viewCount: null, openId: null, thread: [], expanded: [], notice: `${n} message${n === 1 ? "" : "s"} updated.` });
+      window.setTimeout(() => set({ notice: null }), 3000);
+      await Promise.all([get().refresh(), get().loadLabels()]);
+      return;
+    }
+
+    const targets = ids ?? (get().selected.length ? get().selected : get().openId !== null ? [get().openId!] : []);
+    if (targets.length === 0) return;
+    const ok = await get().run(targets.length > 1 ? `${verb} ${targets.length}…` : `${verb}…`, () => get().modifyLabels(targets, add, remove));
+    if (ok === undefined) return;
     const removesFromView =
       (action === "archive" && get().folder === "inbox" && !get().label) ||
       (action === "trash" && get().folder !== "trash") ||
@@ -606,15 +643,10 @@ export const useMail = create<MailState>((set, get) => ({
     const rowsFromThread = get().thread.filter((m) => ids.includes(m.id) && !rows.some((r) => r.id === m.id));
     const all = [...rows, ...rowsFromThread];
     try {
-      if (get().conversations) {
-        // Whole threads: one call per thread, like Gmail.
-        const seen = new Set<string>();
-        for (const m of all) {
-          const key = threadKey(m);
-          if (seen.has(key)) continue;
-          seen.add(key);
-          await mail.threadModify(m.accountId, key, add, remove);
-        }
+      if (get().conversations && all.length > 0) {
+        // Whole threads, like Gmail; one request that fans out server-side.
+        const threadIds = Array.from(new Set(all.map(threadKey)));
+        await mail.threadsModify(all[0].accountId, threadIds, add, remove);
       } else {
         await mail.bulkModify(ids, add, remove);
       }
@@ -627,14 +659,20 @@ export const useMail = create<MailState>((set, get) => ({
       const details = { ...get().details };
       for (const k of Object.keys(details)) details[Number(k)] = apply(details[Number(k)]) as MessageDetail;
       set({ messages: get().messages.map(apply), thread: get().thread.map(apply), details });
+      // Unread badge and label counts change with almost every action.
+      const accountId = get().activeAccountId;
+      if (accountId !== null) mail.unreadCount(accountId).then((unread) => set({ unread })).catch(() => undefined);
+      void get().loadLabels();
+      return true;
     } catch (e) {
       set({ error: errorMessage(e) });
       await get().refresh();
+      throw e;
     }
   },
 
   snooze: async (ids, until) => {
-    try {
+    await get().run(until === null ? "Unsnoozing…" : "Snoozing…", async () => {
       const rows = [...get().messages, ...get().thread].filter((m) => ids.includes(m.id));
       const targets = new Set<number>(ids);
       if (get().conversations) {
@@ -655,9 +693,7 @@ export const useMail = create<MailState>((set, get) => ({
         notice: until === null ? "Moved back to the inbox." : `Snoozed until ${new Date(until).toLocaleString()}`,
       });
       window.setTimeout(() => set({ notice: null }), 4000);
-    } catch (e) {
-      set({ error: errorMessage(e) });
-    }
+    });
   },
 
   toggleSelect: (id, range) => {
@@ -676,7 +712,17 @@ export const useMail = create<MailState>((set, get) => ({
     set({ selected: selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id] });
   },
 
-  selectAll: (on) => set({ selected: on ? get().messages.map((m) => m.id) : [] }),
+  selectAll: (on) => {
+    set({ selected: on ? get().messages.map((m) => m.id) : [], allInView: false });
+    if (on && get().viewCount === null && get().activeAccountId !== null && !get().search) {
+      const accountId = get().activeAccountId!;
+      mail.viewCount(accountId, get().query()).then((n) => set({ viewCount: n })).catch(() => undefined);
+    }
+  },
+
+  selectEntireView: async () => {
+    set({ allInView: true, selected: get().messages.map((m) => m.id) });
+  },
 
   selectWhere: (which) =>
     set({
@@ -688,14 +734,11 @@ export const useMail = create<MailState>((set, get) => ({
   markView: async (read) => {
     const id = get().activeAccountId;
     if (id === null) return;
-    try {
-      const n = await mail.markView(id, get().query(), read);
-      set({ selected: [], notice: `${n} message${n === 1 ? "" : "s"} marked as ${read ? "read" : "unread"}.` });
-      window.setTimeout(() => set({ notice: null }), 3000);
-      await Promise.all([get().refresh(), get().loadLabels()]);
-    } catch (e) {
-      set({ error: errorMessage(e) });
-    }
+    const n = await get().run(read ? "Marking everything as read…" : "Marking everything as unread…", () => mail.markView(id, get().query(), read));
+    if (n === undefined) return;
+    set({ selected: [], allInView: false, notice: `${n} message${n === 1 ? "" : "s"} marked as ${read ? "read" : "unread"}.` });
+    window.setTimeout(() => set({ notice: null }), 3000);
+    await Promise.all([get().refresh(), get().loadLabels()]);
   },
 
   openCompose: async (mode, messageId) => {

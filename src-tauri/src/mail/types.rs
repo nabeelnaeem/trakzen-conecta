@@ -36,6 +36,8 @@ pub enum Folder {
     Archive,
     Trash,
     Spam,
+    /// Local-only view of snoozed mail.
+    Snoozed,
     All,
 }
 
@@ -91,7 +93,7 @@ impl ListQuery {
             Folder::Drafts => "DRAFT",
             Folder::Trash => "TRASH",
             Folder::Spam => "SPAM",
-            Folder::Archive | Folder::All => return None,
+            Folder::Archive | Folder::All | Folder::Snoozed => return None,
         };
         Some(id.into())
     }

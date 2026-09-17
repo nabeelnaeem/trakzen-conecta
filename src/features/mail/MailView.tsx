@@ -208,6 +208,27 @@ export function MailView() {
             </button>
           </div>
         )}
+        {s.selected.length > 0 && allSelected && !s.search && s.folder !== "snoozed" && (
+          <div className="border-b border-gray-200 bg-blue-50/60 px-3 py-1.5 text-center text-xs text-gray-700">
+            {s.allInView ? (
+              <>
+                All <b>{s.viewCount?.toLocaleString() ?? "…"}</b> {s.conversations ? "conversations" : "messages"} in {viewName(s)} are selected.{" "}
+                <button className="text-blue-700 hover:underline" onClick={() => s.selectAll(false)}>
+                  Clear selection
+                </button>
+              </>
+            ) : (
+              <>
+                All <b>{s.messages.length}</b> on this page are selected.{" "}
+                {s.viewCount !== null && s.viewCount > s.messages.length && (
+                  <button className="text-blue-700 hover:underline" onClick={() => void s.selectEntireView()}>
+                    Select all {s.viewCount.toLocaleString()} {s.conversations ? "conversations" : "messages"} in {viewName(s)}
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        )}
         {s.label && (
           <div className="flex items-center gap-2 border-b border-gray-200 px-3 py-1.5 text-xs">
             <LabelChip remoteId={s.label} />
@@ -289,11 +310,18 @@ function SelectMenu({ allSelected }: { allSelected: boolean }) {
 }
 
 function BulkButton({ children, title, onClick }: { children: React.ReactNode; title: string; onClick: () => void }) {
+  const working = useMail((m) => m.working);
   return (
-    <button className="rounded px-2 py-1 text-sm hover:bg-blue-100" title={title} onClick={onClick}>
+    <button className="rounded px-2 py-1 text-sm hover:bg-blue-100 disabled:opacity-40" title={title} onClick={onClick} disabled={!!working}>
       {children}
     </button>
   );
+}
+
+function viewName(s: ReturnType<typeof useMail.getState>): string {
+  if (s.label) return s.labels.find((l) => l.remoteId === s.label)?.name ?? "this label";
+  if (s.folder === "inbox") return s.category === "primary" ? "Primary" : s.category[0].toUpperCase() + s.category.slice(1);
+  return s.folder === "all" ? "All mail" : s.folder[0].toUpperCase() + s.folder.slice(1);
 }
 
 function BulkLabelMenu() {
@@ -334,7 +362,7 @@ function BulkLabelMenu() {
 }
 
 function Toasts() {
-  const { pendingSend, undoSend, notice } = useMail();
+  const { pendingSend, undoSend, notice, working } = useMail();
   const [left, setLeft] = useState(0);
   useEffect(() => {
     if (!pendingSend) return;
@@ -343,9 +371,14 @@ function Toasts() {
     const t = window.setInterval(tick, 250);
     return () => window.clearInterval(t);
   }, [pendingSend]);
-  if (!pendingSend && !notice) return null;
+  if (!pendingSend && !notice && !working) return null;
   return (
-    <div className="pointer-events-none fixed bottom-4 left-1/2 z-40 -translate-x-1/2">
+    <div className="pointer-events-none fixed bottom-4 left-1/2 z-40 flex -translate-x-1/2 flex-col items-center gap-2">
+      {working && (
+        <div className="flex items-center gap-2 rounded-full bg-gray-900 px-4 py-2 text-sm text-white shadow-lg">
+          <Spinner size={14} className="text-blue-300" /> {working}
+        </div>
+      )}
       {pendingSend && (
         <div className="pointer-events-auto flex items-center gap-3 rounded-full bg-gray-900 px-4 py-2 text-sm text-white shadow-lg">
           Sending in {left}s…
@@ -354,7 +387,7 @@ function Toasts() {
           </button>
         </div>
       )}
-      {!pendingSend && notice && (
+      {!pendingSend && notice && !working && (
         <div className="rounded-full bg-gray-900 px-4 py-2 text-sm text-white shadow-lg">{notice}</div>
       )}
     </div>

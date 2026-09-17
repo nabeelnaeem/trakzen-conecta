@@ -148,8 +148,39 @@ pub async fn mail_bulk_modify(
     state.mail.set_labels_bulk(&ids, &add, &remove)
 }
 
-/// Marks everything in the current view (folder / tab / label) read or
-/// unread — all cached messages, not just the rows on screen.
+/// Gmail's estimate of how many messages a view holds on the server.
+#[tauri::command]
+pub async fn mail_view_count(
+    state: State<'_, AppState>,
+    account_id: i64,
+    query: ListQuery,
+) -> Result<u64> {
+    let account = state.mail.get_account(account_id)?;
+    let provider = state.providers.provider_for(&account.provider)?;
+    provider.count_view(&account, &query).await
+}
+
+/// Label change over an entire view on the server ("select all N
+/// conversations in Inbox"), mirrored onto whatever is cached locally.
+#[tauri::command]
+pub async fn mail_modify_view(
+    state: State<'_, AppState>,
+    account_id: i64,
+    query: ListQuery,
+    add: Vec<String>,
+    remove: Vec<String>,
+) -> Result<usize> {
+    let account = state.mail.get_account(account_id)?;
+    let provider = state.providers.provider_for(&account.provider)?;
+    let n = provider.modify_view(&account, &query, &add, &remove).await?;
+    let rows = state.mail.list_messages(account_id, &query, 100_000, 0)?;
+    let ids: Vec<i64> = rows.iter().map(|m| m.id).collect();
+    let add: Vec<&str> = add.iter().map(String::as_str).collect();
+    let remove: Vec<&str> = remove.iter().map(String::as_str).collect();
+    state.mail.set_labels_bulk(&ids, &add, &remove)?;
+    Ok(n)
+}
+
 #[tauri::command]
 pub async fn mail_mark_view(
     state: State<'_, AppState>,
@@ -157,32 +188,39 @@ pub async fn mail_mark_view(
     query: ListQuery,
     read: bool,
 ) -> Result<usize> {
-    let rows = state.mail.list_messages(account_id, &query, 100_000, 0)?;
-    let ids: Vec<i64> = rows
-        .iter()
-        .filter(|m| m.is_read != read)
-        .map(|m| m.id)
-        .collect();
-    if ids.is_empty() {
-        return Ok(0);
-    }
-    let account = state.mail.get_account(account_id)?;
-    let provider = state.providers.provider_for(&account.provider)?;
-    let remote: Vec<String> = rows
-        .iter()
-        .filter(|m| m.is_read != read)
-        .map(|m| m.remote_id.clone())
-        .collect();
     let (add, remove) = if read {
         (vec![], vec!["UNREAD".to_string()])
     } else {
         (vec!["UNREAD".to_string()], vec![])
     };
-    provider.batch_modify(&account, &remote, &add, &remove).await?;
+    mail_modify_view(state, account_id, query, add, remove).await
+}
+
+/// One change across many threads; resolves to a concurrent batch on the
+/// provider side and one local update.
+#[tauri::command]
+pub async fn mail_threads_modify(
+    state: State<'_, AppState>,
+    account_id: i64,
+    thread_ids: Vec<String>,
+    add: Vec<String>,
+    remove: Vec<String>,
+) -> Result<()> {
+    if thread_ids.is_empty() {
+        return Ok(());
+    }
+    let account = state.mail.get_account(account_id)?;
+    let provider = state.providers.provider_for(&account.provider)?;
+    provider
+        .modify_threads(&account, &thread_ids, &add, &remove)
+        .await?;
+    let mut ids = Vec::new();
+    for t in &thread_ids {
+        ids.extend(state.mail.thread_local_ids(account_id, t)?);
+    }
     let add: Vec<&str> = add.iter().map(String::as_str).collect();
     let remove: Vec<&str> = remove.iter().map(String::as_str).collect();
-    state.mail.set_labels_bulk(&ids, &add, &remove)?;
-    Ok(ids.len())
+    state.mail.set_labels_bulk(&ids, &add, &remove)
 }
 
 #[tauri::command]

@@ -165,15 +165,28 @@ impl GmailApi {
         max: u32,
         page_token: Option<&str>,
     ) -> Result<IdList> {
+        let labels: Vec<&str> = label_id.into_iter().collect();
+        self.list_ids_labels(token, &labels, query, max, page_token).await
+    }
+
+    /// `labels` are ANDed, as Gmail does with repeated `labelIds`.
+    pub async fn list_ids_labels(
+        &self,
+        token: &str,
+        labels: &[&str],
+        query: Option<&str>,
+        max: u32,
+        page_token: Option<&str>,
+    ) -> Result<IdList> {
         let max = max.to_string();
         let mut q = vec![("maxResults", max.as_str())];
-        if let Some(l) = label_id {
+        for l in labels {
             q.push(("labelIds", l));
-            // Trash and spam are hidden by default; when the user opens
-            // Trash itself they must be included.
-            if l == "TRASH" || l == "SPAM" {
-                q.push(("includeSpamTrash", "true"));
-            }
+        }
+        // Trash and spam are hidden by default; when the user opens
+        // Trash itself they must be included.
+        if labels.iter().any(|l| *l == "TRASH" || *l == "SPAM") {
+            q.push(("includeSpamTrash", "true"));
         }
         if let Some(query) = query {
             q.push(("q", query));
@@ -182,6 +195,22 @@ impl GmailApi {
             q.push(("pageToken", pt));
         }
         Ok(serde_json::from_value(self.get_json(token, "messages", &q).await?)?)
+    }
+
+    /// Gmail's own count for a search; an estimate, like the web UI shows.
+    pub async fn estimate(&self, token: &str, labels: &[&str], query: Option<&str>) -> Result<u64> {
+        let mut q = vec![("maxResults", "1")];
+        for l in labels {
+            q.push(("labelIds", l));
+        }
+        if labels.iter().any(|l| *l == "TRASH" || *l == "SPAM") {
+            q.push(("includeSpamTrash", "true"));
+        }
+        if let Some(query) = query {
+            q.push(("q", query));
+        }
+        let v = self.get_json(token, "messages", &q).await?;
+        Ok(v["resultSizeEstimate"].as_u64().unwrap_or(0))
     }
 
     pub async fn list_labels(&self, token: &str) -> Result<Vec<RemoteLabel>> {

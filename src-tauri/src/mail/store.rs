@@ -385,6 +385,9 @@ impl MailStore {
             }
             (None, Folder::Trash, _) => "has_label(labels, 'TRASH')".to_string(),
             (None, Folder::Spam, _) => "has_label(labels, 'SPAM')".to_string(),
+            (None, Folder::Snoozed, _) => {
+                "EXISTS (SELECT 1 FROM mail_snoozes s WHERE s.message_id = mail_messages.id)".to_string()
+            }
             (None, Folder::All, _) => {
                 "NOT has_label(labels, 'TRASH') AND NOT has_label(labels, 'SPAM')".to_string()
             }

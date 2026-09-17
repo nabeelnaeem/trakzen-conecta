@@ -89,6 +89,28 @@ pub trait MailProvider: Send + Sync {
         remove: &[String],
     ) -> Result<()>;
 
+    /// Same change over many threads, run concurrently.
+    async fn modify_threads(
+        &self,
+        account: &Account,
+        thread_ids: &[String],
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()>;
+
+    /// Approximate number of messages the server has for a view.
+    async fn count_view(&self, account: &Account, query: &ListQuery) -> Result<u64>;
+
+    /// Applies a label change to every message in a view on the server
+    /// (not just what is cached). Returns how many were touched.
+    async fn modify_view(
+        &self,
+        account: &Account,
+        query: &ListQuery,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<usize>;
+
     /// Creates or updates a server draft; returns the draft id.
     async fn save_draft(
         &self,
