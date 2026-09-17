@@ -242,7 +242,10 @@ export function SettingsView() {
         <section className="border-t border-gray-200 pt-4 text-sm text-gray-600">
           <h2 className="text-base font-semibold text-gray-900">About</h2>
           <div className="mt-2">
-            Trakzen Conecta <span className="font-mono">v{__APP_VERSION__}</span> · built {__BUILD_DATE__}
+            Trakzen Conecta <span className="font-mono">v{__APP_VERSION__}</span> · build{" "}
+            <span className="font-mono" title="Build id">{__BUILD_ID__}</span> · {__BUILD_DATE__}
+            {" · "}
+            <span title="Local time">{new Date(__BUILD_DATE__.replace(" UTC", "Z").replace(" ", "T")).toLocaleString()}</span>
           </div>
           <div className="mt-1 flex gap-3 text-xs">
             <button className="text-blue-700 hover:underline" onClick={() => void openUrl("https://github.com/nabeelnaeem/trakzen-conecta/releases")}>

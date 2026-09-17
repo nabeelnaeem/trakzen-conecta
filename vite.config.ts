@@ -18,7 +18,9 @@ export default defineConfig(() => ({
   // Shown under Settings → About.
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
-    __BUILD_DATE__: JSON.stringify(new Date().toISOString().slice(0, 10)),
+    // Full timestamp so builds from the same day are distinguishable.
+    __BUILD_DATE__: JSON.stringify(new Date().toISOString().replace("T", " ").slice(0, 16) + " UTC"),
+    __BUILD_ID__: JSON.stringify(Math.floor(Date.now() / 1000).toString(36)),
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
