@@ -163,7 +163,7 @@ export function MailView() {
 
         {s.selected.length > 0 ? (
           <div className="flex items-center gap-1 border-b border-gray-200 bg-blue-50 px-2 py-1 text-xs">
-            <input type="checkbox" checked={allSelected} onChange={(e) => s.selectAll(e.target.checked)} title="Select all (*)" />
+            <SelectMenu allSelected={allSelected} />
             <span className="mr-1 font-medium">{s.selected.length} selected</span>
             <button className="btn btn-ghost text-xs" onClick={() => void s.act("archive")}>Archive</button>
             <button className="btn btn-ghost text-xs" onClick={() => void s.act("trash")}>Trash</button>
@@ -193,6 +193,19 @@ export function MailView() {
           </div>
         ) : null}
 
+        {s.selected.length === 0 && s.messages.length > 0 && !s.search && (
+          <div className="flex items-center gap-2 border-b border-gray-100 px-2 py-1 text-xs text-gray-500">
+            <SelectMenu allSelected={false} />
+            <span>{s.messages.length}{s.hasMore ? "+" : ""} {s.conversations ? "conversations" : "messages"}</span>
+            <div className="flex-1" />
+            <button className="hover:text-gray-900 hover:underline" onClick={() => void s.markView(true)} title="Mark everything in this view as read">
+              Mark all as read
+            </button>
+            <button className="hover:text-gray-900 hover:underline" onClick={() => void s.markView(false)} title="Mark everything in this view as unread">
+              Mark all as unread
+            </button>
+          </div>
+        )}
         {s.label && (
           <div className="flex items-center gap-2 border-b border-gray-200 px-3 py-1.5 text-xs">
             <LabelChip remoteId={s.label} />
@@ -225,6 +238,50 @@ export function MailView() {
       {s.composer && <Composer />}
       {s.filterEditor && <FilterEditor />}
       <Toasts />
+    </div>
+  );
+}
+
+/** Gmail's select checkbox with its All / None / Read / Unread menu. */
+function SelectMenu({ allSelected }: { allSelected: boolean }) {
+  const { selectAll, selectWhere, markView } = useMail();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, []);
+  const item = (label: string, fn: () => void) => (
+    <button
+      className="block w-full px-3 py-1.5 text-left text-sm hover:bg-gray-50"
+      onClick={() => {
+        fn();
+        setOpen(false);
+      }}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div className="relative flex items-center" ref={ref}>
+      <input type="checkbox" checked={allSelected} onChange={(e) => selectAll(e.target.checked)} title="Select all (*)" />
+      <button className="px-1 text-gray-500 hover:text-gray-900" onClick={() => setOpen((v) => !v)} aria-label="Select options">
+        ▾
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full z-10 mt-1 w-48 rounded-md border border-gray-200 bg-white py-1 shadow-lg">
+          {item("All", () => selectAll(true))}
+          {item("None", () => selectAll(false))}
+          {item("Read", () => selectWhere("read"))}
+          {item("Unread", () => selectWhere("unread"))}
+          <div className="my-1 border-t border-gray-100" />
+          {item("Mark all as read", () => void markView(true))}
+          {item("Mark all as unread", () => void markView(false))}
+        </div>
+      )}
     </div>
   );
 }

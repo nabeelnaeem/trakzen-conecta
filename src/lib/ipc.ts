@@ -44,6 +44,8 @@ export const mail = {
     invoke<MessageSummary[]>("mail_list_thread", { accountId, threadId }),
   bulkModify: (messageIds: number[], add: string[], remove: string[]) =>
     invoke<void>("mail_bulk_modify", { messageIds, add, remove }),
+  markView: (accountId: number, query: ListQuery, read: boolean) =>
+    invoke<number>("mail_mark_view", { accountId, query, read }),
   threadModify: (accountId: number, threadId: string, add: string[], remove: string[]) =>
     invoke<void>("mail_thread_modify", { accountId, threadId, add, remove }),
   createLabel: (accountId: number, name: string) => invoke<Label>("mail_create_label", { accountId, name }),

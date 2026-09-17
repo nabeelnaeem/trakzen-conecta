@@ -259,6 +259,7 @@ pub fn run() {
             mail::commands::mail_list_thread,
             mail::commands::mail_bulk_modify,
             mail::commands::mail_thread_modify,
+            mail::commands::mail_mark_view,
             mail::commands::mail_create_label,
             mail::commands::mail_create_filter,
             mail::commands::mail_delete_filter,

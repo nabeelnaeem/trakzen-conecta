@@ -4,6 +4,7 @@ import { ChatView } from "./features/chat/ChatView";
 import { SettingsView } from "./features/settings/SettingsView";
 import { useMail } from "./features/mail/store";
 import { useChat } from "./features/chat/store";
+import { restoreZoom, setZoom, zoomStep } from "./lib/zoom";
 
 type Tab = "mail" | "chat" | "settings";
 
@@ -20,16 +21,36 @@ export default function App() {
     void initChat();
   }, [initMail, initChat]);
 
-  // Ctrl+1/2/3 switch tabs.
+  // Ctrl+1/2/, switch tabs; Ctrl +/-/0 and Ctrl+wheel zoom.
   useEffect(() => {
+    void restoreZoom();
     const onKey = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return;
       if (e.key === "1") setTab("mail");
       else if (e.key === "2") setTab("chat");
       else if (e.key === ",") setTab("settings");
+      else if (e.key === "=" || e.key === "+") {
+        e.preventDefault();
+        void zoomStep(1);
+      } else if (e.key === "-") {
+        e.preventDefault();
+        void zoomStep(-1);
+      } else if (e.key === "0") {
+        e.preventDefault();
+        void setZoom(1);
+      }
+    };
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      void zoomStep(e.deltaY < 0 ? 1 : -1);
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("wheel", onWheel);
+    };
   }, []);
 
   return (

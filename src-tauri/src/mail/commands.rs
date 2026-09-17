@@ -148,6 +148,43 @@ pub async fn mail_bulk_modify(
     state.mail.set_labels_bulk(&ids, &add, &remove)
 }
 
+/// Marks everything in the current view (folder / tab / label) read or
+/// unread — all cached messages, not just the rows on screen.
+#[tauri::command]
+pub async fn mail_mark_view(
+    state: State<'_, AppState>,
+    account_id: i64,
+    query: ListQuery,
+    read: bool,
+) -> Result<usize> {
+    let rows = state.mail.list_messages(account_id, &query, 100_000, 0)?;
+    let ids: Vec<i64> = rows
+        .iter()
+        .filter(|m| m.is_read != read)
+        .map(|m| m.id)
+        .collect();
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let account = state.mail.get_account(account_id)?;
+    let provider = state.providers.provider_for(&account.provider)?;
+    let remote: Vec<String> = rows
+        .iter()
+        .filter(|m| m.is_read != read)
+        .map(|m| m.remote_id.clone())
+        .collect();
+    let (add, remove) = if read {
+        (vec![], vec!["UNREAD".to_string()])
+    } else {
+        (vec!["UNREAD".to_string()], vec![])
+    };
+    provider.batch_modify(&account, &remote, &add, &remove).await?;
+    let add: Vec<&str> = add.iter().map(String::as_str).collect();
+    let remove: Vec<&str> = remove.iter().map(String::as_str).collect();
+    state.mail.set_labels_bulk(&ids, &add, &remove)?;
+    Ok(ids.len())
+}
+
 #[tauri::command]
 pub async fn mail_thread_modify(
     state: State<'_, AppState>,

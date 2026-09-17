@@ -109,6 +109,8 @@ interface MailState {
   snooze: (ids: number[], until: number | null) => Promise<void>;
   toggleSelect: (id: number, range?: boolean) => void;
   selectAll: (on: boolean) => void;
+  selectWhere: (which: "read" | "unread") => void;
+  markView: (read: boolean) => Promise<void>;
   openCompose: (mode?: ReplyMode, messageId?: number) => Promise<void>;
   updateComposer: (patch: Partial<ComposerState>) => void;
   closeCompose: () => void;
@@ -675,6 +677,26 @@ export const useMail = create<MailState>((set, get) => ({
   },
 
   selectAll: (on) => set({ selected: on ? get().messages.map((m) => m.id) : [] }),
+
+  selectWhere: (which) =>
+    set({
+      selected: get()
+        .messages.filter((m) => (which === "unread" ? !m.isRead || m.threadUnread > 0 : m.isRead && m.threadUnread === 0))
+        .map((m) => m.id),
+    }),
+
+  markView: async (read) => {
+    const id = get().activeAccountId;
+    if (id === null) return;
+    try {
+      const n = await mail.markView(id, get().query(), read);
+      set({ selected: [], notice: `${n} message${n === 1 ? "" : "s"} marked as ${read ? "read" : "unread"}.` });
+      window.setTimeout(() => set({ notice: null }), 3000);
+      await Promise.all([get().refresh(), get().loadLabels()]);
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+  },
 
   openCompose: async (mode, messageId) => {
     const accountId = get().activeAccountId;

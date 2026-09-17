@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { errorMessage, mail, settings } from "../../lib/ipc";
 import { notifyPrefs, playSound } from "../../lib/notify";
+import { onZoom, setZoom, zoomLevel, zoomStep } from "../../lib/zoom";
 import type { Account, MailFilter, SettingsView as Settings } from "../../lib/types";
 import { useChat } from "../chat/store";
 import { useMail } from "../mail/store";
@@ -21,6 +22,8 @@ export function SettingsView() {
   const [sound, setSound] = useState(true);
   const [conversation, setConversation] = useState(true);
   const [undo, setUndo] = useState("10");
+  const [zoom, setZoomState] = useState(zoomLevel());
+  useEffect(() => onZoom(setZoomState), []);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const refreshIdentity = useChat((c) => c.refreshIdentity);
@@ -88,6 +91,14 @@ export function SettingsView() {
           <div className="mt-3 space-y-2 text-sm">
             <Toggle v={closeToTray} on={setCloseToTray} label="Keep running in the system tray when the window is closed" hint="Quit from the tray icon's menu." />
             <Toggle v={notifications} on={setNotifications} label="Desktop notifications for new mail and chat messages" />
+            <div className="flex items-center gap-2">
+              <span className="text-sm">Text size</span>
+              <button className="btn text-xs" onClick={() => void zoomStep(-1)} title="Ctrl -">A-</button>
+              <span className="w-12 text-center text-xs text-gray-600">{Math.round(zoom * 100)}%</span>
+              <button className="btn text-xs" onClick={() => void zoomStep(1)} title="Ctrl +">A+</button>
+              <button className="btn btn-ghost text-xs" onClick={() => void setZoom(1)} title="Ctrl 0">Reset</button>
+              <span className="text-xs text-gray-500">Ctrl + / Ctrl - / Ctrl 0, or Ctrl + mouse wheel</span>
+            </div>
             <div className="flex items-center gap-3">
               <Toggle v={sound} on={setSound} label="Play a sound" />
               <button className="btn btn-ghost text-xs" onClick={() => playSound("mail")}>▶ mail</button>
