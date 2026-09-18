@@ -19,7 +19,7 @@ export function SettingsView() {
   const [name, setName] = useState("");
   const [port, setPort] = useState("");
   const [dir, setDir] = useState("");
-  const [showImages, setShowImages] = useState(true);
+  const [showImages, setShowImages] = useState(false);
   const [signature, setSignature] = useState("");
   const [poll, setPoll] = useState("60");
   const [closeToTray, setCloseToTray] = useState(true);

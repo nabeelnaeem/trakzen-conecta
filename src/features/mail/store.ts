@@ -196,7 +196,7 @@ export const useMail = create<MailState>((set, get) => ({
   unread: 0,
   search: "",
   serverSearch: false,
-  showImages: true,
+  showImages: false,
   undoSeconds: 10,
   pendingSend: null,
   filterEditor: null,

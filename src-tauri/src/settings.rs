@@ -103,7 +103,8 @@ pub fn view(db: &Db) -> Result<SettingsView> {
             .and_then(|p| p.parse().ok())
             .unwrap_or(DEFAULT_CHAT_PORT),
         chat_download_dir: get(db, CHAT_DOWNLOAD_DIR)?.unwrap_or_default(),
-        mail_show_images: get(db, MAIL_SHOW_IMAGES)?.map_or(true, |v| v == "true"),
+        // Off by default: loading remote images tells senders you opened the mail.
+        mail_show_images: get(db, MAIL_SHOW_IMAGES)?.map_or(false, |v| v == "true"),
         mail_signature: get(db, MAIL_SIGNATURE)?.unwrap_or_default(),
         mail_poll_seconds: poll_seconds(db)?,
         close_to_tray: flag(db, CLOSE_TO_TRAY, true)?,
