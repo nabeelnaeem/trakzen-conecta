@@ -3,7 +3,7 @@ import { useMail } from "./store";
 import type { NewFilter } from "../../lib/types";
 
 export function FilterEditor() {
-  const { filterEditor, closeFilterEditor, createFilter, labels } = useMail();
+  const { filterEditor, filterEditing, closeFilterEditor, createFilter, labels } = useMail();
   const [f, setF] = useState<NewFilter>(filterEditor!);
   const [busy, setBusy] = useState(false);
   if (!filterEditor) return null;
@@ -16,7 +16,7 @@ export function FilterEditor() {
     <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/30 p-4" onClick={closeFilterEditor}>
       <div className="w-[560px] max-w-full rounded-lg border border-gray-300 bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-gray-200 bg-gray-50 px-4 py-2">
-          <span className="font-medium">Create filter</span>
+          <span className="font-medium">{filterEditing ? "Edit filter" : "Create filter"}</span>
           <button className="text-gray-500 hover:text-gray-900" onClick={closeFilterEditor} aria-label="Close">
             ✕
           </button>
@@ -75,7 +75,7 @@ export function FilterEditor() {
               if (ok) closeFilterEditor();
             }}
           >
-            {busy ? "Creating…" : "Create filter"}
+            {busy ? "Saving…" : filterEditing ? "Save changes" : "Create filter"}
           </button>
           {!hasCondition && <span className="text-xs text-gray-500">Add at least one condition.</span>}
           {hasCondition && !hasAction && <span className="text-xs text-gray-500">Pick at least one action.</span>}

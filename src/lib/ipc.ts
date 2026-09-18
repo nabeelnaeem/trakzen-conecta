@@ -61,6 +61,9 @@ export const mail = {
     invoke<MailFilter>("mail_create_filter", { accountId, filter }),
   deleteFilter: (accountId: number, filterId: string) =>
     invoke<void>("mail_delete_filter", { accountId, filterId }),
+  updateFilter: (accountId: number, filterId: string, filter: NewFilter) =>
+    invoke<MailFilter>("mail_update_filter", { accountId, filterId, filter }),
+  unsubscribe: (messageId: number) => invoke<{ method: string }>("mail_unsubscribe", { messageId }),
   reauth: (accountId: number) => invoke<Account>("mail_reauth", { accountId }),
   searchServer: (accountId: number, query: string) =>
     invoke<MessageSummary[]>("mail_search_server", { accountId, query }),

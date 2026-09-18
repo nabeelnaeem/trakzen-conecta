@@ -8,11 +8,31 @@ import { restoreZoom, setZoom, zoomStep } from "./lib/zoom";
 import { app as appIpc } from "./lib/ipc";
 import { isDark, onTheme, toggleDark } from "./lib/theme";
 import { Mail, MessageSquare, Moon, Settings, Sun, type LucideIcon } from "lucide-react";
+import { getLastTab, getRailOrder, getStartIn, setLastTab, setRailOrder, type RailItem } from "./lib/prefs";
 
 type Tab = "mail" | "chat" | "settings";
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>("mail");
+  const [tab, setTab] = useState<Tab>(() => {
+    const s = getStartIn();
+    return s === "last" ? getLastTab() : s;
+  });
+  const [order, setOrder] = useState<RailItem[]>(getRailOrder());
+  const [dragging, setDragging] = useState<RailItem | null>(null);
+  useEffect(() => {
+    if (tab === "mail" || tab === "chat") setLastTab(tab);
+  }, [tab]);
+  const reorder = (target: RailItem) => {
+    if (!dragging || dragging === target) return;
+    const next = order.filter((x) => x !== dragging);
+    next.splice(next.indexOf(target), 0, dragging);
+    setOrder(next);
+    setRailOrder(next);
+  };
+  const rail: Record<RailItem, { label: string; icon: LucideIcon; badge: number; shortcut: string }> = {
+    mail: { label: "Mail", icon: Mail, badge: 0, shortcut: "Ctrl+1" },
+    chat: { label: "Chat", icon: MessageSquare, badge: 0, shortcut: "Ctrl+2" },
+  };
   const mailUnread = useMail((s) => s.unread);
   const chatUnread = useChat((s) => s.peers.reduce((n, p) => n + p.unread, 0));
   const initMail = useMail((s) => s.init);
@@ -36,8 +56,8 @@ export default function App() {
     void restoreZoom();
     const onKey = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return;
-      if (e.key === "1") setTab("mail");
-      else if (e.key === "2") setTab("chat");
+      if (e.key === "1") setTab(getRailOrder()[0]);
+      else if (e.key === "2") setTab(getRailOrder()[1]);
       else if (e.key === ",") setTab("settings");
       else if (e.key === "=" || e.key === "+") {
         e.preventDefault();
@@ -73,8 +93,26 @@ export default function App() {
             <path d="M158 214l98 74 98-74" fill="none" stroke="#fff" strokeWidth="22" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </div>
-        <NavButton label="Mail" icon={Mail} active={tab === "mail"} badge={mailUnread} onClick={() => setTab("mail")} shortcut="Ctrl+1" />
-        <NavButton label="Chat" icon={MessageSquare} active={tab === "chat"} badge={chatUnread} onClick={() => setTab("chat")} shortcut="Ctrl+2" />
+        {order.map((k) => (
+          <div
+            key={k}
+            draggable
+            onDragStart={() => setDragging(k)}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={() => reorder(k)}
+            onDragEnd={() => setDragging(null)}
+            className={dragging === k ? "opacity-50" : ""}
+          >
+            <NavButton
+              label={rail[k].label}
+              icon={rail[k].icon}
+              active={tab === k}
+              badge={k === "mail" ? mailUnread : chatUnread}
+              onClick={() => setTab(k)}
+              shortcut={rail[k].shortcut}
+            />
+          </div>
+        ))}
         <div className="flex-1" />
         <button
           className="mb-1 flex h-9 w-9 items-center justify-center rounded-lg text-gray-600 hover:bg-gray-200"

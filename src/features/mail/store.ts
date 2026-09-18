@@ -74,6 +74,8 @@ interface MailState {
   undoSeconds: number;
   pendingSend: PendingSend | null;
   filterEditor: NewFilter | null;
+  /** Set while editing an existing filter (replace on save). */
+  filterEditing: { accountId: number; filterId: string } | null;
   error: string | null;
   notice: string | null;
   /// Label of the long-running action in flight, for the progress toast.
@@ -123,7 +125,7 @@ interface MailState {
   saveDraftNow: () => Promise<void>;
   send: () => Promise<void>;
   undoSend: () => void;
-  openFilterEditor: (prefill?: Partial<NewFilter>) => void;
+  openFilterEditor: (prefill?: Partial<NewFilter>, editing?: { accountId: number; filterId: string }) => void;
   closeFilterEditor: () => void;
   createFilter: (f: NewFilter) => Promise<boolean>;
   clearError: () => void;
@@ -200,6 +202,7 @@ export const useMail = create<MailState>((set, get) => ({
   undoSeconds: 10,
   pendingSend: null,
   filterEditor: null,
+  filterEditing: null,
   error: null,
   notice: null,
   working: null,
@@ -858,8 +861,9 @@ export const useMail = create<MailState>((set, get) => ({
     set({ pendingSend: null, composer: p.composer });
   },
 
-  openFilterEditor: (prefill) =>
+  openFilterEditor: (prefill, editing) =>
     set({
+      filterEditing: editing ?? null,
       filterEditor: {
         from: "",
         to: "",
@@ -879,14 +883,16 @@ export const useMail = create<MailState>((set, get) => ({
       },
     }),
 
-  closeFilterEditor: () => set({ filterEditor: null }),
+  closeFilterEditor: () => set({ filterEditor: null, filterEditing: null }),
 
   createFilter: async (f) => {
-    const id = get().activeAccountId;
+    const editing = get().filterEditing;
+    const id = editing?.accountId ?? get().activeAccountId;
     if (id === null) return false;
     try {
-      await mail.createFilter(id, f);
-      set({ filterEditor: null, notice: "Filter created." });
+      if (editing) await mail.updateFilter(editing.accountId, editing.filterId, f);
+      else await mail.createFilter(id, f);
+      set({ filterEditor: null, filterEditing: null, notice: editing ? "Filter updated." : "Filter created." });
       window.setTimeout(() => set({ notice: null }), 3000);
       return true;
     } catch (e) {

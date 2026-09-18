@@ -59,7 +59,6 @@ export function MailView() {
     );
   }
 
-  const active = s.accounts.find((a) => a.id === s.activeAccountId);
   const sync = s.activeAccountId !== null ? s.syncing[s.activeAccountId] : null;
   const userLabels = s.labels.filter((l) => l.kind === "user");
   const categoryUnread = (labelId: string) => s.labels.find((l) => l.remoteId === labelId)?.unread ?? 0;
@@ -127,17 +126,6 @@ export function MailView() {
             <button className="btn btn-ghost flex-1 justify-center text-xs" onClick={() => void s.addAccount()} disabled={s.busy}>
               Add account
             </button>
-            {active && (
-              <button
-                className="btn btn-ghost text-xs text-red-700"
-                title={`Remove ${active.email}`}
-                onClick={() => {
-                  if (confirm(`Remove ${active.email} from this app?`)) void s.removeAccount(active.id);
-                }}
-              >
-                Remove
-              </button>
-            )}
           </div>
         </div>
       </aside>

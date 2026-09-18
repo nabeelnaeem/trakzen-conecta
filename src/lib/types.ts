@@ -48,6 +48,9 @@ export interface MailFilter {
   addLabels: string[];
   removeLabels: string[];
   forward: string | null;
+  /** raw label ids, for editing */
+  addLabelIds: string[];
+  removeLabelIds: string[];
 }
 
 export interface FetchResult {
@@ -281,6 +284,7 @@ export interface SettingsView {
   chatDownloadDir: string;
   mailShowImages: boolean;
   mailSignature: string;
+  accountSignatures: Record<number, string>;
   mailPollSeconds: number;
   closeToTray: boolean;
   notifications: boolean;
@@ -304,6 +308,8 @@ export interface SettingsPatch {
   chatDownloadDir?: string;
   mailShowImages?: boolean;
   mailSignature?: string;
+  /** account id → signature; null removes the override */
+  accountSignatures?: Record<number, string | null>;
   mailPollSeconds?: number;
   closeToTray?: boolean;
   notifications?: boolean;
