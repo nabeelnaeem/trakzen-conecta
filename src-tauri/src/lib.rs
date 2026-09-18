@@ -230,6 +230,11 @@ pub fn run() {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(%e, "contact backfill failed"),
             }
+            if let Ok(n) = handle.state::<AppState>().mail.reclean_snippets() {
+                if n > 0 {
+                    tracing::info!(rows = n, "re-cleaned cached snippets");
+                }
+            }
             let accounts = handle.state::<AppState>().mail.list_accounts()?;
             for a in accounts {
                 mail::commands::spawn_sync(handle.clone(), a.id);

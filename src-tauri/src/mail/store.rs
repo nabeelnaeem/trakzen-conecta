@@ -272,6 +272,24 @@ impl MailStore {
         Ok(n)
     }
 
+    /// Re-cleans cached snippets (one-off after the snippet cleaner changed).
+    pub fn reclean_snippets(&self) -> Result<usize> {
+        let conn = self.db.conn();
+        let rows: Vec<(i64, String)> = conn
+            .prepare("SELECT id, snippet FROM mail_messages WHERE snippet LIKE '%…%' OR snippet LIKE '%' || char(847) || '%' OR snippet LIKE '%' || char(8204) || '%'")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut n = 0;
+        for (id, snippet) in rows {
+            let cleaned = super::gmail::clean_snippet(&snippet);
+            if cleaned != snippet {
+                conn.execute("UPDATE mail_messages SET snippet = ?2 WHERE id = ?1", params![id, cleaned])?;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
     /// Recipient suggestions: prefix/substring match on name or address,
     /// most-used first. The account's own address is excluded.
     pub fn suggest_contacts(&self, account_id: i64, query: &str, limit: i64) -> Result<Vec<Contact>> {

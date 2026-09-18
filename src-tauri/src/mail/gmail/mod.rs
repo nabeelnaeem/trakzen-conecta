@@ -1,7 +1,7 @@
 mod api;
 mod auth;
 
-pub use api::split_mailbox;
+pub use api::{clean_snippet, split_mailbox};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
