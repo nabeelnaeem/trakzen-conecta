@@ -3,10 +3,10 @@ import { Avatar } from "./Avatar";
 import { getSenderLogos } from "../../lib/prefs";
 
 /**
- * Sender avatar: when the user has opted in, try Gravatar (SHA-256 of the
- * address) then the domain's favicon; otherwise, or if both miss, show
- * initials. Results are cached per address for the session so the list
- * does not re-probe on every render.
+ * Sender avatar: when the user has opted in, try BIMI (SVG from DNS TXT),
+ * then Gravatar (SHA-256 of the address), then the domain's favicon;
+ * otherwise, or if all miss, show initials. Results are cached per address
+ * for the session so the list does not re-probe on every render.
  */
 const cache = new Map<string, string | null>();
 const pending = new Map<string, Promise<string | null>>();
@@ -27,18 +27,39 @@ function probe(url: string): Promise<boolean> {
   });
 }
 
+async function lookupBimi(domain: string): Promise<string | null> {
+  try {
+    const res = await fetch(`https://dns.google/resolve?name=default._bimi.${encodeURIComponent(domain)}&type=TXT`);
+    if (!res.ok) return null;
+    const json = (await res.json()) as { Answer?: { data?: string }[] };
+    const txt = (json.Answer ?? []).map((a) => (a.data ?? "").replace(/^"|"$/g, "").replace(/\\"/g, '"')).join("");
+    const m = txt.match(/[;\s]l=(\S+)/i);
+    const loc = m?.[1]?.replace(/;+$/, "");
+    if (loc && /^https:\/\//i.test(loc) && (await probe(loc))) return loc;
+  } catch {
+    /* network / DNS failure — fall through */
+  }
+  return null;
+}
+
 async function lookup(email: string): Promise<string | null> {
   const addr = email.trim().toLowerCase();
   if (cache.has(addr)) return cache.get(addr)!;
   if (pending.has(addr)) return pending.get(addr)!;
   const run = (async () => {
+    const domain = addr.split("@")[1];
+    const root = domain?.replace(
+      /^(mail|email|e|news|newsletter|info|notifications?|no-?reply|hello|updates?|alerts?|support)\./,
+      "",
+    );
+    if (root) {
+      const bimi = await lookupBimi(root);
+      if (bimi) return bimi;
+    }
     const gravatar = `https://www.gravatar.com/avatar/${await sha256Hex(addr)}?d=404&s=80`;
     if (await probe(gravatar)) return gravatar;
-    const domain = addr.split("@")[1];
     if (domain) {
-      // Strip common mailer subdomains so newsletters resolve to the brand.
-      const root = domain.replace(/^(mail|email|e|news|newsletter|info|notifications?|no-?reply|hello|updates?|alerts?|support)\./, "");
-      for (const d of [root, domain]) {
+      for (const d of [root ?? domain, domain]) {
         const icon = `https://icons.duckduckgo.com/ip3/${d}.ico`;
         if (await probe(icon)) return icon;
       }

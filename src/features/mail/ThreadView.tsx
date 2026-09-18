@@ -12,7 +12,7 @@ import { errorMessage, mail } from "../../lib/ipc";
 import { Spinner } from "../../lib/Spinner";
 import type { MessageDetail, MessageSummary } from "../../lib/types";
 import { isDark, onTheme, themePrefs } from "../../lib/theme";
-import { Archive, Clock, Forward, MoreHorizontal, Reply, ReplyAll, ShieldAlert, Star, Tag, Trash2 } from "lucide-react";
+import { Archive, Clock, Forward, MessageSquare, MoreHorizontal, Reply, ReplyAll, ShieldAlert, Star, Tag, Trash2 } from "lucide-react";
 
 export function ThreadView() {
   const s = useMail();
@@ -109,6 +109,9 @@ export function ThreadView() {
         </button>
         <button className="btn" onClick={() => void s.openCompose("forward", latest.id)} title="Forward (f)">
           <Forward size={15} /> Forward
+        </button>
+        <button className="btn" onClick={() => setSharePicker(true)} title="Discuss this thread with a chat peer">
+          <MessageSquare size={15} /> Discuss
         </button>
         <div className="flex-1" />
 
@@ -217,7 +220,7 @@ export function ThreadView() {
                   setSharePicker(true);
                 }}
               >
-                Share to chat…
+                Share to chat / discuss with peer…
               </MenuItem>
             </Menu>
           )}
@@ -402,16 +405,17 @@ function AutoHeightFrame({ doc }: { doc: string }) {
   return <iframe ref={ref} title="Message body" className="w-full border-0 bg-white" style={{ height }} sandbox="allow-scripts" srcDoc={doc} />;
 }
 
-/** "Share to chat": pick a peer, send a quoted summary of the message. */
+/** "Share to chat" / "Discuss with peer": pick a peer, send a quoted summary. */
 function SharePicker({ onClose, build }: { onClose: () => void; build: () => string }) {
-  const { peers, sendTo, init } = useChat();
+  const { peers, sendTo, init, selectPeer } = useChat();
   useEffect(() => {
     void init();
   }, [init]);
   return (
     <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/30 p-4" onClick={onClose}>
       <div className="w-[380px] rounded-lg border border-gray-300 bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <div className="border-b border-gray-200 px-4 py-2 font-medium">Share to chat</div>
+        <div className="border-b border-gray-200 px-4 py-2 font-medium">Discuss with peer</div>
+        <p className="px-4 pt-2 text-xs text-gray-500">Sends a quoted copy of this thread into the chat.</p>
         <ul className="max-h-72 overflow-y-auto py-1">
           {peers.length === 0 && <li className="px-4 py-3 text-sm text-gray-500">No chat peers yet.</li>}
           {peers.map((p) => (
@@ -419,7 +423,7 @@ function SharePicker({ onClose, build }: { onClose: () => void; build: () => str
               <button
                 className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm hover:bg-gray-50"
                 onClick={() => {
-                  void sendTo(p.id, build());
+                  void sendTo(p.id, build()).then(() => void selectPeer(p.id));
                   onClose();
                   navigateTo("chat");
                 }}

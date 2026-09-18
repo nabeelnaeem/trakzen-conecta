@@ -25,6 +25,6 @@ export const getRailOrder = (): RailItem[] => {
 };
 export const setRailOrder = (v: RailItem[]) => write("tc.railOrder", v);
 
-/** Look up sender logos (Gravatar / site favicon) — opt in, since it pings third parties. */
+/** Look up sender logos (BIMI, Gravatar, site favicon) — opt in, since it pings third parties. */
 export const getSenderLogos = () => read<boolean>("tc.senderLogos", false);
 export const setSenderLogos = (v: boolean) => write("tc.senderLogos", v);

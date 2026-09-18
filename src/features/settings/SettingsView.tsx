@@ -355,8 +355,8 @@ function AppearanceTab() {
           setSenderLogos(v);
           setLogos(v);
         }}
-        label="Show sender logos in mail (Gravatar, then the sender's site icon)"
-        hint="Looks addresses up on gravatar.com and icons.duckduckgo.com; off keeps everything local. Takes effect on the next list refresh."
+        label="Show sender logos in mail (BIMI, then Gravatar, then the sender's site icon)"
+        hint="Looks up BIMI via DNS, then gravatar.com and icons.duckduckgo.com; off keeps everything local. Takes effect on the next list refresh."
       />
 
       <details className="rounded-md border border-gray-200 p-3">
