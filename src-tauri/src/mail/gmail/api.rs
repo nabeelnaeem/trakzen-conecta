@@ -551,6 +551,8 @@ fn parse_filter(f: &Value) -> MailFilter {
         add_labels: strings(&a["addLabelIds"]),
         remove_labels: strings(&a["removeLabelIds"]),
         forward: a["forward"].as_str().map(str::to_string),
+        add_label_ids: strings(&a["addLabelIds"]),
+        remove_label_ids: strings(&a["removeLabelIds"]),
     }
 }
 

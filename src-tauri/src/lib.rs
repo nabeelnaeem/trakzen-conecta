@@ -316,6 +316,7 @@ pub fn run() {
             mail::commands::mail_create_label,
             mail::commands::mail_create_filter,
             mail::commands::mail_delete_filter,
+            mail::commands::mail_update_filter,
             mail::commands::mail_reauth,
             mail::commands::mail_search_server,
             mail::commands::mail_unsubscribe,

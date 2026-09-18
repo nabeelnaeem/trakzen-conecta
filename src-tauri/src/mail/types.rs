@@ -135,6 +135,11 @@ pub struct MailFilter {
     pub add_labels: Vec<String>,
     pub remove_labels: Vec<String>,
     pub forward: Option<String>,
+    /// Raw label ids, kept so a filter can be edited (names above are for display).
+    #[serde(default)]
+    pub add_label_ids: Vec<String>,
+    #[serde(default)]
+    pub remove_label_ids: Vec<String>,
 }
 
 /// A server-side draft opened for editing.

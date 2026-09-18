@@ -308,6 +308,22 @@ pub async fn mail_create_filter(
     Ok(created)
 }
 
+/// Gmail has no filter update; replace = create the new one, then delete
+/// the old one (in that order so a failure never loses the rule).
+#[tauri::command]
+pub async fn mail_update_filter(
+    state: State<'_, AppState>,
+    account_id: i64,
+    filter_id: String,
+    filter: NewFilter,
+) -> Result<MailFilter> {
+    let account = state.mail.get_account(account_id)?;
+    let provider = state.providers.provider_for(&account.provider)?;
+    let created = provider.create_filter(&account, &filter).await?;
+    provider.delete_filter(&account, &filter_id).await?;
+    Ok(created)
+}
+
 #[tauri::command]
 pub async fn mail_delete_filter(
     state: State<'_, AppState>,
