@@ -50,6 +50,7 @@ pub struct SettingsPatch {
     sound_chat: Option<String>,
     conversation_view: Option<bool>,
     undo_send_seconds: Option<u64>,
+    mail_templates: Option<String>,
 }
 
 #[tauri::command]
@@ -125,6 +126,9 @@ async fn settings_update(
     }
     if let Some(v) = patch.undo_send_seconds {
         settings::set(&state.db, settings::UNDO_SEND_SECONDS, &v.min(60).to_string())?;
+    }
+    if let Some(v) = patch.mail_templates {
+        settings::set(&state.db, settings::MAIL_TEMPLATES, v.trim())?;
     }
     settings::view(&state.db)
 }
@@ -315,6 +319,7 @@ pub fn run() {
                     if !due.is_empty() {
                         let _ = snoozer.emit("mail://unsnoozed", &due);
                     }
+                    mail::commands::flush_outbox(&snoozer).await;
                 }
             });
 
@@ -382,6 +387,8 @@ pub fn run() {
             mail::commands::mail_compose_draft,
             mail::commands::mail_send,
             mail::commands::mail_save_attachment,
+            mail::commands::mail_schedule,
+            mail::commands::mail_rsvp,
             mail::commands::mail_list_labels,
             mail::commands::mail_modify_labels,
             mail::commands::mail_fetch_more,

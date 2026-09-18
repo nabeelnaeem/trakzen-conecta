@@ -232,6 +232,8 @@ pub struct MessageDetail {
     pub attachments: Vec<AttachmentInfo>,
     /// Present when the sender offers a mailing-list unsubscribe.
     pub can_unsubscribe: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite: Option<super::ics::CalendarInvite>,
 }
 
 /// Metadata for one message as reported by a provider.

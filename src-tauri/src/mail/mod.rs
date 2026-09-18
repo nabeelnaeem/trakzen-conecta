@@ -6,9 +6,13 @@
 pub mod commands;
 pub mod compose;
 pub mod gmail;
+pub mod ics;
 pub mod sanitize;
 pub mod store;
 pub mod types;
+
+/// `account_id` 0 in list/search/unread means every connected account.
+pub const UNIFIED_ACCOUNT: i64 = 0;
 
 use std::sync::Arc;
 

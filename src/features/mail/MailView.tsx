@@ -61,7 +61,12 @@ export function MailView() {
     );
   }
 
-  const sync = s.activeAccountId !== null ? s.syncing[s.activeAccountId] : null;
+  const sync =
+    s.activeAccountId === 0
+      ? Object.values(s.syncing).find((v) => v) ?? null
+      : s.activeAccountId !== null
+        ? s.syncing[s.activeAccountId]
+        : null;
   const userLabels = s.labels.filter((l) => l.kind === "user");
   const categoryUnread = (labelId: string) => s.labels.find((l) => l.remoteId === labelId)?.unread ?? 0;
   const inboxActive = s.folder === "inbox" && !s.label && !s.search;
@@ -117,6 +122,7 @@ export function MailView() {
         </nav>
         <div className="border-t border-gray-200 p-2">
           <select className="input" value={s.activeAccountId ?? ""} onChange={(e) => s.setAccount(Number(e.target.value))}>
+            {s.accounts.length > 1 && <option value={0}>All accounts</option>}
             {s.accounts.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.email}

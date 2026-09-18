@@ -1,12 +1,27 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useMail } from "./store";
 import { buildFrameDoc } from "./frame";
 import { RecipientInput } from "./RecipientInput";
+import { settings } from "../../lib/ipc";
+
+type Template = { name: string; subject: string; body: string };
 
 export function Composer() {
-  const { composer, updateComposer, closeCompose, discardDraft, send, busy } = useMail();
+  const { composer, updateComposer, closeCompose, discardDraft, send, scheduleSend, busy } = useMail();
   const [showCc, setShowCc] = useState(false);
+  const [later, setLater] = useState("");
+  const [templates, setTemplates] = useState<Template[]>([]);
+  useEffect(() => {
+    void settings.get().then((s) => {
+      try {
+        const parsed = JSON.parse(s.mailTemplates || "[]") as Template[];
+        if (Array.isArray(parsed)) setTemplates(parsed.filter((t) => t && t.name));
+      } catch {
+        setTemplates([]);
+      }
+    });
+  }, []);
   if (!composer) return null;
   const c = composer;
 
@@ -113,6 +128,40 @@ export function Composer() {
           <button className="btn" onClick={() => void pickFiles()}>
             Attach
           </button>
+          {templates.length > 0 && (
+            <select
+              className="input w-40 text-xs"
+              defaultValue=""
+              onChange={(e) => {
+                const t = templates.find((x) => x.name === e.target.value);
+                if (t) updateComposer({ subject: t.subject || c.subject, body: t.body });
+                e.target.value = "";
+              }}
+            >
+              <option value="">Template…</option>
+              {templates.map((t) => (
+                <option key={t.name} value={t.name}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          )}
+          <input
+            type="datetime-local"
+            className="input w-auto text-xs"
+            value={later}
+            onChange={(e) => setLater(e.target.value)}
+            title="Send later"
+          />
+          {later && (
+            <button
+              className="btn text-xs"
+              disabled={!c.to.trim()}
+              onClick={() => void scheduleSend(new Date(later).getTime())}
+            >
+              Schedule
+            </button>
+          )}
           <div className="flex-1" />
           <button
             className="btn btn-ghost text-red-700"

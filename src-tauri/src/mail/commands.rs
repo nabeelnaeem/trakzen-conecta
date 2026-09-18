@@ -71,7 +71,13 @@ pub async fn mail_remove_account(state: State<'_, AppState>, account_id: i64) ->
 
 #[tauri::command]
 pub async fn mail_sync(app: AppHandle, account_id: i64) -> Result<()> {
-    spawn_sync(app, account_id);
+    if account_id == super::UNIFIED_ACCOUNT {
+        for a in app.state::<AppState>().mail.list_accounts()? {
+            spawn_sync(app.clone(), a.id);
+        }
+    } else {
+        spawn_sync(app, account_id);
+    }
     Ok(())
 }
 
@@ -511,6 +517,25 @@ pub async fn mail_fetch_more(
     query: ListQuery,
     reset: bool,
 ) -> Result<FetchResult> {
+    if account_id == super::UNIFIED_ACCOUNT {
+        let mut added = 0usize;
+        let mut has_more = false;
+        for a in state.mail.list_accounts()? {
+            let r = fetch_more_one(&state, a.id, &query, reset).await?;
+            added += r.added;
+            has_more |= r.has_more;
+        }
+        return Ok(FetchResult { added, has_more });
+    }
+    fetch_more_one(&state, account_id, &query, reset).await
+}
+
+async fn fetch_more_one(
+    state: &AppState,
+    account_id: i64,
+    query: &ListQuery,
+    reset: bool,
+) -> Result<FetchResult> {
     let Some(label_id) = query.label_id() else {
         return Ok(FetchResult {
             added: 0,
@@ -641,11 +666,38 @@ async fn load_message(state: &AppState, message_id: i64) -> Result<MessageDetail
         state.mail.apply_flags(message_id, flags)?;
         detail.summary.is_read = true;
         let remote_id = detail.summary.remote_id.clone();
+        let provider_bg = provider.clone();
+        let account_bg = account.clone();
         tauri::async_runtime::spawn(async move {
-            if let Err(e) = provider.set_flags(&account, &remote_id, flags).await {
+            if let Err(e) = provider_bg.set_flags(&account_bg, &remote_id, flags).await {
                 tracing::warn!(%e, "mark read failed");
             }
         });
+    }
+
+    if let Some(text) = detail.body_text.as_deref() {
+        if let Some(inv) = super::ics::parse(text) {
+            detail.invite = Some(inv);
+        }
+    }
+    if detail.invite.is_none() {
+        for att in &detail.attachments {
+            if att.mime_type.to_ascii_lowercase().contains("calendar")
+                || att.filename.to_ascii_lowercase().ends_with(".ics")
+            {
+                if let Ok(bytes) = provider
+                    .fetch_attachment(&account, &detail.summary.remote_id, &att.remote_id)
+                    .await
+                {
+                    if let Ok(text) = String::from_utf8(bytes) {
+                        if let Some(inv) = super::ics::parse(&text) {
+                            detail.invite = Some(inv);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(detail)
 }
@@ -820,4 +872,82 @@ pub async fn mail_save_attachment(
             .map_err(|e| AppError::Other(format!("could not open file: {e}")))?;
     }
     Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub async fn mail_schedule(state: State<'_, AppState>, message: OutgoingMessage, send_at: i64) -> Result<()> {
+    if message.to.iter().all(|t| t.trim().is_empty()) {
+        return Err(AppError::Other("add at least one recipient".into()));
+    }
+    let payload = serde_json::to_string(&message)?;
+    state.mail.enqueue_outbox(message.account_id, &payload, send_at)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn mail_rsvp(state: State<'_, AppState>, message_id: i64, accept: bool) -> Result<()> {
+    let detail = load_message(&state, message_id).await?;
+    let Some(inv) = detail.invite.clone() else {
+        return Err(AppError::Other("no calendar invite on this message".into()));
+    };
+    let Some(organizer) = inv.organizer.clone() else {
+        return Err(AppError::Other("invite has no organizer to reply to".into()));
+    };
+    let account = state.mail.get_account(detail.summary.account_id)?;
+    let mut original = detail.body_text.clone().unwrap_or_default();
+    if !original.to_ascii_uppercase().contains("BEGIN:VEVENT") {
+        for att in &detail.attachments {
+            if att.mime_type.to_ascii_lowercase().contains("calendar") || att.filename.to_ascii_lowercase().ends_with(".ics")
+            {
+                let provider = state.providers.provider_for(&account.provider)?;
+                if let Ok(bytes) = provider
+                    .fetch_attachment(&account, &detail.summary.remote_id, &att.remote_id)
+                    .await
+                {
+                    original = String::from_utf8_lossy(&bytes).into_owned();
+                    break;
+                }
+            }
+        }
+    }
+    let ics = super::ics::reply(&original, accept, &account.email);
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("conecta-rsvp-{}.ics", uuid::Uuid::new_v4()));
+    tokio::fs::write(&path, ics).await?;
+    let verb = if accept { "Accepted" } else { "Declined" };
+    let message = OutgoingMessage {
+        account_id: account.id,
+        to: vec![organizer],
+        cc: vec![],
+        bcc: vec![],
+        subject: format!("{verb}: {}", inv.summary),
+        body_text: format!("{verb} the invitation \"{}\".", inv.summary),
+        quoted_html: None,
+        in_reply_to: detail.message_id_hdr.clone(),
+        references: detail.references_hdr.clone(),
+        thread_id: detail.summary.thread_id.clone(),
+        attachments: vec![OutgoingAttachment::Path {
+            path: path.to_string_lossy().into_owned(),
+        }],
+        draft_id: None,
+    };
+    mail_send(state, message).await
+}
+
+pub async fn flush_outbox(app: &AppHandle) {
+    let due = {
+        let state = app.state::<AppState>();
+        state.mail.pop_due_outbox(crate::db::now_ms()).unwrap_or_default()
+    };
+    for (_id, payload) in due {
+        match serde_json::from_str::<OutgoingMessage>(&payload) {
+            Ok(message) => {
+                let state = app.state::<AppState>();
+                if let Err(e) = mail_send(state, message).await {
+                    tracing::warn!(%e, "scheduled send failed");
+                }
+            }
+            Err(e) => tracing::warn!(%e, "bad scheduled payload"),
+        }
+    }
 }

@@ -438,6 +438,7 @@ function MailTab({ s, save }: { s: Settings; save: Save }) {
         <TextField label="Check for new mail every (seconds)" value={String(s.mailPollSeconds)} numeric width="w-28" onCommit={(v) => void save({ mailPollSeconds: Math.max(0, Number(v) || 0) })} hint="Minimum 15; 0 turns background checks off." />
       </div>
       <TextField label="Signature (all accounts unless overridden under Accounts)" value={s.mailSignature} multiline onCommit={(v) => void save({ mailSignature: v })} />
+      <TemplatesEditor value={s.mailTemplates} onCommit={(v) => void save({ mailTemplates: v })} />
       <details className="text-xs text-gray-600">
         <summary className="cursor-pointer">Keyboard shortcuts</summary>
         <div className="mt-1 grid grid-cols-2 gap-x-6 gap-y-0.5 font-mono">
@@ -454,6 +455,29 @@ function MailTab({ s, save }: { s: Settings; save: Save }) {
           <span>u or Esc</span><span className="font-sans">back to list</span>
         </div>
       </details>
+    </div>
+  );
+}
+
+function TemplatesEditor({ value, onCommit }: { value: string; onCommit: (v: string) => void }) {
+  const [text, setText] = useState(value || "[]");
+  return (
+    <div>
+      <div className="mb-1 text-sm">Compose templates (JSON)</div>
+      <p className="mb-1 text-xs text-gray-500">Array of {`{ "name", "subject", "body" }`}. Available in the compose window.</p>
+      <textarea
+        className="input min-h-[100px] font-mono text-[11px]"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => {
+          try {
+            JSON.parse(text || "[]");
+            onCommit(text.trim() || "[]");
+          } catch {
+            /* leave unsaved until it is valid JSON */
+          }
+        }}
+      />
     </div>
   );
 }

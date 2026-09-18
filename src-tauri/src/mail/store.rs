@@ -441,17 +441,17 @@ impl MailStore {
             // with counts over the whole thread (not just matching members).
             format!(
                 "WITH hits AS (
-                    SELECT id, COALESCE(thread_id, remote_id) AS tid, date FROM mail_messages
-                    WHERE account_id = ?1 AND date >= ?5 AND (?4 = '' OR has_label(labels, ?4)) AND {filter}{snooze}
+                    SELECT id, account_id, COALESCE(thread_id, remote_id) AS tid, date FROM mail_messages
+                    WHERE (?1 = 0 OR account_id = ?1) AND date >= ?5 AND (?4 = '' OR has_label(labels, ?4)) AND {filter}{snooze}
                  ),
                  newest AS (
-                    SELECT id, tid, ROW_NUMBER() OVER (PARTITION BY tid ORDER BY date DESC, id DESC) rn
+                    SELECT id, tid, ROW_NUMBER() OVER (PARTITION BY account_id, tid ORDER BY date DESC, id DESC) rn
                     FROM hits
                  )
                  SELECT {SUMMARY_COLS},
-                    (SELECT COUNT(*) FROM mail_messages t WHERE t.account_id = ?1
+                    (SELECT COUNT(*) FROM mail_messages t WHERE t.account_id = mail_messages.account_id
                         AND COALESCE(t.thread_id, t.remote_id) = newest.tid AND NOT has_label(t.labels, 'TRASH')),
-                    (SELECT COUNT(*) FROM mail_messages t WHERE t.account_id = ?1
+                    (SELECT COUNT(*) FROM mail_messages t WHERE t.account_id = mail_messages.account_id
                         AND COALESCE(t.thread_id, t.remote_id) = newest.tid AND t.is_read = 0 AND NOT has_label(t.labels, 'TRASH'))
                  FROM newest JOIN mail_messages USING (id)
                  WHERE rn = 1
@@ -460,7 +460,7 @@ impl MailStore {
         } else {
             format!(
                 "SELECT {SUMMARY_COLS} FROM mail_messages
-                 WHERE account_id = ?1 AND date >= ?5 AND (?4 = '' OR has_label(labels, ?4)) AND {filter}{snooze}
+                 WHERE (?1 = 0 OR account_id = ?1) AND date >= ?5 AND (?4 = '' OR has_label(labels, ?4)) AND {filter}{snooze}
                  ORDER BY date DESC LIMIT ?2 OFFSET ?3"
             )
         };
@@ -628,7 +628,7 @@ impl MailStore {
         let conn = self.db.conn();
         let sql = format!(
             "SELECT {SUMMARY_COLS}, s.until FROM mail_messages JOIN mail_snoozes s ON s.message_id = mail_messages.id
-             WHERE account_id = ?1 ORDER BY s.until ASC"
+             WHERE (?1 = 0 OR account_id = ?1) ORDER BY s.until ASC"
         );
         let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![account_id], |r| Ok((row_to_summary(r)?, r.get(15)?)))?;
@@ -732,24 +732,45 @@ impl MailStore {
         query: &str,
         limit: i64,
     ) -> Result<Vec<MessageSummary>> {
-        let like = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
+        let conn = self.db.conn();
+        let terms: Vec<String> = query
+            .split_whitespace()
+            .map(|t| format!("\"{}\"*", t.replace('"', "")))
+            .collect();
+        let fts = terms.join(" ");
         let sql = format!(
             "SELECT {SUMMARY_COLS} FROM mail_messages
-             WHERE account_id = ?1 AND NOT has_label(labels, 'TRASH')
-               AND (subject LIKE ?2 ESCAPE '\\' OR from_name LIKE ?2 ESCAPE '\\'
-                    OR from_addr LIKE ?2 ESCAPE '\\' OR snippet LIKE ?2 ESCAPE '\\')
+             WHERE (?1 = 0 OR account_id = ?1) AND NOT has_label(labels, 'TRASH')
+               AND id IN (SELECT rowid FROM mail_fts WHERE mail_fts MATCH ?2)
              ORDER BY date DESC LIMIT ?3"
         );
-        let conn = self.db.conn();
-        let mut stmt = conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map(params![account_id, like, limit], row_to_summary)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let via_fts: rusqlite::Result<Vec<MessageSummary>> = (|| {
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map(params![account_id, fts, limit], row_to_summary)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })();
+        match via_fts {
+            Ok(rows) => Ok(rows),
+            Err(_) => {
+                let like = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
+                let sql = format!(
+                    "SELECT {SUMMARY_COLS} FROM mail_messages
+                     WHERE (?1 = 0 OR account_id = ?1) AND NOT has_label(labels, 'TRASH')
+                       AND (subject LIKE ?2 ESCAPE '\\' OR from_name LIKE ?2 ESCAPE '\\'
+                            OR from_addr LIKE ?2 ESCAPE '\\' OR snippet LIKE ?2 ESCAPE '\\')
+                     ORDER BY date DESC LIMIT ?3"
+                );
+                let mut stmt = conn.prepare_cached(&sql)?;
+                let rows = stmt.query_map(params![account_id, like, limit], row_to_summary)?;
+                Ok(rows.collect::<rusqlite::Result<_>>()?)
+            }
+        }
     }
 
     pub fn unread_count(&self, account_id: i64) -> Result<i64> {
         Ok(self.db.conn().query_row(
             "SELECT COUNT(*) FROM mail_messages
-             WHERE account_id = ?1 AND is_read = 0 AND has_label(labels, 'INBOX')
+             WHERE (?1 = 0 OR account_id = ?1) AND is_read = 0 AND has_label(labels, 'INBOX')
                AND NOT has_label(labels, 'TRASH')",
             params![account_id],
             |r| r.get(0),
@@ -772,6 +793,7 @@ impl MailStore {
                     references_hdr: r.get(18)?,
                     attachments: Vec::new(),
                     can_unsubscribe: r.get::<_, Option<String>>(19)?.map_or(false, |s| !s.trim().is_empty()),
+                    invite: None,
                 })
             })
             .optional()?
@@ -903,6 +925,29 @@ impl MailStore {
             params![id, serde_json::to_string(&labels)?],
         )?;
         Ok(())
+    }
+
+    pub fn enqueue_outbox(&self, account_id: i64, payload: &str, send_at: i64) -> Result<i64> {
+        self.db.conn().execute(
+            "INSERT INTO mail_outbox(account_id, payload, send_at, created_at) VALUES(?1, ?2, ?3, ?4)",
+            params![account_id, payload, send_at, now_ms()],
+        )?;
+        Ok(self.db.conn().last_insert_rowid())
+    }
+
+    pub fn pop_due_outbox(&self, now: i64) -> Result<Vec<(i64, String)>> {
+        let mut conn = self.db.conn();
+        let tx = conn.transaction()?;
+        let rows: Vec<(i64, String)> = {
+            let mut stmt = tx.prepare("SELECT id, payload FROM mail_outbox WHERE send_at <= ?1 ORDER BY send_at")?;
+            let mapped = stmt.query_map(params![now], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            mapped.collect::<rusqlite::Result<_>>()?
+        };
+        for (id, _) in &rows {
+            tx.execute("DELETE FROM mail_outbox WHERE id = ?1", params![id])?;
+        }
+        tx.commit()?;
+        Ok(rows)
     }
 }
 

@@ -34,6 +34,7 @@ pub const SOUND_MAIL: &str = "sound_mail";
 pub const SOUND_CHAT: &str = "sound_chat";
 pub const CONVERSATION_VIEW: &str = "conversation_view";
 pub const UNDO_SEND_SECONDS: &str = "undo_send_seconds";
+pub const MAIL_TEMPLATES: &str = "mail_templates";
 
 pub const DEFAULT_MAIL_POLL_SECONDS: u64 = 60;
 
@@ -106,6 +107,7 @@ pub struct SettingsView {
     pub sound_chat: String,
     pub conversation_view: bool,
     pub undo_send_seconds: u64,
+    pub mail_templates: String,
 }
 
 pub fn view(db: &Db) -> Result<SettingsView> {
@@ -140,6 +142,7 @@ pub fn view(db: &Db) -> Result<SettingsView> {
         undo_send_seconds: get(db, UNDO_SEND_SECONDS)?
             .and_then(|v| v.parse().ok())
             .unwrap_or(10),
+        mail_templates: get(db, MAIL_TEMPLATES)?.unwrap_or_else(|| "[]".into()),
     })
 }
 

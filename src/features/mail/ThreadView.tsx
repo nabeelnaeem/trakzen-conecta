@@ -10,7 +10,7 @@ import { navigateTo } from "../../lib/navigate";
 import { bytes, longDate, shortDate } from "../../lib/format";
 import { errorMessage, mail } from "../../lib/ipc";
 import { Spinner } from "../../lib/Spinner";
-import type { MessageDetail, MessageSummary } from "../../lib/types";
+import type { CalendarInvite, MessageDetail, MessageSummary } from "../../lib/types";
 import { isDark, onTheme, themePrefs } from "../../lib/theme";
 import { Archive, Clock, Forward, MessageSquare, MoreHorizontal, Reply, ReplyAll, ShieldAlert, Star, Tag, Trash2 } from "lucide-react";
 
@@ -329,6 +329,7 @@ function ThreadMessage({
         </div>
         {expanded && (
           <span className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+            {detail?.invite && <InviteBanner invite={detail.invite} messageId={m.id} />}
             {detail?.canUnsubscribe && <UnsubscribeButton id={m.id} />}
             <button className="btn btn-ghost text-xs" onClick={onReply}>
               Reply
@@ -463,6 +464,35 @@ function EmptyPane() {
         <kbd className="rounded border border-gray-300 bg-gray-50 px-1 font-mono">c</kbd><span>compose</span>
         <kbd className="rounded border border-gray-300 bg-gray-50 px-1 font-mono">/</kbd><span>search (Enter searches Gmail)</span>
       </div>
+    </div>
+  );
+}
+
+function InviteBanner({ invite, messageId }: { invite: CalendarInvite; messageId: number }) {
+  const [note, setNote] = useState<string | null>(null);
+  const act = async (accept: boolean) => {
+    try {
+      await mail.rsvp(messageId, accept);
+      setNote(accept ? "Accepted" : "Declined");
+    } catch (e) {
+      setNote(errorMessage(e));
+    }
+  };
+  return (
+    <div className="mx-4 mb-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm">
+      <div className="font-medium text-blue-900">{invite.summary}</div>
+      <div className="text-xs text-blue-800">
+        {invite.when}
+        {invite.organizer ? ` · ${invite.organizer}` : ""}
+      </div>
+      {note ? (
+        <div className="mt-1 text-xs">{note}</div>
+      ) : (
+        <div className="mt-2 flex gap-2">
+          <button className="btn btn-primary text-xs" onClick={() => void act(true)}>Accept</button>
+          <button className="btn text-xs" onClick={() => void act(false)}>Decline</button>
+        </div>
+      )}
     </div>
   );
 }

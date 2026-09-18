@@ -138,6 +138,15 @@ export interface MessageDetail extends MessageSummary {
   referencesHdr: string | null;
   attachments: AttachmentInfo[];
   canUnsubscribe: boolean;
+  invite?: CalendarInvite | null;
+}
+
+export interface CalendarInvite {
+  summary: string;
+  when: string | null;
+  organizer: string | null;
+  method: string;
+  uid: string | null;
 }
 
 export interface FlagChange {
@@ -298,6 +307,7 @@ export interface SettingsView {
   soundChat: string;
   conversationView: boolean;
   undoSendSeconds: number;
+  mailTemplates: string;
 }
 
 export interface Contact {
@@ -323,4 +333,5 @@ export interface SettingsPatch {
   soundChat?: string;
   conversationView?: boolean;
   undoSendSeconds?: number;
+  mailTemplates?: string;
 }

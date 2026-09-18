@@ -139,6 +139,37 @@ const MIGRATIONS: &[&str] = &[
         INSERT INTO chat_fts(rowid, body, file_name) VALUES (new.id, new.body, COALESCE(new.file_name, ''));
     END;
     ",
+    // 8: local mail FTS, scheduled send queue
+    "
+    CREATE VIRTUAL TABLE mail_fts USING fts5(
+        subject, from_name, from_addr, snippet, body_text,
+        content='mail_messages', content_rowid='id', tokenize='unicode61'
+    );
+    INSERT INTO mail_fts(rowid, subject, from_name, from_addr, snippet, body_text)
+        SELECT id, subject, from_name, from_addr, snippet, COALESCE(body_text, '') FROM mail_messages;
+    CREATE TRIGGER mail_fts_ai AFTER INSERT ON mail_messages BEGIN
+        INSERT INTO mail_fts(rowid, subject, from_name, from_addr, snippet, body_text)
+        VALUES (new.id, new.subject, new.from_name, new.from_addr, new.snippet, COALESCE(new.body_text, ''));
+    END;
+    CREATE TRIGGER mail_fts_ad AFTER DELETE ON mail_messages BEGIN
+        INSERT INTO mail_fts(mail_fts, rowid, subject, from_name, from_addr, snippet, body_text)
+        VALUES ('delete', old.id, old.subject, old.from_name, old.from_addr, old.snippet, COALESCE(old.body_text, ''));
+    END;
+    CREATE TRIGGER mail_fts_au AFTER UPDATE OF subject, from_name, from_addr, snippet, body_text ON mail_messages BEGIN
+        INSERT INTO mail_fts(mail_fts, rowid, subject, from_name, from_addr, snippet, body_text)
+        VALUES ('delete', old.id, old.subject, old.from_name, old.from_addr, old.snippet, COALESCE(old.body_text, ''));
+        INSERT INTO mail_fts(rowid, subject, from_name, from_addr, snippet, body_text)
+        VALUES (new.id, new.subject, new.from_name, new.from_addr, new.snippet, COALESCE(new.body_text, ''));
+    END;
+    CREATE TABLE mail_outbox (
+        id         INTEGER PRIMARY KEY,
+        account_id INTEGER NOT NULL REFERENCES mail_accounts(id) ON DELETE CASCADE,
+        payload    TEXT    NOT NULL,
+        send_at    INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX mail_outbox_send_at ON mail_outbox(send_at);
+    ",
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

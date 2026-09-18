@@ -321,6 +321,7 @@ mod tests {
                 size: 10,
             }],
             can_unsubscribe: false,
+            invite: None,
         }
     }
 

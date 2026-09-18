@@ -126,6 +126,7 @@ interface MailState {
   discardDraft: () => Promise<void>;
   saveDraftNow: () => Promise<void>;
   send: () => Promise<void>;
+  scheduleSend: (when: number) => Promise<void>;
   undoSend: () => void;
   openFilterEditor: (prefill?: Partial<NewFilter>, editing?: { accountId: number; filterId: string }) => void;
   closeFilterEditor: () => void;
@@ -774,7 +775,8 @@ export const useMail = create<MailState>((set, get) => ({
   },
 
   openCompose: async (mode, messageId) => {
-    const accountId = get().activeAccountId;
+    let accountId = get().activeAccountId;
+    if (accountId === 0) accountId = get().accounts[0]?.id ?? null;
     if (accountId === null) return;
     if (!mode || messageId === undefined) {
       set({ composer: emptyComposer(accountId) });
@@ -882,6 +884,23 @@ export const useMail = create<MailState>((set, get) => ({
     if (get().pendingSend) window.clearTimeout(get().pendingSend!.timer);
     const timer = window.setTimeout(() => void doSend(), delay * 1000);
     set({ composer: null, pendingSend: { message, composer: c, sendAt: Date.now() + delay * 1000, timer } });
+  },
+
+  scheduleSend: async (when) => {
+    const c = get().composer;
+    if (!c) return;
+    const message = toOutgoing(c);
+    if (message.to.length === 0) {
+      set({ error: "Add at least one recipient." });
+      return;
+    }
+    try {
+      await mail.schedule(message, when);
+      set({ composer: null, notice: "Scheduled." });
+      window.setTimeout(() => set({ notice: null }), 3000);
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
   },
 
   undoSend: () => {
