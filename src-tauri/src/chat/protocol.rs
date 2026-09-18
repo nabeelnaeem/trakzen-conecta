@@ -53,6 +53,17 @@ pub enum ControlMsg {
     Read {
         msg_ids: Vec<String>,
     },
+    /// Toggle an emoji reaction on a message.
+    React {
+        msg_id: String,
+        emoji: String,
+        add: bool,
+    },
+    /// Sender changed the text of one of their own messages.
+    Edit {
+        msg_id: String,
+        body: String,
+    },
     Ack {
         msg_id: String,
     },

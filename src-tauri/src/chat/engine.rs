@@ -470,6 +470,25 @@ impl ChatEngine {
                     self.emit_message(&m);
                 }
             }
+            ControlMsg::React { msg_id, emoji, add } => {
+                if let Some(m) = self.store.get_message(&msg_id)? {
+                    if m.peer_id == row_id {
+                        if let Some(m) = self.store.toggle_reaction(&msg_id, &emoji, "peer", Some(add))? {
+                            self.emit_message(&m);
+                        }
+                    }
+                }
+            }
+            ControlMsg::Edit { msg_id, body } => {
+                // Only the author may edit: the message must be one the peer sent us.
+                if let Some(m) = self.store.get_message(&msg_id)? {
+                    if m.peer_id == row_id && m.direction == Direction::In {
+                        if let Some(m) = self.store.edit_message(&msg_id, &body)? {
+                            self.emit_message(&m);
+                        }
+                    }
+                }
+            }
             ControlMsg::Delete { msg_id } => {
                 if let Some(m) = self.store.delete_message(&msg_id)? {
                     if m.peer_id == row_id {
@@ -632,6 +651,46 @@ impl ChatEngine {
                 self.emit_message(&m);
             }
         }
+    }
+
+    /// Toggles my reaction and tells the peer.
+    pub async fn react(self: &Arc<Self>, msg_id: &str, emoji: &str) -> Result<Option<ChatMessage>> {
+        let Some(m) = self.store.toggle_reaction(msg_id, emoji, "me", None)? else { return Ok(None) };
+        let add = m.reactions.get(emoji).map_or(false, |v| v.iter().any(|w| w == "me"));
+        if let Ok(tx) = self.connect_peer(m.peer_id).await {
+            let _ = tx
+                .send(Frame::Control(ControlMsg::React {
+                    msg_id: msg_id.to_string(),
+                    emoji: emoji.to_string(),
+                    add,
+                }))
+                .await;
+        }
+        self.emit_message(&m);
+        Ok(Some(m))
+    }
+
+    /// Edits one of my own text messages and tells the peer.
+    pub async fn edit(self: &Arc<Self>, msg_id: &str, body: &str) -> Result<Option<ChatMessage>> {
+        let Some(existing) = self.store.get_message(msg_id)? else { return Ok(None) };
+        if existing.direction != Direction::Out || existing.kind != MessageKind::Text {
+            return Err(AppError::Other("only your own text messages can be edited".into()));
+        }
+        let body = body.trim();
+        if body.is_empty() {
+            return Err(AppError::Other("message is empty".into()));
+        }
+        let Some(m) = self.store.edit_message(msg_id, body)? else { return Ok(None) };
+        if let Ok(tx) = self.connect_peer(m.peer_id).await {
+            let _ = tx
+                .send(Frame::Control(ControlMsg::Edit {
+                    msg_id: msg_id.to_string(),
+                    body: body.to_string(),
+                }))
+                .await;
+        }
+        self.emit_message(&m);
+        Ok(Some(m))
     }
 
     pub async fn send_typing(self: &Arc<Self>, row_id: i64) {

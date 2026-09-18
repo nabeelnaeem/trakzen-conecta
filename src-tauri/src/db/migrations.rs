@@ -122,6 +122,23 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE mail_messages ADD COLUMN list_unsubscribe TEXT;
     ALTER TABLE mail_messages ADD COLUMN list_unsubscribe_post TEXT;
     ",
+    // 7: reactions, edits, and full-text search over chat
+    "
+    ALTER TABLE chat_messages ADD COLUMN reactions TEXT NOT NULL DEFAULT '{}';
+    ALTER TABLE chat_messages ADD COLUMN edited_at INTEGER;
+    CREATE VIRTUAL TABLE chat_fts USING fts5(body, file_name, content='chat_messages', content_rowid='id', tokenize='unicode61');
+    INSERT INTO chat_fts(rowid, body, file_name) SELECT id, body, COALESCE(file_name, '') FROM chat_messages;
+    CREATE TRIGGER chat_fts_ai AFTER INSERT ON chat_messages BEGIN
+        INSERT INTO chat_fts(rowid, body, file_name) VALUES (new.id, new.body, COALESCE(new.file_name, ''));
+    END;
+    CREATE TRIGGER chat_fts_ad AFTER DELETE ON chat_messages BEGIN
+        INSERT INTO chat_fts(chat_fts, rowid, body, file_name) VALUES ('delete', old.id, old.body, COALESCE(old.file_name, ''));
+    END;
+    CREATE TRIGGER chat_fts_au AFTER UPDATE OF body, file_name ON chat_messages BEGIN
+        INSERT INTO chat_fts(chat_fts, rowid, body, file_name) VALUES ('delete', old.id, old.body, COALESCE(old.file_name, ''));
+        INSERT INTO chat_fts(rowid, body, file_name) VALUES (new.id, new.body, COALESCE(new.file_name, ''));
+    END;
+    ",
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

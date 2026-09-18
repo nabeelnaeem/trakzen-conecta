@@ -75,6 +75,9 @@ pub struct ChatMessage {
     pub status: String,
     pub created_at: i64,
     pub reply_to: Option<String>,
+    /// emoji → who reacted, as seen from this machine ("me" / "peer").
+    pub reactions: std::collections::HashMap<String, Vec<String>>,
+    pub edited_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

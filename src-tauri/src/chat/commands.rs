@@ -104,6 +104,16 @@ pub async fn chat_send_text(
 }
 
 #[tauri::command]
+pub async fn chat_react(state: State<'_, AppState>, msg_id: String, emoji: String) -> Result<Option<ChatMessage>> {
+    state.chat.react(&msg_id, &emoji).await
+}
+
+#[tauri::command]
+pub async fn chat_edit(state: State<'_, AppState>, msg_id: String, body: String) -> Result<Option<ChatMessage>> {
+    state.chat.edit(&msg_id, &body).await
+}
+
+#[tauri::command]
 pub async fn chat_typing(state: State<'_, AppState>, peer_id: i64) -> Result<()> {
     state.chat.send_typing(peer_id).await;
     Ok(())

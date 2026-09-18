@@ -364,6 +364,8 @@ pub fn run() {
             chat::commands::chat_storage_stats,
             chat::commands::chat_clear_storage,
             chat::commands::chat_typing,
+            chat::commands::chat_react,
+            chat::commands::chat_edit,
             chat::commands::chat_search,
             chat::commands::chat_nearby,
             chat::commands::chat_add_nearby,
