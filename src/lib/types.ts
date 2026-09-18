@@ -136,6 +136,7 @@ export interface MessageDetail extends MessageSummary {
   messageIdHdr: string | null;
   referencesHdr: string | null;
   attachments: AttachmentInfo[];
+  canUnsubscribe: boolean;
 }
 
 export interface FlagChange {

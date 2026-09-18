@@ -20,7 +20,7 @@ import {
   type FontChoice,
   type Mode,
 } from "../../lib/theme";
-import { getStartIn, setStartIn, type StartIn } from "../../lib/prefs";
+import { getSenderLogos, getStartIn, setSenderLogos, setStartIn, type StartIn } from "../../lib/prefs";
 import type { Account, MailFilter, NewFilter, SettingsPatch, SettingsView as Settings, StorageStats } from "../../lib/types";
 import { useChat } from "../chat/store";
 import { useMail } from "../mail/store";
@@ -285,6 +285,7 @@ function AppearanceTab() {
   useEffect(() => onTheme(setP), []);
   const [json, setJson] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
+  const [logos, setLogos] = useState(getSenderLogos());
   const tokenValue = (k: string) => p.custom?.tokens[k] ?? getComputedStyle(document.documentElement).getPropertyValue(k).trim();
 
   const setToken = (k: string, v: string) => {
@@ -347,6 +348,16 @@ function AppearanceTab() {
           </select>
         </div>
       </div>
+
+      <Toggle
+        v={logos}
+        on={(v) => {
+          setSenderLogos(v);
+          setLogos(v);
+        }}
+        label="Show sender logos in mail (Gravatar, then the sender's site icon)"
+        hint="Looks addresses up on gravatar.com and icons.duckduckgo.com; off keeps everything local. Takes effect on the next list refresh."
+      />
 
       <details className="rounded-md border border-gray-200 p-3">
         <summary className="cursor-pointer text-sm font-medium">

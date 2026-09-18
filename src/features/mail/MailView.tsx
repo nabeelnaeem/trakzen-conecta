@@ -6,9 +6,10 @@ import { Composer } from "./Composer";
 import { FilterEditor } from "./FilterEditor";
 import { LabelChip } from "./LabelChip";
 import { useMailShortcuts } from "./useShortcuts";
+import { LabelTree } from "./LabelTree";
 import { Spinner } from "../../lib/Spinner";
 import type { Category, Folder } from "../../lib/types";
-import { Archive, Clock, FileText, Inbox, Mails, PenLine, RefreshCw, Search, Send, ShieldAlert, Star, Tag, Trash2, type LucideIcon } from "lucide-react";
+import { Archive, ChevronDown, ChevronRight, Clock, FileText, Inbox, Mails, PenLine, RefreshCw, Search, Send, ShieldAlert, Star, Tag, Trash2, type LucideIcon } from "lucide-react";
 
 const FOLDERS: { key: Folder; label: string; icon: LucideIcon }[] = [
   { key: "inbox", label: "Inbox", icon: Inbox },
@@ -34,6 +35,7 @@ export function MailView() {
   const s = useMail();
   const searchRef = useRef<HTMLInputElement>(null);
   useMailShortcuts(searchRef);
+  const [labelsOpen, setLabelsOpen] = useState(() => localStorage.getItem("tc.labelsOpen") !== "0");
 
   useEffect(() => {
     void s.init();
@@ -94,23 +96,22 @@ export function MailView() {
 
           {userLabels.length > 0 && (
             <>
-              <div className="mt-4 mb-1 flex items-center justify-between px-3 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+              <button
+                className="mt-4 mb-1 flex w-full items-center gap-1 px-3 text-[11px] font-semibold uppercase tracking-wide text-gray-500 hover:text-gray-800"
+                onClick={() => {
+                  setLabelsOpen((v) => {
+                    localStorage.setItem("tc.labelsOpen", v ? "0" : "1");
+                    return !v;
+                  });
+                }}
+              >
+                {labelsOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                 Labels
-              </div>
-              {userLabels.map((l) => (
-                <button
-                  key={l.id}
-                  onClick={() => s.setLabel(l.remoteId)}
-                  title={`${l.total} message${l.total === 1 ? "" : "s"}`}
-                  className={`flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm ${
-                    s.label === l.remoteId && !s.search ? "bg-blue-100 font-medium text-blue-900" : "text-gray-700 hover:bg-gray-200"
-                  }`}
-                >
-                  <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ background: l.bgColor ?? "#9ca3af" }} />
-                  <span className="min-w-0 flex-1 truncate">{l.name}</span>
-                  {l.unread > 0 && <span className="text-xs font-semibold text-gray-700">{l.unread}</span>}
-                </button>
-              ))}
+                {!labelsOpen && userLabels.reduce((n, l) => n + l.unread, 0) > 0 && (
+                  <span className="ml-auto normal-case tracking-normal text-gray-700">{userLabels.reduce((n, l) => n + l.unread, 0)}</span>
+                )}
+              </button>
+              {labelsOpen && <LabelTree labels={userLabels} active={s.search ? null : s.label} onPick={(id) => s.setLabel(id)} />}
             </>
           )}
         </nav>

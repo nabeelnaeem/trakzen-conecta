@@ -1,6 +1,6 @@
 import { useMail } from "./store";
 import { LabelChip } from "./LabelChip";
-import { Avatar } from "./Avatar";
+import { SenderAvatar } from "./SenderAvatar";
 import { shortDate } from "../../lib/format";
 import { Spinner } from "../../lib/Spinner";
 import type { SnoozedMessage } from "../../lib/types";
@@ -86,7 +86,7 @@ export function MessageList() {
                 <Star size={15} fill={m.isStarred ? "currentColor" : "none"} />
               </button>
             </div>
-            <Avatar name={m.fromName || m.fromAddr} seed={m.fromAddr} />
+            <SenderAvatar name={m.fromName} email={m.fromAddr} />
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <span className={`min-w-0 flex-1 truncate ${unread ? "font-semibold text-gray-900" : "text-gray-700"}`}>

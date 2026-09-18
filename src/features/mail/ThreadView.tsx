@@ -3,7 +3,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMail } from "./store";
 import { buildFrameDoc } from "./frame";
 import { LabelChip } from "./LabelChip";
-import { Avatar } from "./Avatar";
+import { SenderAvatar } from "./SenderAvatar";
+import { Paperclip } from "lucide-react";
 import { bytes, longDate, shortDate } from "../../lib/format";
 import { errorMessage, mail } from "../../lib/ipc";
 import { Spinner } from "../../lib/Spinner";
@@ -47,11 +48,7 @@ export function ThreadView() {
   }, [openId]);
 
   if (openId === null) {
-    return (
-      <div className="flex flex-1 items-center justify-center text-sm text-gray-400">
-        Select a message to read it
-      </div>
-    );
+    return <EmptyPane />;
   }
   if (thread.length === 0) {
     return (
@@ -67,6 +64,8 @@ export function ThreadView() {
 
   const latest = thread[thread.length - 1];
   const subject = thread[0].subject || "(no subject)";
+  const threadAttachments = thread.flatMap((m) => (details[m.id]?.attachments ?? []).map((a) => ({ ...a, from: m.fromName || m.fromAddr, mid: m.id })));
+  const withAttachmentsPending = thread.filter((m) => m.hasAttachments && !details[m.id]).length;
   const userLabels = labels.filter((l) => l.kind === "user");
   const threadLabels = Array.from(new Set(thread.flatMap((m) => m.labels)));
   const applied = threadLabels.filter((id) => userLabels.some((l) => l.remoteId === id));
@@ -221,6 +220,13 @@ export function ThreadView() {
           ))}
           {thread.length > 1 && <span className="text-xs text-gray-500">{thread.length} messages</span>}
         </div>
+        {(threadAttachments.length > 0 || withAttachmentsPending > 0) && (
+          <AttachmentsPanel
+            items={threadAttachments}
+            pending={withAttachmentsPending}
+            onLoadAll={() => thread.filter((m) => m.hasAttachments && !details[m.id]).forEach((m) => void s.expand(m.id, true))}
+          />
+        )}
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto bg-gray-50">
@@ -278,7 +284,7 @@ function ThreadMessage({
   return (
     <div className={`mx-3 my-2 rounded-lg border bg-white ${expanded ? "border-gray-200 shadow-sm" : "border-gray-100"}`}>
       <div className="flex cursor-pointer items-start gap-3 px-4 py-3" onClick={onToggle}>
-        <Avatar name={m.fromName || m.fromAddr} seed={m.fromAddr} size={32} />
+        <SenderAvatar name={m.fromName} email={m.fromAddr} size={32} />
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2">
             <span className={`truncate ${m.isRead ? "font-medium" : "font-semibold"}`}>{m.fromName || m.fromAddr}</span>
@@ -297,15 +303,12 @@ function ThreadMessage({
           )}
         </div>
         {expanded && (
-          <button
-            className="btn btn-ghost text-xs"
-            onClick={(e) => {
-              e.stopPropagation();
-              onReply();
-            }}
-          >
-            Reply
-          </button>
+          <span className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+            {detail?.canUnsubscribe && <UnsubscribeButton id={m.id} />}
+            <button className="btn btn-ghost text-xs" onClick={onReply}>
+              Reply
+            </button>
+          </span>
         )}
       </div>
 
@@ -375,6 +378,91 @@ function AutoHeightFrame({ doc }: { doc: string }) {
     return () => window.removeEventListener("message", onMessage);
   }, []);
   return <iframe ref={ref} title="Message body" className="w-full border-0 bg-white" style={{ height }} sandbox="allow-scripts" srcDoc={doc} />;
+}
+
+function EmptyPane() {
+  const { unread, messages, folder, labels, label, conversations } = useMail();
+  const where = label ? (labels.find((l) => l.remoteId === label)?.name ?? "this label") : folder === "all" ? "All mail" : folder[0].toUpperCase() + folder.slice(1);
+  const unreadHere = messages.filter((m) => !m.isRead || m.threadUnread > 0).length;
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-center text-gray-500">
+      <div className="text-3xl">📬</div>
+      <div className="text-base text-gray-700">
+        {unread === 0 ? "Inbox zero. Nothing unread." : `${unread} unread in your inbox`}
+      </div>
+      <div className="text-xs">
+        {messages.length} {conversations ? "conversations" : "messages"} in {where}{unreadHere ? `, ${unreadHere} unread` : ""}
+      </div>
+      <div className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-left text-xs">
+        <kbd className="rounded border border-gray-300 bg-gray-50 px-1 font-mono">j / k</kbd><span>move through the list</span>
+        <kbd className="rounded border border-gray-300 bg-gray-50 px-1 font-mono">e</kbd><span>archive</span>
+        <kbd className="rounded border border-gray-300 bg-gray-50 px-1 font-mono">r</kbd><span>reply</span>
+        <kbd className="rounded border border-gray-300 bg-gray-50 px-1 font-mono">c</kbd><span>compose</span>
+        <kbd className="rounded border border-gray-300 bg-gray-50 px-1 font-mono">/</kbd><span>search (Enter searches Gmail)</span>
+      </div>
+    </div>
+  );
+}
+
+function UnsubscribeButton({ id }: { id: number }) {
+  const [state, setState] = useState<"idle" | "busy" | "done" | "error">("idle");
+  const [note, setNote] = useState("");
+  return (
+    <button
+      className="btn btn-ghost text-xs"
+      disabled={state === "busy" || state === "done"}
+      title="Uses the sender's List-Unsubscribe header"
+      onClick={async () => {
+        setState("busy");
+        try {
+          const r = await mail.unsubscribe(id);
+          setState("done");
+          setNote(r.method === "browser" ? "opened in browser" : r.method === "mailto" ? "request sent" : "done");
+        } catch (e) {
+          setState("error");
+          setNote(errorMessage(e));
+        }
+      }}
+    >
+      {state === "busy" ? "Unsubscribing…" : state === "done" ? `Unsubscribed (${note})` : state === "error" ? `Unsubscribe failed: ${note}` : "Unsubscribe"}
+    </button>
+  );
+}
+
+function AttachmentsPanel({
+  items,
+  pending,
+  onLoadAll,
+}: {
+  items: { id: number; filename: string; size: number; from: string; mid: number }[];
+  pending: number;
+  onLoadAll: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  return (
+    <div className="mt-2 text-xs">
+      <button className="flex items-center gap-1 text-gray-600 hover:text-gray-900" onClick={() => { setOpen((v) => !v); if (!open) onLoadAll(); }}>
+        <Paperclip size={12} /> {items.length} attachment{items.length === 1 ? "" : "s"}
+        {pending > 0 && ` (+ ${pending} message${pending === 1 ? "" : "s"} not loaded)`} {open ? "▾" : "▸"}
+      </button>
+      {open && (
+        <ul className="mt-1 divide-y divide-gray-100 rounded-md border border-gray-200 bg-white">
+          {items.map((a) => (
+            <li key={a.id} className="flex items-center gap-2 px-2 py-1">
+              <span className="min-w-0 flex-1 truncate" title={a.filename}>{a.filename}</span>
+              <span className="text-gray-500">{bytes(a.size)}</span>
+              <span className="max-w-[120px] truncate text-gray-400">{a.from}</span>
+              <button className="text-blue-700 hover:underline" onClick={() => mail.saveAttachment(a.id, true).catch((e) => setErr(errorMessage(e)))}>Open</button>
+              <button className="text-blue-700 hover:underline" onClick={() => mail.saveAttachment(a.id, false).catch((e) => setErr(errorMessage(e)))}>Save</button>
+            </li>
+          ))}
+          {items.length === 0 && <li className="px-2 py-1 text-gray-500">Loading…</li>}
+        </ul>
+      )}
+      {err && <div className="mt-1 text-red-700">{err}</div>}
+    </div>
+  );
 }
 
 function Menu({ children }: { children: React.ReactNode }) {
