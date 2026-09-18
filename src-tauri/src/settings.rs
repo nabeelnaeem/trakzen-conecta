@@ -45,6 +45,21 @@ pub fn set(db: &Db, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Older builds kept the OAuth client secret in the settings table; move it
+/// into the OS credential store alongside the tokens. Safe to run every
+/// start — it is a no-op once the row is gone.
+pub fn migrate_secret_to_keyring(db: &Db) -> Result<()> {
+    if let Some(v) = get(db, GOOGLE_CLIENT_SECRET)? {
+        if !v.trim().is_empty() {
+            crate::secrets::set(crate::secrets::GOOGLE_CLIENT_SECRET, v.trim())?;
+        }
+        db.conn()
+            .execute("DELETE FROM settings WHERE key = ?1", rusqlite::params![GOOGLE_CLIENT_SECRET])?;
+        tracing::info!("moved Google client secret into the credential store");
+    }
+    Ok(())
+}
+
 pub fn get_or_init(db: &Db, key: &str, init: impl FnOnce() -> String) -> Result<String> {
     if let Some(v) = get(db, key)? {
         return Ok(v);
@@ -80,7 +95,7 @@ pub struct SettingsView {
 pub fn view(db: &Db) -> Result<SettingsView> {
     Ok(SettingsView {
         google_client_id: get(db, GOOGLE_CLIENT_ID)?.unwrap_or_default(),
-        google_client_secret_set: get(db, GOOGLE_CLIENT_SECRET)?
+        google_client_secret_set: crate::secrets::get(crate::secrets::GOOGLE_CLIENT_SECRET)?
             .map(|s| !s.is_empty())
             .unwrap_or(false),
         chat_display_name: get(db, CHAT_DISPLAY_NAME)?.unwrap_or_default(),

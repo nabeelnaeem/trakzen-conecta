@@ -63,7 +63,11 @@ async fn settings_update(
         settings::set(&state.db, settings::GOOGLE_CLIENT_ID, v.trim())?;
     }
     if let Some(v) = patch.google_client_secret {
-        settings::set(&state.db, settings::GOOGLE_CLIENT_SECRET, v.trim())?;
+        if v.trim().is_empty() {
+            secrets::delete(secrets::GOOGLE_CLIENT_SECRET)?;
+        } else {
+            secrets::set(secrets::GOOGLE_CLIENT_SECRET, v.trim())?;
+        }
     }
     if let Some(v) = patch.chat_display_name {
         state.chat.set_display_name(&v)?;
@@ -206,6 +210,9 @@ pub fn run() {
             };
             let db = Arc::new(Db::open(&data_dir)?);
             tracing::info!(path = %data_dir.join(db::DB_FILE_NAME).display(), "database ready");
+            if let Err(e) = settings::migrate_secret_to_keyring(&db) {
+                tracing::warn!(%e, "could not move client secret to the credential store");
+            }
 
             let chat = ChatEngine::new(app.handle().clone(), db.clone())?;
             let state = AppState {

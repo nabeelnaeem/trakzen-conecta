@@ -71,7 +71,7 @@ impl GmailAuth {
 
     fn client_credentials(&self) -> Result<(String, String)> {
         let id = settings::get(&self.db, settings::GOOGLE_CLIENT_ID)?.unwrap_or_default();
-        let secret = settings::get(&self.db, settings::GOOGLE_CLIENT_SECRET)?.unwrap_or_default();
+        let secret = secrets::get(secrets::GOOGLE_CLIENT_SECRET)?.unwrap_or_default();
         if id.trim().is_empty() {
             return Err(AppError::NotConfigured(
                 "Google OAuth client ID is not set. Add it under Settings.".into(),
