@@ -127,8 +127,8 @@ impl MailStore {
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO mail_messages(account_id, remote_id, thread_id, subject, from_name,
                     from_addr, to_addrs, cc_addrs, snippet, date, labels, is_read, is_starred,
-                    has_attachments, message_id_hdr, references_hdr)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                    has_attachments, message_id_hdr, references_hdr, list_unsubscribe, list_unsubscribe_post)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
                  ON CONFLICT(account_id, remote_id) DO UPDATE SET
                     thread_id = excluded.thread_id,
                     subject = excluded.subject,
@@ -143,7 +143,9 @@ impl MailStore {
                     is_starred = excluded.is_starred,
                     has_attachments = has_attachments OR excluded.has_attachments,
                     message_id_hdr = COALESCE(excluded.message_id_hdr, message_id_hdr),
-                    references_hdr = COALESCE(excluded.references_hdr, references_hdr)",
+                    references_hdr = COALESCE(excluded.references_hdr, references_hdr),
+                    list_unsubscribe = COALESCE(excluded.list_unsubscribe, list_unsubscribe),
+                    list_unsubscribe_post = COALESCE(excluded.list_unsubscribe_post, list_unsubscribe_post)",
             )?;
             let mut contact = tx.prepare_cached(
                 "INSERT INTO mail_contacts(account_id, email, name, count, last_seen)
@@ -176,6 +178,8 @@ impl MailStore {
                     m.has_attachments as i64,
                     m.message_id_hdr,
                     m.references_hdr,
+                    m.list_unsubscribe,
+                    m.list_unsubscribe_post,
                 ])?;
                 if !is_new {
                     continue;
@@ -755,7 +759,7 @@ impl MailStore {
     pub fn get_message(&self, id: i64) -> Result<MessageDetail> {
         let conn = self.db.conn();
         let sql = format!(
-            "SELECT {SUMMARY_COLS}, body_html, body_text, message_id_hdr, references_hdr
+            "SELECT {SUMMARY_COLS}, body_html, body_text, message_id_hdr, references_hdr, list_unsubscribe
              FROM mail_messages WHERE id = ?1"
         );
         let detail = conn
@@ -767,6 +771,7 @@ impl MailStore {
                     message_id_hdr: r.get(17)?,
                     references_hdr: r.get(18)?,
                     attachments: Vec::new(),
+                    can_unsubscribe: r.get::<_, Option<String>>(19)?.map_or(false, |s| !s.trim().is_empty()),
                 })
             })
             .optional()?
@@ -792,6 +797,14 @@ impl MailStore {
             attachments,
             ..detail
         })
+    }
+
+    pub fn unsubscribe_headers(&self, id: i64) -> Result<(Option<String>, Option<String>)> {
+        Ok(self.db.conn().query_row(
+            "SELECT list_unsubscribe, list_unsubscribe_post FROM mail_messages WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
     }
 
     pub fn body_fetched(&self, id: i64) -> Result<bool> {

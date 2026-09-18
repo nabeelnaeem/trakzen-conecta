@@ -339,6 +339,83 @@ pub async fn mail_reauth(
     Ok(fresh)
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsubscribeResult {
+    /// "one-click" (done silently), "mailto" (an unsubscribe email was
+    /// sent) or "browser" (a page was opened for the user to finish).
+    pub method: String,
+}
+
+/// Unsubscribes via the message's List-Unsubscribe header: the RFC 8058
+/// one-click POST when offered, otherwise a mailto (sent from the account)
+/// or an https link opened in the browser.
+#[tauri::command]
+pub async fn mail_unsubscribe(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    message_id: i64,
+) -> Result<UnsubscribeResult> {
+    let (header, post) = state.mail.unsubscribe_headers(message_id)?;
+    let header = header.ok_or_else(|| AppError::Other("this message has no unsubscribe link".into()))?;
+    let targets: Vec<String> = header
+        .split(',')
+        .map(|s| s.trim().trim_start_matches('<').trim_end_matches('>').to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let https = targets.iter().find(|t| t.starts_with("https://") || t.starts_with("http://"));
+    let mailto = targets.iter().find(|t| t.starts_with("mailto:"));
+
+    if let (Some(url), Some(p)) = (https, &post) {
+        if p.contains("List-Unsubscribe=One-Click") {
+            let res = reqwest::Client::new()
+                .post(url)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body("List-Unsubscribe=One-Click")
+                .send()
+                .await?;
+            if res.status().is_success() {
+                return Ok(UnsubscribeResult { method: "one-click".into() });
+            }
+        }
+    }
+    if let Some(m) = mailto {
+        let detail = state.mail.get_message(message_id)?;
+        let account = state.mail.get_account(detail.summary.account_id)?;
+        let provider = state.providers.provider_for(&account.provider)?;
+        let rest = &m["mailto:".len()..];
+        let (addr, query) = rest.split_once('?').unwrap_or((rest, ""));
+        let subject = url::form_urlencoded::parse(query.as_bytes())
+            .find(|(k, _)| k == "subject")
+            .map(|(_, v)| v.into_owned())
+            .unwrap_or_else(|| "unsubscribe".into());
+        let msg = OutgoingMessage {
+            account_id: account.id,
+            to: vec![addr.to_string()],
+            cc: vec![],
+            bcc: vec![],
+            subject,
+            body_text: "unsubscribe".into(),
+            quoted_html: None,
+            in_reply_to: None,
+            references: None,
+            thread_id: None,
+            attachments: vec![],
+            draft_id: None,
+        };
+        let raw = compose::build_raw(&account, &msg, vec![])?;
+        provider.send(&account, raw, None).await?;
+        return Ok(UnsubscribeResult { method: "mailto".into() });
+    }
+    if let Some(url) = https {
+        app.opener()
+            .open_url(url, None::<&str>)
+            .map_err(|e| AppError::Other(format!("could not open browser: {e}")))?;
+        return Ok(UnsubscribeResult { method: "browser".into() });
+    }
+    Err(AppError::Other("the unsubscribe header had no usable link".into()))
+}
+
 #[tauri::command]
 pub async fn mail_search_server(
     state: State<'_, AppState>,

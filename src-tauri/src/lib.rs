@@ -305,6 +305,7 @@ pub fn run() {
             mail::commands::mail_delete_filter,
             mail::commands::mail_reauth,
             mail::commands::mail_search_server,
+            mail::commands::mail_unsubscribe,
             mail::commands::mail_snooze,
             mail::commands::mail_unsnooze,
             mail::commands::mail_list_snoozed,

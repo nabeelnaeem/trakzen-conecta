@@ -320,6 +320,7 @@ mod tests {
                 mime_type: "application/vnd.ms-excel".into(),
                 size: 10,
             }],
+            can_unsubscribe: false,
         }
     }
 

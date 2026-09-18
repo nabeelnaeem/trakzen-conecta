@@ -442,6 +442,8 @@ impl GmailApi {
             ("metadataHeaders", "Subject"),
             ("metadataHeaders", "Message-ID"),
             ("metadataHeaders", "References"),
+            ("metadataHeaders", "List-Unsubscribe"),
+            ("metadataHeaders", "List-Unsubscribe-Post"),
         ];
         match self.get_json_raw(token, &format!("messages/{id}"), &q).await {
             Ok(v) => Ok(Some(parse_metadata(&v))),
@@ -619,6 +621,8 @@ pub fn parse_metadata(v: &Value) -> RemoteMessage {
         has_attachments: false,
         message_id_hdr: header(payload, "Message-ID").map(str::to_string),
         references_hdr: header(payload, "References").map(str::to_string),
+        list_unsubscribe: header(payload, "List-Unsubscribe").map(str::to_string),
+        list_unsubscribe_post: header(payload, "List-Unsubscribe-Post").map(str::to_string),
         labels,
     }
 }

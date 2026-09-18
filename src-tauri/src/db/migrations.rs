@@ -117,6 +117,11 @@ const MIGRATIONS: &[&str] = &[
     ",
     // 5: quoted replies in chat
     "ALTER TABLE chat_messages ADD COLUMN reply_to TEXT;",
+    // 6: RFC 2369/8058 unsubscribe headers, captured with the other metadata
+    "
+    ALTER TABLE mail_messages ADD COLUMN list_unsubscribe TEXT;
+    ALTER TABLE mail_messages ADD COLUMN list_unsubscribe_post TEXT;
+    ",
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

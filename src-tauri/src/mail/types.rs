@@ -225,6 +225,8 @@ pub struct MessageDetail {
     pub message_id_hdr: Option<String>,
     pub references_hdr: Option<String>,
     pub attachments: Vec<AttachmentInfo>,
+    /// Present when the sender offers a mailing-list unsubscribe.
+    pub can_unsubscribe: bool,
 }
 
 /// Metadata for one message as reported by a provider.
@@ -245,6 +247,8 @@ pub struct RemoteMessage {
     pub has_attachments: bool,
     pub message_id_hdr: Option<String>,
     pub references_hdr: Option<String>,
+    pub list_unsubscribe: Option<String>,
+    pub list_unsubscribe_post: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
