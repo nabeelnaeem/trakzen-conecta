@@ -7,6 +7,7 @@ import { useChat } from "./features/chat/store";
 import { restoreZoom, setZoom, zoomStep } from "./lib/zoom";
 import { app as appIpc } from "./lib/ipc";
 import { isDark, onTheme, toggleDark } from "./lib/theme";
+import { Mail, MessageSquare, Moon, Settings, Sun, type LucideIcon } from "lucide-react";
 
 type Tab = "mail" | "chat" | "settings";
 
@@ -72,17 +73,17 @@ export default function App() {
             <path d="M158 214l98 74 98-74" fill="none" stroke="#fff" strokeWidth="22" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </div>
-        <NavButton label="Mail" icon="✉" active={tab === "mail"} badge={mailUnread} onClick={() => setTab("mail")} shortcut="Ctrl+1" />
-        <NavButton label="Chat" icon="💬" active={tab === "chat"} badge={chatUnread} onClick={() => setTab("chat")} shortcut="Ctrl+2" />
+        <NavButton label="Mail" icon={Mail} active={tab === "mail"} badge={mailUnread} onClick={() => setTab("mail")} shortcut="Ctrl+1" />
+        <NavButton label="Chat" icon={MessageSquare} active={tab === "chat"} badge={chatUnread} onClick={() => setTab("chat")} shortcut="Ctrl+2" />
         <div className="flex-1" />
         <button
           className="mb-1 flex h-9 w-9 items-center justify-center rounded-lg text-gray-600 hover:bg-gray-200"
           title={dark ? "Switch to light mode" : "Switch to dark mode"}
           onClick={toggleDark}
         >
-          {dark ? "☀" : "☾"}
+          {dark ? <Sun size={18} /> : <Moon size={18} />}
         </button>
-        <NavButton label="Settings" icon="⚙" active={tab === "settings"} onClick={() => setTab("settings")} shortcut="Ctrl+," />
+        <NavButton label="Settings" icon={Settings} active={tab === "settings"} onClick={() => setTab("settings")} shortcut="Ctrl+," />
       </nav>
       {/* Views stay mounted so switching tabs is instant and keeps scroll position. */}
       <main className="min-w-0 flex-1">
@@ -109,7 +110,7 @@ function NavButton({
   shortcut,
 }: {
   label: string;
-  icon: string;
+  icon: LucideIcon;
   active: boolean;
   badge?: number;
   onClick: () => void;
@@ -119,11 +120,14 @@ function NavButton({
     <button
       onClick={onClick}
       title={`${label} (${shortcut})`}
-      className={`relative flex h-12 w-12 flex-col items-center justify-center gap-0.5 rounded-xl text-lg transition-colors ${
+      className={`relative flex h-12 w-12 flex-col items-center justify-center gap-0.5 rounded-xl transition-colors ${
         active ? "bg-white text-blue-700 shadow-sm ring-1 ring-gray-200" : "text-gray-600 hover:bg-gray-200"
       }`}
     >
-      <span aria-hidden className="leading-none">{icon}</span>
+      {(() => {
+        const Icon = icon;
+        return <Icon size={20} strokeWidth={1.75} aria-hidden />;
+      })()}
       <span className="text-[9px] leading-none">{label}</span>
       {badge ? (
         <span className="absolute top-1 right-1 min-w-[16px] rounded-full bg-blue-600 px-1 text-center text-[9px] leading-4 text-on-accent">

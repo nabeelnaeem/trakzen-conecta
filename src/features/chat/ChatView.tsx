@@ -9,6 +9,7 @@ import { chat as chatIpc, errorMessage } from "../../lib/ipc";
 import { codeFromCopyButton, renderMarkdown } from "../../lib/markdown";
 import { Spinner } from "../../lib/Spinner";
 import type { ChatMessage } from "../../lib/types";
+import { Check, CheckCheck, Clock, MoreHorizontal, Paperclip, QrCode, Search, Send, X } from "lucide-react";
 
 export function ChatView() {
   const s = useChat();
@@ -200,7 +201,7 @@ function IdentityCard() {
           title="Show a QR code other machines can scan to add you"
           onClick={() => (qr ? setQr(null) : chatIpc.pairingQr().then(setQr).catch(() => undefined))}
         >
-          ▦
+          <QrCode size={16} />
         </button>
       </div>
       <div className="mt-2 text-[11px] text-gray-600">
@@ -509,11 +510,11 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
             window.setTimeout(() => searchRef.current?.focus(), 0);
           }}
         >
-          ⌕
+          <Search size={16} />
         </button>
         <div className="relative" ref={menuRef}>
           <button className="btn btn-ghost" onClick={() => setMenu((v) => !v)} title="More">
-            ⋯
+            <MoreHorizontal size={16} />
           </button>
           {menu && (
             <div className="absolute right-0 z-10 mt-1 w-60 rounded-md border border-gray-200 bg-white py-1 shadow-lg">
@@ -678,7 +679,7 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
           )}
           <div className="flex items-end gap-2">
             <button className="btn" onClick={() => void pick()} title="Attach files">
-              📎
+              <Paperclip size={16} />
             </button>
             <button className={`btn ${toolbar ? "bg-gray-100" : ""}`} onClick={() => setToolbar((v) => !v)} title="Formatting (Markdown also works: **bold**, _italic_, `code`)">
               Aa
@@ -697,8 +698,9 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
               onKeyDown={onKey}
               onPaste={(e) => void onPaste(e)}
             />
-            <button className="btn btn-primary" onClick={() => void submit()} disabled={!text.trim() && pending.length === 0}>
-              Send{pending.length > 0 ? ` (${pending.length})` : ""}
+            <button className="btn btn-primary" onClick={() => void submit()} disabled={!text.trim() && pending.length === 0} title="Send (Enter)">
+              <Send size={15} />
+              {pending.length > 0 ? ` ${pending.length}` : ""}
             </button>
           </div>
         </div>
@@ -733,11 +735,11 @@ function FmtButton({ children, title, onClick }: { children: React.ReactNode; ti
 
 function Ticks({ status, mine }: { status: string; mine: boolean }) {
   if (!mine) return null;
-  if (status === "queued") return <span title="Queued until the peer is online">🕒</span>;
-  if (status === "sending") return <span title="Sending">✓</span>;
-  if (status === "failed") return <span title="Failed">!</span>;
-  if (status === "read") return <span className="text-cyan-200" title="Read">✓✓</span>;
-  return <span className="opacity-70" title="Delivered">✓✓</span>;
+  if (status === "queued") return <Clock size={11} aria-label="Queued until the peer is online" />;
+  if (status === "sending") return <Check size={12} aria-label="Sending" />;
+  if (status === "failed") return <X size={12} aria-label="Failed" />;
+  if (status === "read") return <CheckCheck size={13} className="text-cyan-300" aria-label="Read" />;
+  return <CheckCheck size={13} className="opacity-70" aria-label="Delivered" />;
 }
 
 function Bubble({

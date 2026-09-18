@@ -9,6 +9,7 @@ import { errorMessage, mail } from "../../lib/ipc";
 import { Spinner } from "../../lib/Spinner";
 import type { MessageDetail, MessageSummary } from "../../lib/types";
 import { isDark, onTheme, themePrefs } from "../../lib/theme";
+import { Archive, Clock, Forward, MoreHorizontal, Reply, ReplyAll, ShieldAlert, Star, Tag, Trash2 } from "lucide-react";
 
 export function ThreadView() {
   const s = useMail();
@@ -99,19 +100,19 @@ export function ThreadView() {
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center gap-1 border-b border-gray-200 px-3 py-2" ref={menusRef}>
         <button className="btn" onClick={() => void s.openCompose("reply", latest.id)} title="Reply (r)">
-          Reply
+          <Reply size={15} /> Reply
         </button>
         <button className="btn" onClick={() => void s.openCompose("reply-all", latest.id)} title="Reply all (a)">
-          Reply all
+          <ReplyAll size={15} /> Reply all
         </button>
         <button className="btn" onClick={() => void s.openCompose("forward", latest.id)} title="Forward (f)">
-          Forward
+          <Forward size={15} /> Forward
         </button>
         <div className="flex-1" />
 
         {inInbox && !inTrash && (
           <button className="btn btn-ghost" onClick={() => void s.act("archive", ids)} title="Archive (e)">
-            Archive
+            <Archive size={15} /> Archive
           </button>
         )}
         {inSpam ? (
@@ -121,7 +122,7 @@ export function ThreadView() {
         ) : (
           !inTrash && (
             <button className="btn btn-ghost" onClick={() => void s.act("spam", ids)} title="Report spam (!)">
-              Spam
+              <ShieldAlert size={15} /> Spam
             </button>
           )
         )}
@@ -130,14 +131,14 @@ export function ThreadView() {
             To inbox
           </button>
         ) : (
-          <button className="btn btn-ghost text-red-700" onClick={() => void s.act("trash", ids)} title="Delete (#)">
-            Trash
+          <button className="btn btn-ghost btn-danger" onClick={() => void s.act("trash", ids)} title="Delete (#)">
+            <Trash2 size={15} /> Trash
           </button>
         )}
 
         <div className="relative">
           <button className="btn btn-ghost" onClick={() => setSnoozeMenu((v) => !v)} title="Snooze (b)">
-            ⏰
+            <Clock size={15} />
           </button>
           {snoozeMenu && (
             <Menu>
@@ -160,7 +161,7 @@ export function ThreadView() {
 
         <div className="relative">
           <button className="btn btn-ghost" onClick={() => setLabelMenu((v) => !v)} title="Labels (l)">
-            Label ▾
+            <Tag size={15} /> ▾
           </button>
           {labelMenu && (
             <Menu>
@@ -189,12 +190,12 @@ export function ThreadView() {
           onClick={() => void s.toggleStar(latest)}
           title="Star (s)"
         >
-          ★
+          <Star size={15} fill={latest.isStarred ? "currentColor" : "none"} />
         </button>
 
         <div className="relative">
           <button className="btn btn-ghost" onClick={() => setMoreMenu((v) => !v)} title="More">
-            ⋯
+            <MoreHorizontal size={15} />
           </button>
           {moreMenu && (
             <Menu>

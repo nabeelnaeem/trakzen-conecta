@@ -8,17 +8,18 @@ import { LabelChip } from "./LabelChip";
 import { useMailShortcuts } from "./useShortcuts";
 import { Spinner } from "../../lib/Spinner";
 import type { Category, Folder } from "../../lib/types";
+import { Archive, Clock, FileText, Inbox, Mails, PenLine, RefreshCw, Search, Send, ShieldAlert, Star, Tag, Trash2, type LucideIcon } from "lucide-react";
 
-const FOLDERS: { key: Folder; label: string; icon: string }[] = [
-  { key: "inbox", label: "Inbox", icon: "📥" },
-  { key: "starred", label: "Starred", icon: "★" },
-  { key: "snoozed", label: "Snoozed", icon: "⏰" },
-  { key: "sent", label: "Sent", icon: "📤" },
-  { key: "drafts", label: "Drafts", icon: "📝" },
-  { key: "archive", label: "Archive", icon: "🗄" },
-  { key: "spam", label: "Spam", icon: "⚠" },
-  { key: "trash", label: "Trash", icon: "🗑" },
-  { key: "all", label: "All mail", icon: "✉" },
+const FOLDERS: { key: Folder; label: string; icon: LucideIcon }[] = [
+  { key: "inbox", label: "Inbox", icon: Inbox },
+  { key: "starred", label: "Starred", icon: Star },
+  { key: "snoozed", label: "Snoozed", icon: Clock },
+  { key: "sent", label: "Sent", icon: Send },
+  { key: "drafts", label: "Drafts", icon: FileText },
+  { key: "archive", label: "Archive", icon: Archive },
+  { key: "spam", label: "Spam", icon: ShieldAlert },
+  { key: "trash", label: "Trash", icon: Trash2 },
+  { key: "all", label: "All mail", icon: Mails },
 ];
 
 const CATEGORIES: { key: Category; label: string; labelId: string }[] = [
@@ -70,7 +71,7 @@ export function MailView() {
       <aside className="flex w-56 shrink-0 flex-col border-r border-gray-200 bg-gray-50">
         <div className="p-3">
           <button className="btn btn-primary w-full justify-center shadow-sm" onClick={() => void s.openCompose()} title="Compose (c)">
-            ✎ Compose
+            <PenLine size={16} /> Compose
           </button>
         </div>
         <nav className="min-h-0 flex-1 overflow-y-auto px-2">
@@ -84,7 +85,7 @@ export function MailView() {
                   : "text-gray-700 hover:bg-gray-200"
               }`}
             >
-              <span className="w-4 text-center text-xs opacity-70">{f.icon}</span>
+              <f.icon size={16} strokeWidth={1.75} className="shrink-0 opacity-80" aria-hidden />
               <span className="flex-1">{f.label}</span>
               {f.key === "inbox" && s.unread > 0 && (
                 <span className="rounded-full bg-blue-600 px-1.5 text-xs text-on-accent">{s.unread}</span>
@@ -155,10 +156,10 @@ export function MailView() {
                 if (e.key === "Escape") s.setSearch("");
               }}
             />
-            <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-gray-400">⌕</span>
+            <Search size={14} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-gray-400" aria-hidden />
           </div>
           <button className="btn btn-ghost" title="Sync now" onClick={() => void s.sync()} disabled={!!sync}>
-            {sync ? <Spinner className="text-blue-600" /> : "⟳"}
+            {sync ? <Spinner className="text-blue-600" /> : <RefreshCw size={16} />}
           </button>
         </div>
 
@@ -166,11 +167,11 @@ export function MailView() {
           <div className="flex flex-wrap items-center gap-x-0.5 gap-y-1 border-b border-gray-200 bg-blue-50 px-2 py-1 text-xs">
             <SelectMenu allSelected={allSelected} />
             <span className="mr-2 whitespace-nowrap font-medium">{s.selected.length} selected</span>
-            <BulkButton title="Archive (e)" onClick={() => void s.act("archive")}>🗄</BulkButton>
-            <BulkButton title="Trash (#)" onClick={() => void s.act("trash")}>🗑</BulkButton>
-            <BulkButton title="Report spam (!)" onClick={() => void s.act("spam")}>⚠</BulkButton>
-            <BulkButton title="Mark as read (Shift+I)" onClick={() => void s.act("read")}>✉</BulkButton>
-            <BulkButton title="Mark as unread (Shift+U)" onClick={() => void s.act("unread")}>●</BulkButton>
+            <BulkButton title="Archive (e)" onClick={() => void s.act("archive")}><Archive size={15} /></BulkButton>
+            <BulkButton title="Trash (#)" onClick={() => void s.act("trash")}><Trash2 size={15} /></BulkButton>
+            <BulkButton title="Report spam (!)" onClick={() => void s.act("spam")}><ShieldAlert size={15} /></BulkButton>
+            <BulkButton title="Mark as read (Shift+I)" onClick={() => void s.act("read")}><MailOpenIcon /></BulkButton>
+            <BulkButton title="Mark as unread (Shift+U)" onClick={() => void s.act("unread")}><MailDot /></BulkButton>
             <BulkLabelMenu />
             <div className="flex-1" />
             <BulkButton title="Clear selection (Esc)" onClick={() => s.selectAll(false)}>✕</BulkButton>
@@ -309,6 +310,13 @@ function SelectMenu({ allSelected }: { allSelected: boolean }) {
   );
 }
 
+function MailOpenIcon() {
+  return <Mails size={15} />;
+}
+function MailDot() {
+  return <span className="inline-block h-2.5 w-2.5 rounded-full bg-blue-600" />;
+}
+
 function BulkButton({ children, title, onClick }: { children: React.ReactNode; title: string; onClick: () => void }) {
   const working = useMail((m) => m.working);
   return (
@@ -338,8 +346,8 @@ function BulkLabelMenu() {
   const userLabels = labels.filter((l) => l.kind === "user");
   return (
     <div className="relative" ref={ref}>
-      <button className="rounded px-2 py-1 text-xs hover:bg-blue-100" title="Labels" onClick={() => setOpen((v) => !v)}>
-        🏷 ▾
+      <button className="flex items-center gap-1 rounded px-2 py-1 text-xs hover:bg-blue-100" title="Labels" onClick={() => setOpen((v) => !v)}>
+        <Tag size={14} /> ▾
       </button>
       {open && (
         <div className="absolute left-0 z-10 mt-1 max-h-72 w-56 overflow-y-auto rounded-md border border-gray-200 bg-white py-1 shadow-lg">
