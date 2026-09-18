@@ -2,7 +2,7 @@
 
 // ---- mail -----------------------------------------------------------------
 
-export type ProviderKind = "gmail";
+export type ProviderKind = "gmail" | "imap";
 
 export interface Account {
   id: number;

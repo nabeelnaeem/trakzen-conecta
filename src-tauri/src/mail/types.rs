@@ -4,12 +4,14 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
     Gmail,
+    Imap,
 }
 
 impl ProviderKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             ProviderKind::Gmail => "gmail",
+            ProviderKind::Imap => "imap",
         }
     }
 }

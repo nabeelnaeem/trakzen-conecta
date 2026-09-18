@@ -7,6 +7,7 @@ use crate::error::{AppError, Result};
 
 use super::types::*;
 
+#[derive(Clone)]
 pub struct MailStore {
     db: Arc<Db>,
 }

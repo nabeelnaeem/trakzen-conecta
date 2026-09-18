@@ -254,6 +254,7 @@ pub fn run() {
                 mail: MailStore::new(db.clone()),
                 providers: Providers {
                     gmail: Arc::new(mail::gmail::GmailProvider::new(db.clone())),
+                    imap: Arc::new(mail::imap::ImapProvider::new(db.clone())),
                 },
                 chat: chat.clone(),
                 sync_guard: Default::default(),
@@ -375,6 +376,7 @@ pub fn run() {
             mail::commands::mail_open_draft,
             mail::commands::mail_list_accounts,
             mail::commands::mail_add_account,
+            mail::commands::mail_add_imap,
             mail::commands::mail_remove_account,
             mail::commands::mail_sync,
             mail::commands::mail_list_messages,

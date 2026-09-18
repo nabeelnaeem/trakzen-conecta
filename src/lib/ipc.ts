@@ -39,6 +39,8 @@ export const settings = {
 export const mail = {
   listAccounts: () => invoke<Account[]>("mail_list_accounts"),
   addAccount: (provider: string) => invoke<Account>("mail_add_account", { provider }),
+  addImap: (login: { host: string; port?: number; smtpHost?: string; smtpPort?: number; username: string; password: string }) =>
+    invoke<Account>("mail_add_imap", { login }),
   removeAccount: (accountId: number) => invoke<void>("mail_remove_account", { accountId }),
   sync: (accountId: number) => invoke<void>("mail_sync", { accountId }),
   listMessages: (accountId: number, query: ListQuery, limit = 100, offset = 0, conversations = false) =>

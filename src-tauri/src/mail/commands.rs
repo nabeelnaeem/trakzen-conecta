@@ -58,6 +58,34 @@ pub async fn mail_add_account(
     Ok(account)
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImapLogin {
+    pub host: String,
+    pub port: Option<u16>,
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<u16>,
+    pub username: String,
+    pub password: String,
+}
+
+#[tauri::command]
+pub async fn mail_add_imap(app: AppHandle, state: State<'_, AppState>, login: ImapLogin) -> Result<Account> {
+    let cfg = super::imap::ImapConfig {
+        host: login.host.trim().to_string(),
+        port: login.port.unwrap_or(993),
+        smtp_host: login.smtp_host.unwrap_or_else(|| login.host.trim().to_string()),
+        smtp_port: login.smtp_port.unwrap_or(587),
+        username: login.username.trim().to_string(),
+    };
+    if cfg.host.is_empty() || cfg.username.is_empty() || login.password.is_empty() {
+        return Err(AppError::Other("IMAP host, username and password are required".into()));
+    }
+    let account = state.providers.imap.add_account(&state.mail, cfg, &login.password)?;
+    spawn_sync(app.clone(), account.id);
+    Ok(account)
+}
+
 #[tauri::command]
 pub async fn mail_remove_account(state: State<'_, AppState>, account_id: i64) -> Result<()> {
     let account = state.mail.get_account(account_id)?;

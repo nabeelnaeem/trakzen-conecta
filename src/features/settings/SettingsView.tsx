@@ -485,8 +485,9 @@ function TemplatesEditor({ value, onCommit }: { value: string; onCommit: (v: str
 // -------------------------------------------------------------- Accounts
 
 function AccountsTab({ s, save }: { s: Settings; save: Save }) {
-  const { accounts, addAccount, removeAccount, busy } = useMail();
+  const { accounts, addAccount, addImap, removeAccount, busy } = useMail();
   const [confirmId, setConfirmId] = useState<number | null>(null);
+  const [imap, setImap] = useState({ host: "", username: "", password: "", port: "993", smtpPort: "587" });
   return (
     <div className="space-y-6 text-sm">
       <div>
@@ -514,6 +515,35 @@ function AccountsTab({ s, save }: { s: Settings; save: Save }) {
             {busy ? "Waiting for browser…" : "+ Connect Gmail"}
           </button>
         </div>
+        <p className="mb-3 text-xs text-gray-500">
+          Google Workspace teams can mark the OAuth app Internal to skip verification. A public Gmail app needs Google’s restricted-scope review, or use IMAP below.
+        </p>
+        <div className="mb-4 rounded-md border border-gray-200 bg-gray-50 p-3">
+          <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">IMAP (any provider)</div>
+          <div className="grid grid-cols-2 gap-2">
+            <input className="input col-span-2" placeholder="imap.example.com" value={imap.host} onChange={(e) => setImap({ ...imap, host: e.target.value })} />
+            <input className="input col-span-2" placeholder="you@example.com" value={imap.username} onChange={(e) => setImap({ ...imap, username: e.target.value })} />
+            <input className="input col-span-2" type="password" placeholder="Password or app password" value={imap.password} onChange={(e) => setImap({ ...imap, password: e.target.value })} />
+            <input className="input" placeholder="IMAP port" value={imap.port} onChange={(e) => setImap({ ...imap, port: e.target.value })} />
+            <input className="input" placeholder="SMTP port" value={imap.smtpPort} onChange={(e) => setImap({ ...imap, smtpPort: e.target.value })} />
+          </div>
+          <button
+            className="btn mt-2 text-xs"
+            disabled={busy || !imap.host.trim() || !imap.username.trim() || !imap.password}
+            onClick={() =>
+              void addImap({
+                host: imap.host.trim(),
+                username: imap.username.trim(),
+                password: imap.password,
+                port: Number(imap.port) || 993,
+                smtpHost: imap.host.trim(),
+                smtpPort: Number(imap.smtpPort) || 587,
+              }).then(() => setImap({ host: "", username: "", password: "", port: "993", smtpPort: "587" }))
+            }
+          >
+            Connect IMAP
+          </button>
+        </div>
         {accounts.length === 0 && <div className="text-gray-500">No accounts yet.</div>}
         <div className="space-y-3">
           {accounts.map((a) => (
@@ -522,9 +552,11 @@ function AccountsTab({ s, save }: { s: Settings; save: Save }) {
                 <span className="font-medium">{a.email}</span>
                 <span className="rounded bg-gray-100 px-1.5 text-[10px] uppercase text-gray-600">{a.provider}</span>
                 <div className="flex-1" />
+                {a.provider === "gmail" && (
                 <button className="btn text-xs" onClick={() => mail.reauth(a.id).catch(() => undefined)} title="Re-run the Google consent flow (needed once for filter management on older accounts)">
                   Sign in again
                 </button>
+                )}
                 {confirmId === a.id ? (
                   <span className="flex items-center gap-1">
                     <span className="text-xs text-red-700">Remove {a.email} and its cached mail?</span>

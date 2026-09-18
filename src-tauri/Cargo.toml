@@ -47,8 +47,11 @@ sha2 = "0.10"
 base64 = "0.22"
 url = "2"
 async-trait = "0.1"
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "native-tls"] }
 
-lettre = { version = "0.11", default-features = false, features = ["builder"] }
+imap = "2.4"
+native-tls = "0.2"
+mailparse = "0.16"
 ammonia = "4"
 html2text = "0.13"
 local-ip-address = "0.6"
