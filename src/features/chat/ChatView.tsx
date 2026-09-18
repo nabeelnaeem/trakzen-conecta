@@ -237,11 +237,19 @@ function IdentityCard() {
 }
 
 function AddPeer() {
-  const { addPeer, identity } = useChat();
+  const { addPeer, identity, pendingPair, setPendingPair } = useChat();
   const [name, setName] = useState("");
   const [host, setHost] = useState("");
   const [port, setPort] = useState("");
   const [openForm, setOpenForm] = useState(false);
+  // A conecta://pair link opened from outside lands here prefilled.
+  useEffect(() => {
+    if (pendingPair) {
+      setHost(pendingPair);
+      setOpenForm(true);
+      setPendingPair(null);
+    }
+  }, [pendingPair, setPendingPair]);
 
   const submit = async () => {
     if (!host.trim()) return;

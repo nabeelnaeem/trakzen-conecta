@@ -147,9 +147,17 @@ export const chat = {
     listen<ChatStatus>("chat://status", (e) => cb(e.payload)),
 };
 
+export type NavRoute =
+  | { kind: "chat"; peer: string }
+  | { kind: "mail"; accountId: number; threadId: string }
+  | { kind: "pair"; link: string };
+
 export const app = {
   quit: () => invoke<void>("app_quit"),
   setBadge: (count: number) => invoke<void>("app_set_badge", { count }),
+  /** Clickable OS notification; `route` is a conecta:// link. */
+  notify: (title: string, body: string, route?: string) => invoke<void>("app_notify", { title, body, route: route ?? null }),
+  onNavigate: (cb: (r: NavRoute) => void) => listen<NavRoute>("app://navigate", (e) => cb(e.payload)),
 };
 
 export function errorMessage(e: unknown): string {

@@ -282,6 +282,7 @@ pub struct FlagChange {
 #[serde(rename_all = "camelCase")]
 pub struct NewMailInfo {
     pub id: i64,
+    pub thread_id: Option<String>,
     pub from_name: String,
     pub subject: String,
 }

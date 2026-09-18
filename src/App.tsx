@@ -24,6 +24,26 @@ export default function App() {
     if (tab === "mail" || tab === "chat") setLastTab(tab);
   }, [tab]);
   useEffect(() => onNavigate((t) => setTab(t)), []);
+
+  // Deep links and notification clicks arrive here from the backend.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void appIpc
+      .onNavigate((r) => {
+        if (r.kind === "chat") {
+          setTab("chat");
+          void useChat.getState().selectByRoute(r.peer);
+        } else if (r.kind === "mail") {
+          setTab("mail");
+          void useMail.getState().openThread(r.accountId, r.threadId);
+        } else if (r.kind === "pair") {
+          setTab("chat");
+          useChat.getState().setPendingPair(r.link);
+        }
+      })
+      .then((u) => (unlisten = u));
+    return () => unlisten?.();
+  }, []);
   const reorder = (target: RailItem) => {
     if (!dragging || dragging === target) return;
     const next = order.filter((x) => x !== dragging);

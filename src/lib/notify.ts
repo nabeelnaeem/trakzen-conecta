@@ -1,8 +1,4 @@
-import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-} from "@tauri-apps/plugin-notification";
+import { app } from "./ipc";
 // Inlined as data URLs: the webview media stack wants HTTP range requests
 // that the app's asset server does not provide, so <audio src> stays
 // silent. Decoding the bytes ourselves and playing through Web Audio
@@ -41,7 +37,6 @@ export function asSoundName(s: string | undefined, fallback: SoundName): SoundNa
   return s && s in SOUNDS ? (s as SoundName) : fallback;
 }
 
-let granted: boolean | null = null;
 let ctx: AudioContext | null = null;
 const buffers: Partial<Record<SoundName, AudioBuffer>> = {};
 
@@ -90,12 +85,12 @@ export function playSound(kind: "mail" | "chat") {
   void playNamed(notifyPrefs[kind]);
 }
 
-export async function notify(title: string, body: string, sound: "mail" | "chat") {
+/**
+ * Sound plus a native notification. `route` (a conecta:// link) is opened
+ * when the notification is clicked, restoring the window from the tray.
+ */
+export async function notify(title: string, body: string, sound: "mail" | "chat", route?: string) {
   playSound(sound);
   if (!notifyPrefs.notifications) return;
-  if (granted === null) {
-    granted = await isPermissionGranted();
-    if (!granted) granted = (await requestPermission()) === "granted";
-  }
-  if (granted) sendNotification({ title, body });
+  await app.notify(title, body, route).catch((e) => console.warn("notify failed", e));
 }

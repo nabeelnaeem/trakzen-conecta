@@ -102,6 +102,8 @@ interface MailState {
   fetchFromServer: (reset: boolean) => Promise<void>;
   loadMore: () => Promise<void>;
   open: (id: number | null) => Promise<void>;
+  /** Open a thread by id even if it is not in the current list (deep links). */
+  openThread: (accountId: number, threadId: string) => Promise<void>;
   openNext: (delta: number) => Promise<void>;
   expand: (id: number, on?: boolean) => Promise<void>;
   sync: () => Promise<void>;
@@ -253,7 +255,12 @@ export const useMail = create<MailState>((set, get) => ({
     });
     await mail.onUnsnoozed((due) => {
       void get().refresh();
-      for (const m of due) void notify(m.fromName || m.fromAddr, m.subject || "(no subject)", "mail");
+      for (const m of due) {
+        const route = m.threadId
+          ? `conecta://mail/${m.accountId}/${encodeURIComponent(m.threadId)}`
+          : undefined;
+        void notify(m.fromName || m.fromAddr, m.subject || "(no subject)", "mail", route);
+      }
     });
     await mail.onSync((ev: SyncEvent) => {
       const { syncing, activeAccountId } = get();
@@ -286,8 +293,10 @@ export const useMail = create<MailState>((set, get) => ({
           const focused = document.hasFocus();
           if (ev.messages.length === 1) {
             const m = ev.messages[0];
-            void notify(m.fromName, m.subject || "(no subject)", "mail").then(() => undefined);
+            const route = m.threadId ? `conecta://mail/${ev.accountId}/${encodeURIComponent(m.threadId)}` : undefined;
+            void notify(m.fromName, m.subject || "(no subject)", "mail", route);
           } else if (ev.messages.length > 1) {
+            const first = ev.messages[0];
             void notify(
               `${ev.messages.length} new messages${account ? ` · ${account.email}` : ""}`,
               ev.messages
@@ -295,6 +304,7 @@ export const useMail = create<MailState>((set, get) => ({
                 .map((m) => `${m.fromName}: ${m.subject}`)
                 .join("\n"),
               "mail",
+              first.threadId ? `conecta://mail/${ev.accountId}/${encodeURIComponent(first.threadId)}` : undefined,
             );
           }
           void focused;
@@ -501,6 +511,26 @@ export const useMail = create<MailState>((set, get) => ({
       set({ error: errorMessage(e) });
     } finally {
       if (get().openId === id) set({ loadingDetail: false });
+    }
+  },
+
+  openThread: async (accountId, threadId) => {
+    try {
+      if (get().activeAccountId !== accountId) get().setAccount(accountId);
+      const thread = await mail.listThread(accountId, threadId);
+      if (thread.length === 0) {
+        set({ error: "That conversation is not in the local cache yet." });
+        return;
+      }
+      const last = thread[thread.length - 1];
+      lastSelectedId = last.id;
+      set({ openId: last.id, thread, expanded: [], loadingDetail: true });
+      const toExpand = thread.filter((m) => !m.isRead || m.id === last.id).map((m) => m.id);
+      for (const mid of toExpand) await get().expand(mid, true);
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    } finally {
+      set({ loadingDetail: false });
     }
   },
 

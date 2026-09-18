@@ -118,6 +118,7 @@ export const emptyFilter = (): NewFilter => ({
 
 export interface NewMailInfo {
   id: number;
+  threadId: string | null;
   fromName: string;
   subject: string;
 }

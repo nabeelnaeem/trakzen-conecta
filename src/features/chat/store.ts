@@ -13,6 +13,8 @@ interface ChatState {
   nearby: Nearby[];
   /** peer row id → time the last "typing" arrived */
   typing: Record<number, number>;
+  /** conecta://pair link handed in by a deep link, consumed by the Add form. */
+  pendingPair: string | null;
   error: string | null;
   initialised: boolean;
 
@@ -25,6 +27,9 @@ interface ChatState {
   sendText: (body: string, replyTo?: string | null) => Promise<void>;
   sendFile: (path: string) => Promise<void>;
   addNearby: (peerId: string) => Promise<void>;
+  /** Select a peer by its uuid or row id (deep links). */
+  selectByRoute: (peer: string) => Promise<void>;
+  setPendingPair: (link: string | null) => void;
   deleteMessage: (msgId: string, forEveryone: boolean) => Promise<void>;
   react: (msgId: string, emoji: string) => Promise<void>;
   edit: (msgId: string, body: string) => Promise<boolean>;
@@ -51,6 +56,7 @@ export const useChat = create<ChatState>((set, get) => ({
   transfers: {},
   nearby: [],
   typing: {},
+  pendingPair: null,
   error: null,
   initialised: false,
 
@@ -98,8 +104,9 @@ export const useChat = create<ChatState>((set, get) => ({
         if (viewing && m.direction === "in" && m.status === "unread") void chat.markRead(m.peerId);
       }
       if (m.direction === "in" && (m.status === "unread") && !viewing) {
-        const who = peers.find((p) => p.id === m.peerId)?.displayName ?? "New message";
-        void notify(who, m.kind === "file" ? `Sent a file: ${m.fileName ?? ""}` : m.body, "chat");
+        const peer = peers.find((p) => p.id === m.peerId);
+        const who = peer?.displayName ?? "New message";
+        void notify(who, m.kind === "file" ? `Sent a file: ${m.fileName ?? ""}` : m.body, "chat", `conecta://chat/${peer?.peerId ?? m.peerId}`);
       }
       void get().loadPeers();
     });
@@ -213,6 +220,15 @@ export const useChat = create<ChatState>((set, get) => ({
       set({ error: errorMessage(e) });
     }
   },
+
+  selectByRoute: async (peer) => {
+    if (get().peers.length === 0) await get().loadPeers();
+    const p = get().peers.find((x) => x.peerId === peer || String(x.id) === peer);
+    if (p) await get().selectPeer(p.id);
+    else set({ error: "That peer is not in your list." });
+  },
+
+  setPendingPair: (link) => set({ pendingPair: link }),
 
   addNearby: async (peerId) => {
     try {

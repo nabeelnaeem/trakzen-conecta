@@ -2,6 +2,7 @@ mod chat;
 mod db;
 mod error;
 mod mail;
+mod notify;
 mod secrets;
 mod settings;
 mod util;
@@ -129,16 +130,19 @@ async fn settings_update(
 }
 
 fn show_main(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.unminimize();
-        let _ = w.show();
-        let _ = w.set_focus();
-    }
+    notify::focus_main(app);
 }
 
 #[tauri::command]
 async fn app_quit(app: AppHandle) {
     app.exit(0);
+}
+
+/// Clickable desktop notification; `route` is a conecta:// link to open.
+#[tauri::command]
+async fn app_notify(app: AppHandle, title: String, body: String, route: Option<String>) {
+    let r = route.as_deref().and_then(notify::parse_route);
+    notify::show(&app, &title, &body, r);
 }
 
 /// Unread total shown on the tray tooltip and window title.
@@ -156,6 +160,7 @@ async fn app_set_badge(app: AppHandle, count: u32) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    notify::set_app_user_model_id();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -164,6 +169,18 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        // Must be first: a second launch (e.g. from a conecta:// link or a
+        // notification while the app is closed) hands its arguments to the
+        // running instance and exits.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            let urls: Vec<String> = args.into_iter().filter(|a| a.starts_with("conecta://")).collect();
+            if urls.is_empty() {
+                notify::open_route(app, None);
+            } else {
+                notify::handle_urls(app, &urls);
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -241,6 +258,31 @@ pub fn run() {
             };
             app.manage(state);
             chat.start();
+
+            // conecta:// links: register the scheme for dev builds (installers
+            // do it themselves), route ones we were launched with, and listen
+            // for later ones.
+            #[cfg(any(windows, target_os = "linux"))]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                if cfg!(debug_assertions) {
+                    let _ = app.deep_link().register_all();
+                }
+                if let Ok(Some(urls)) = app.deep_link().get_current() {
+                    let list: Vec<String> = urls.iter().map(|u| u.to_string()).collect();
+                    let handle = app.handle().clone();
+                    // The webview is not up yet; give it a moment before routing.
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                        notify::handle_urls(&handle, &list);
+                    });
+                }
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    let list: Vec<String> = event.urls().iter().map(|u| u.to_string()).collect();
+                    notify::handle_urls(&handle, &list);
+                });
+            }
 
             // Refresh every account in the background at launch; the UI
             // renders from the local cache immediately.
@@ -371,6 +413,7 @@ pub fn run() {
             chat::commands::chat_add_nearby,
             chat::commands::chat_pairing_qr,
             app_set_badge,
+            app_notify,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

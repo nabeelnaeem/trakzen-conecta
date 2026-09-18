@@ -255,6 +255,7 @@ impl GmailProvider {
                     .into_iter()
                     .map(|m| NewMailInfo {
                         id: m.id,
+                        thread_id: m.thread_id.clone().or(Some(m.remote_id.clone())),
                         from_name: if m.from_name.is_empty() { m.from_addr } else { m.from_name },
                         subject: m.subject,
                     })
