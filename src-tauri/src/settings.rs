@@ -12,6 +12,20 @@ pub const CHAT_PORT: &str = "chat_port";
 pub const CHAT_DOWNLOAD_DIR: &str = "chat_download_dir";
 pub const MAIL_SHOW_IMAGES: &str = "mail_show_images";
 pub const MAIL_SIGNATURE: &str = "mail_signature";
+
+/// Per-account override of [`MAIL_SIGNATURE`]; empty string means "none".
+pub fn account_signature_key(account_id: i64) -> String {
+    format!("mail_signature:{account_id}")
+}
+
+/// The signature to append for an account: its own if one is set,
+/// otherwise the global one.
+pub fn signature_for(db: &Db, account_id: i64) -> Result<String> {
+    if let Some(s) = get(db, &account_signature_key(account_id))? {
+        return Ok(s);
+    }
+    Ok(get(db, MAIL_SIGNATURE)?.unwrap_or_default())
+}
 pub const MAIL_POLL_SECONDS: &str = "mail_poll_seconds";
 pub const CLOSE_TO_TRAY: &str = "close_to_tray";
 pub const NOTIFICATIONS: &str = "notifications";
@@ -81,6 +95,8 @@ pub struct SettingsView {
     pub chat_download_dir: String,
     pub mail_show_images: bool,
     pub mail_signature: String,
+    /// account id → signature override (absent = use the global one).
+    pub account_signatures: std::collections::HashMap<i64, String>,
     /// 0 disables background polling.
     pub mail_poll_seconds: u64,
     pub close_to_tray: bool,
@@ -106,6 +122,14 @@ pub fn view(db: &Db) -> Result<SettingsView> {
         // Off by default: loading remote images tells senders you opened the mail.
         mail_show_images: get(db, MAIL_SHOW_IMAGES)?.map_or(false, |v| v == "true"),
         mail_signature: get(db, MAIL_SIGNATURE)?.unwrap_or_default(),
+        account_signatures: {
+            let conn = db.conn();
+            let mut stmt = conn.prepare("SELECT key, value FROM settings WHERE key LIKE 'mail_signature:%'")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            rows.filter_map(|r| r.ok())
+                .filter_map(|(k, v)| k.rsplit(':').next()?.parse::<i64>().ok().map(|id| (id, v)))
+                .collect()
+        },
         mail_poll_seconds: poll_seconds(db)?,
         close_to_tray: flag(db, CLOSE_TO_TRAY, true)?,
         notifications: flag(db, NOTIFICATIONS, true)?,

@@ -39,6 +39,8 @@ pub struct SettingsPatch {
     chat_download_dir: Option<String>,
     mail_show_images: Option<bool>,
     mail_signature: Option<String>,
+    /// account id → signature; `None` value removes the override.
+    account_signatures: Option<std::collections::HashMap<i64, Option<String>>>,
     mail_poll_seconds: Option<u64>,
     close_to_tray: Option<bool>,
     notifications: Option<bool>,
@@ -85,6 +87,17 @@ async fn settings_update(
     }
     if let Some(v) = patch.mail_signature {
         settings::set(&state.db, settings::MAIL_SIGNATURE, v.trim_end())?;
+    }
+    if let Some(map) = patch.account_signatures {
+        for (id, sig) in map {
+            let key = settings::account_signature_key(id);
+            match sig {
+                Some(s) => settings::set(&state.db, &key, s.trim_end())?,
+                None => {
+                    state.db.conn().execute("DELETE FROM settings WHERE key = ?1", rusqlite::params![key])?;
+                }
+            }
+        }
     }
     if let Some(v) = patch.mail_poll_seconds {
         // Picked up by the poll loop on its next tick; 0 pauses it.

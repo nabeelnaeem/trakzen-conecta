@@ -723,10 +723,9 @@ pub async fn mail_send(state: State<'_, AppState>, mut message: OutgoingMessage)
     if message.to.iter().all(|t| t.trim().is_empty()) {
         return Err(AppError::Other("add at least one recipient".into()));
     }
-    if let Some(sig) = crate::settings::get(&state.db, crate::settings::MAIL_SIGNATURE)? {
-        if !sig.trim().is_empty() {
-            message.body_text = format!("{}\n\n-- \n{}", message.body_text.trim_end(), sig.trim());
-        }
+    let sig = crate::settings::signature_for(&state.db, message.account_id)?;
+    if !sig.trim().is_empty() {
+        message.body_text = format!("{}\n\n-- \n{}", message.body_text.trim_end(), sig.trim());
     }
     let account = state.mail.get_account(message.account_id)?;
     let provider = state.providers.provider_for(&account.provider)?;
