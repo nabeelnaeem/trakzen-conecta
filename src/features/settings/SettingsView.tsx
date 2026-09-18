@@ -831,6 +831,8 @@ function ChatTab({ s, save }: { s: Settings; save: Save }) {
 
 function AboutTab() {
   const built = useMemo(() => new Date(__BUILD_DATE__.replace(" UTC", "Z").replace(" ", "T")).toLocaleString(), []);
+  const [updateNote, setUpdateNote] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
   return (
     <div className="space-y-2 text-sm text-gray-600">
       <div>
@@ -839,11 +841,35 @@ function AboutTab() {
       <div>
         {__BUILD_DATE__} · {built}
       </div>
-      <div className="flex gap-3 text-xs">
+      <div className="flex flex-wrap items-center gap-3 text-xs">
+        <button
+          className="btn"
+          disabled={checking}
+          onClick={() => {
+            setChecking(true);
+            setUpdateNote(null);
+            void import("@tauri-apps/plugin-updater")
+              .then(({ check }) => check())
+              .then(async (update) => {
+                if (!update) {
+                  setUpdateNote("You're on the latest version.");
+                  return;
+                }
+                setUpdateNote(`Version ${update.version} is available. Downloading…`);
+                await update.downloadAndInstall();
+                setUpdateNote("Update installed. Restart the app to finish.");
+              })
+              .catch((e) => setUpdateNote(errorMessage(e)))
+              .finally(() => setChecking(false));
+          }}
+        >
+          {checking ? "Checking…" : "Check for updates"}
+        </button>
         <button className="text-blue-700 hover:underline" onClick={() => void openUrl("https://github.com/nabeelnaeem/trakzen-conecta/releases")}>Releases</button>
         <button className="text-blue-700 hover:underline" onClick={() => void openUrl("https://github.com/nabeelnaeem/trakzen-conecta/issues")}>Report a problem</button>
         <button className="text-blue-700 hover:underline" onClick={() => void openUrl("https://github.com/nabeelnaeem/trakzen-conecta/blob/main/PRIVACY.md")}>Privacy</button>
       </div>
+      {updateNote && <p className="text-xs">{updateNote}</p>}
       <p className="pt-2 text-xs">MIT licensed. Mail is cached locally in SQLite; OAuth tokens and the client secret live in the OS credential store.</p>
     </div>
   );

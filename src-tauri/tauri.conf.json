@@ -37,7 +37,8 @@
       "nsis": {
         "displayLanguageSelector": false
       }
-    }
+    },
+    "createUpdaterArtifacts": true
   },
   "plugins": {
     "deep-link": {
@@ -46,6 +47,12 @@
           "conecta"
         ]
       }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRENUE5NEYxNjVGMzdEREQKUldUZGZmTmw4WlJhVFJXanZkTHo5dmI1NUZjMFNrcTlvS1psZXpzcURrdDFXKzJqSEUvYkhWR1EK",
+      "endpoints": [
+        "https://github.com/nabeelnaeem/trakzen-conecta/releases/latest/download/latest.json"
+      ]
     }
   }
 }

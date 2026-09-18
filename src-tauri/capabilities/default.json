@@ -19,6 +19,7 @@
     "core:window:default",
     "core:webview:allow-set-webview-zoom",
     "autostart:default",
-    "deep-link:default"
+    "deep-link:default",
+    "updater:default"
   ]
 }

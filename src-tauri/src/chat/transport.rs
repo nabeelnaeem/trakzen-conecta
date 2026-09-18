@@ -17,6 +17,9 @@ use crate::chat::types::Peer;
 #[async_trait]
 pub trait Transport: Send + Sync {
     async fn deliver(&self, peer: &Peer, frame: Frame) -> Result<()>;
+
+    /// Server sends a nonce; the client signs it with `chat_peer_id`'s key.
+    async fn prove_identity(&self, challenge: &[u8]) -> Result<Vec<u8>>;
 }
 
 /// Direct TCP on the LAN (what [`super::engine::ChatEngine`] uses today).
@@ -28,6 +31,10 @@ impl Transport for LanTransport {
         Err(AppError::Other(
             "LAN delivery is handled by ChatEngine, not this adapter".into(),
         ))
+    }
+
+    async fn prove_identity(&self, _challenge: &[u8]) -> Result<Vec<u8>> {
+        Err(AppError::Other("LAN peers already trust the local keypair".into()))
     }
 }
 
@@ -43,5 +50,9 @@ impl Transport for RelayTransport {
             Some(_) => Err(AppError::Other("server relay is not built yet".into())),
             None => Err(AppError::Other("no chat server configured".into())),
         }
+    }
+
+    async fn prove_identity(&self, _challenge: &[u8]) -> Result<Vec<u8>> {
+        Err(AppError::Other("server relay is not built yet".into()))
     }
 }
