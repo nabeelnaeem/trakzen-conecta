@@ -14,6 +14,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 pub const EVENT_NAVIGATE: &str = "app://navigate";
+#[cfg(windows)]
 pub const APP_USER_MODEL_ID: &str = "com.trakzen.conecta";
 
 #[derive(Debug, Clone, Serialize)]
@@ -25,6 +26,7 @@ pub enum Route {
 }
 
 impl Route {
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn to_url(&self) -> String {
         match self {
             Route::Chat { peer } => format!("conecta://chat/{peer}"),

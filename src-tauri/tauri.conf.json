@@ -37,8 +37,7 @@
       "nsis": {
         "displayLanguageSelector": false
       }
-    },
-    "createUpdaterArtifacts": true
+    }
   },
   "plugins": {
     "deep-link": {

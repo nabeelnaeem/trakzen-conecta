@@ -15,11 +15,11 @@ jobs:
       matrix:
         include:
           - os: ubuntu-22.04
-            args: ""
+            args: "--config src-tauri/updater.bundle.json"
           - os: windows-latest
-            args: ""
+            args: "--config src-tauri/updater.bundle.json"
           - os: macos-latest
-            args: "--target universal-apple-darwin"
+            args: "--target universal-apple-darwin --config src-tauri/updater.bundle.json"
 
     runs-on: ${{ matrix.os }}
     steps:
