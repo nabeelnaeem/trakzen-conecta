@@ -870,6 +870,19 @@ function AboutTab() {
         <button className="text-blue-700 hover:underline" onClick={() => void openUrl("https://github.com/nabeelnaeem/trakzen-conecta/blob/main/PRIVACY.md")}>Privacy</button>
       </div>
       {updateNote && <p className="text-xs">{updateNote}</p>}
+      <div className="pt-4">
+        <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">Developer</div>
+        <div className="text-sm text-gray-800">Nabeel Naeem</div>
+        <div className="text-xs text-gray-500">Full Stack Engineer</div>
+        <div className="mt-2 flex flex-wrap gap-3 text-xs">
+          <button className="text-blue-700 hover:underline" onClick={() => void openUrl("https://www.linkedin.com/in/nabeelnaeem058/")}>
+            LinkedIn
+          </button>
+          <button className="text-blue-700 hover:underline" onClick={() => void openUrl("https://github.com/nabeelnaeem/trakzen-conecta/")}>
+            GitHub
+          </button>
+        </div>
+      </div>
       <p className="pt-2 text-xs">MIT licensed. Mail is cached locally in SQLite; OAuth tokens and the client secret live in the OS credential store.</p>
     </div>
   );
