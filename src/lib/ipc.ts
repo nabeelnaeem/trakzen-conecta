@@ -100,6 +100,7 @@ export const mail = {
   openDraft: (messageId: number) => invoke<DraftContent>("mail_open_draft", { messageId }),
   saveAttachment: (attachmentId: number, open: boolean) =>
     invoke<string>("mail_save_attachment", { attachmentId, open }),
+  unsubscribe: (messageId: number) => invoke<{ method: string }>("mail_unsubscribe", { messageId }),
   onSync: (cb: (ev: SyncEvent) => void): Promise<UnlistenFn> =>
     listen<SyncEvent>("mail://sync", (e) => cb(e.payload)),
 };

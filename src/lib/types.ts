@@ -268,7 +268,7 @@ export interface TransferProgress {
   fileName: string;
   bytesDone: number;
   bytesTotal: number;
-  state: "active" | "done" | "failed";
+  state: "active" | "paused" | "done" | "failed";
 }
 
 export interface DeletedEvent {

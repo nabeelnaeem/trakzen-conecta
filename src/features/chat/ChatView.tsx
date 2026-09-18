@@ -10,7 +10,7 @@ import { codeFromCopyButton, isOnlyCodeBlock, renderMarkdown } from "../../lib/m
 import { navigateTo } from "../../lib/navigate";
 import { useMail } from "../mail/store";
 import { Spinner } from "../../lib/Spinner";
-import type { ChatMessage } from "../../lib/types";
+import type { ChatMessage, TransferProgress } from "../../lib/types";
 import { Check, CheckCheck, Clock, MoreHorizontal, Paperclip, Pencil, QrCode, Search, Send, SmilePlus, X } from "lucide-react";
 
 const QUICK_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🙏", "✅", "👀"];
@@ -241,14 +241,11 @@ function IdentityCard() {
 }
 
 function AddPeer() {
-  const { addPeer, identity, pendingPair, setPendingPair, peers } = useChat();
+  const { addPeer, identity, pendingPair, setPendingPair } = useChat();
   const [name, setName] = useState("");
   const [host, setHost] = useState("");
   const [port, setPort] = useState("");
   const [openForm, setOpenForm] = useState(false);
-  const [groupOpen, setGroupOpen] = useState(false);
-  const [groupName, setGroupName] = useState("");
-  const [picked, setPicked] = useState<number[]>([]);
   // A conecta://pair link opened from outside lands here prefilled.
   useEffect(() => {
     if (pendingPair) {
@@ -297,6 +294,10 @@ function AddPeer() {
         <button className="btn btn-primary flex-1 justify-center" onClick={() => void submit()} disabled={!host.trim()}>
           Add
         </button>
+        <button className="btn" onClick={() => setOpenForm(false)}>
+          Cancel
+        </button>
+      </div>
     </div>
   );
 }
@@ -860,7 +861,7 @@ function Bubble({
 }: {
   m: ChatMessage;
   grouped: boolean;
-  progress?: { bytesDone: number; bytesTotal: number };
+  progress?: TransferProgress;
   quoted: ChatMessage | null;
   onReply: () => void;
   onEdit: () => void;
@@ -1114,7 +1115,7 @@ function MarkdownBody({ body, mine }: { body: string; mine: boolean }) {
   );
 }
 
-function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: boolean; progress?: { bytesDone: number; bytesTotal: number }; frameless?: boolean }) {
+function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: boolean; progress?: TransferProgress; frameless?: boolean }) {
   void mine;
   const [preview, setPreview] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -1145,22 +1146,13 @@ function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: bool
         {preview && <span className="truncate">{m.fileName}</span>}
         <span>{m.fileSize !== null ? bytes(m.fileSize) : ""}</span>
         {pct !== null && <span>· {pct}%</span>}
-        {progress && (
+        {progress && (progress.state === "active" || progress.state === "paused") && (
           <button
             className="underline"
-            onClick={() => {
-              const pause = progress.state !== "paused";
-              void chatIpc.pauseTransfer(progress.transferId, pause);
-            }}
+            onClick={() => void chatIpc.pauseTransfer(progress.transferId, progress.state !== "paused")}
           >
             {progress.state === "paused" ? "Resume" : "Pause"}
           </button>
-        )}
-        {progress && progress.state === "active" && (
-          <button className="underline" onClick={() => void chatIpc.pauseTransfer(progress.transferId, true)}>Pause</button>
-        )}
-        {progress && progress.state === "paused" && (
-          <button className="underline" onClick={() => void chatIpc.pauseTransfer(progress.transferId, false)}>Resume</button>
         )}
         {done && m.filePath && (
           <>
