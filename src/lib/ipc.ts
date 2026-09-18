@@ -39,6 +39,8 @@ export const settings = {
 export const mail = {
   listAccounts: () => invoke<Account[]>("mail_list_accounts"),
   addAccount: (provider: string) => invoke<Account>("mail_add_account", { provider }),
+  addImap: (login: { host: string; port?: number; smtpHost?: string; smtpPort?: number; username: string; password: string }) =>
+    invoke<Account>("mail_add_imap", { login }),
   removeAccount: (accountId: number) => invoke<void>("mail_remove_account", { accountId }),
   sync: (accountId: number) => invoke<void>("mail_sync", { accountId }),
   listMessages: (accountId: number, query: ListQuery, limit = 100, offset = 0, conversations = false) =>
@@ -61,6 +63,10 @@ export const mail = {
     invoke<MailFilter>("mail_create_filter", { accountId, filter }),
   deleteFilter: (accountId: number, filterId: string) =>
     invoke<void>("mail_delete_filter", { accountId, filterId }),
+  updateFilter: (accountId: number, filterId: string, filter: NewFilter) =>
+    invoke<MailFilter>("mail_update_filter", { accountId, filterId, filter }),
+  schedule: (message: OutgoingMessage, sendAt: number) => invoke<void>("mail_schedule", { message, sendAt }),
+  rsvp: (messageId: number, accept: boolean) => invoke<void>("mail_rsvp", { messageId, accept }),
   reauth: (accountId: number) => invoke<Account>("mail_reauth", { accountId }),
   searchServer: (accountId: number, query: string) =>
     invoke<MessageSummary[]>("mail_search_server", { accountId, query }),
@@ -94,6 +100,7 @@ export const mail = {
   openDraft: (messageId: number) => invoke<DraftContent>("mail_open_draft", { messageId }),
   saveAttachment: (attachmentId: number, open: boolean) =>
     invoke<string>("mail_save_attachment", { attachmentId, open }),
+  unsubscribe: (messageId: number) => invoke<{ method: string }>("mail_unsubscribe", { messageId }),
   onSync: (cb: (ev: SyncEvent) => void): Promise<UnlistenFn> =>
     listen<SyncEvent>("mail://sync", (e) => cb(e.payload)),
 };
@@ -114,6 +121,8 @@ export const chat = {
   sendText: (peerId: number, body: string, replyTo?: string | null) =>
     invoke<ChatMessage>("chat_send_text", { peerId, body, replyTo: replyTo ?? null }),
   typing: (peerId: number) => invoke<void>("chat_typing", { peerId }),
+  react: (msgId: string, emoji: string) => invoke<ChatMessage | null>("chat_react", { msgId, emoji }),
+  edit: (msgId: string, body: string) => invoke<ChatMessage | null>("chat_edit", { msgId, body }),
   search: (peerId: number, query: string) => invoke<ChatMessage[]>("chat_search", { peerId, query }),
   nearby: () => invoke<Nearby[]>("chat_nearby"),
   addNearby: (peerId: string) => invoke<Peer>("chat_add_nearby", { peerId }),
@@ -126,6 +135,9 @@ export const chat = {
   stashBlob: (name: string, bytes: Uint8Array) =>
     invoke<string>("chat_stash_blob", bytes, { headers: { "x-file-name": encodeURIComponent(name) } }),
   filePreview: (path: string) => invoke<string | null>("chat_file_preview", { path }),
+  pauseTransfer: (transferId: string, pause: boolean) => invoke<void>("chat_pause_transfer", { transferId, pause }),
+  pin: (msgId: string, pinned: boolean) => invoke<ChatMessage | null>("chat_pin", { msgId, pinned }),
+  createGroup: (name: string, memberIds: number[]) => invoke<Peer>("chat_create_group", { name, memberIds }),
   deleteMessage: (msgId: string, forEveryone: boolean) =>
     invoke<void>("chat_delete_message", { msgId, forEveryone }),
   clearChat: (peerId: number, forEveryone: boolean) => invoke<void>("chat_clear_chat", { peerId, forEveryone }),
@@ -142,9 +154,17 @@ export const chat = {
     listen<ChatStatus>("chat://status", (e) => cb(e.payload)),
 };
 
+export type NavRoute =
+  | { kind: "chat"; peer: string }
+  | { kind: "mail"; accountId: number; threadId: string }
+  | { kind: "pair"; link: string };
+
 export const app = {
   quit: () => invoke<void>("app_quit"),
   setBadge: (count: number) => invoke<void>("app_set_badge", { count }),
+  /** Clickable OS notification; `route` is a conecta:// link. */
+  notify: (title: string, body: string, route?: string) => invoke<void>("app_notify", { title, body, route: route ?? null }),
+  onNavigate: (cb: (r: NavRoute) => void) => listen<NavRoute>("app://navigate", (e) => cb(e.payload)),
 };
 
 export function errorMessage(e: unknown): string {

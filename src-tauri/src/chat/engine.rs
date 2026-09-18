@@ -53,6 +53,7 @@ pub struct ChatEngine {
     /// Per-peer reconnect schedule: (failures so far, earliest next attempt).
     backoff: Mutex<HashMap<i64, (u32, std::time::Instant)>>,
     pub discovery: Mutex<Option<Arc<super::discovery::Discovery>>>,
+    paused: Mutex<HashSet<String>>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -103,6 +104,7 @@ impl ChatEngine {
             generation: AtomicU64::new(1),
             backoff: Mutex::new(HashMap::new()),
             discovery: Mutex::new(None),
+            paused: Mutex::new(HashSet::new()),
         }))
     }
 
@@ -434,10 +436,15 @@ impl ChatEngine {
 
     async fn on_control(&self, row_id: i64, msg: ControlMsg, out: &mpsc::Sender<Frame>) -> Result<()> {
         match msg {
-            ControlMsg::Text { msg_id, body, reply_to, .. } => {
+            ControlMsg::Text { msg_id, body, reply_to, group_id, .. } => {
+                let dest = if let Some(g) = group_id.as_deref() {
+                    self.store.bind_peer(None, g, "Group", "group", 0)?
+                } else {
+                    row_id
+                };
                 let m = self.store.insert_message(&NewMessage {
                     msg_id: &msg_id,
-                    peer_id: row_id,
+                    peer_id: dest,
                     direction: Direction::In,
                     kind: MessageKind::Text,
                     body: &body,
@@ -448,10 +455,11 @@ impl ChatEngine {
                     created_at: now_ms(),
                     reply_to: reply_to.as_deref(),
                 })?;
-                self.store.touch_peer(row_id)?;
+                self.store.touch_peer(dest)?;
                 self.emit_message(&m);
-                self.emit_peer(row_id);
+                self.emit_peer(dest);
                 let _ = out.send(Frame::Control(ControlMsg::Ack { msg_id })).await;
+                self.spawn_preview(m.msg_id.clone(), body);
             }
             ControlMsg::Ack { msg_id } => {
                 // Don't regress a message the peer already reported as read.
@@ -468,6 +476,25 @@ impl ChatEngine {
             ControlMsg::Read { msg_ids } => {
                 for m in self.store.set_status_many(&msg_ids, "read")? {
                     self.emit_message(&m);
+                }
+            }
+            ControlMsg::React { msg_id, emoji, add } => {
+                if let Some(m) = self.store.get_message(&msg_id)? {
+                    if m.peer_id == row_id {
+                        if let Some(m) = self.store.toggle_reaction(&msg_id, &emoji, "peer", Some(add))? {
+                            self.emit_message(&m);
+                        }
+                    }
+                }
+            }
+            ControlMsg::Edit { msg_id, body } => {
+                // Only the author may edit: the message must be one the peer sent us.
+                if let Some(m) = self.store.get_message(&msg_id)? {
+                    if m.peer_id == row_id && m.direction == Direction::In {
+                        if let Some(m) = self.store.edit_message(&msg_id, &body)? {
+                            self.emit_message(&m);
+                        }
+                    }
                 }
             }
             ControlMsg::Delete { msg_id } => {
@@ -506,6 +533,21 @@ impl ChatEngine {
                 let _ = out.send(Frame::Control(ControlMsg::Pong)).await;
             }
             ControlMsg::Pong | ControlMsg::Hello { .. } => {}
+            ControlMsg::FilePause { transfer_id } => {
+                self.paused.lock().unwrap().insert(transfer_id);
+            }
+            ControlMsg::FileResume { transfer_id } => {
+                self.paused.lock().unwrap().remove(&transfer_id);
+            }
+            ControlMsg::Pin { msg_id, pinned } => {
+                if let Some(m) = self.store.set_pinned(&msg_id, pinned)? {
+                    self.emit_message(&m);
+                }
+            }
+            ControlMsg::GroupInvite { group_id, name, .. } => {
+                let id = self.store.bind_peer(None, &group_id, &name, "group", 0)?;
+                let _ = self.store.mark_group(id);
+            }
             ControlMsg::FileOffer { .. }
             | ControlMsg::FileDone { .. }
             | ControlMsg::FileError { .. } => {
@@ -592,23 +634,35 @@ impl ChatEngine {
             reply_to,
         })?;
 
-        let frame = Frame::Control(ControlMsg::Text {
-            msg_id: msg_id.clone(),
-            body: body.to_string(),
-            sent_at: now,
-            reply_to: reply_to.map(str::to_string),
-        });
-        let sent = match self.connect_peer(row_id).await {
-            Ok(tx) => tx.send(frame).await.is_ok(),
-            Err(e) => {
-                tracing::debug!(row_id, %e, "peer unreachable");
-                false
-            }
+        let gid = if self.store.is_group(row_id).unwrap_or(false) {
+            self.store.get_peer(row_id).ok().and_then(|p| p.peer_id)
+        } else {
+            None
         };
-        if sent {
+        let targets: Vec<i64> = if gid.is_some() {
+            self.store.group_members(row_id).unwrap_or_default()
+        } else {
+            vec![row_id]
+        };
+        let mut any = false;
+        for id in targets {
+            let frame = Frame::Control(ControlMsg::Text {
+                msg_id: msg_id.clone(),
+                body: body.to_string(),
+                sent_at: now,
+                reply_to: reply_to.map(str::to_string),
+                group_id: gid.clone(),
+            });
+            let sent = match self.connect_peer(id).await {
+                Ok(tx) => tx.send(frame).await.is_ok(),
+                Err(_) => false,
+            };
+            any |= sent;
+        }
+        self.spawn_preview(msg_id.clone(), body.to_string());
+        if any {
             Ok(msg)
         } else {
-            // Keep it; it goes out automatically when the peer comes back.
             let queued = self.store.set_status(&msg_id, "queued")?.unwrap_or(msg);
             self.emit_message(&queued);
             Ok(queued)
@@ -624,6 +678,7 @@ impl ChatEngine {
                 body: m.body.clone(),
                 sent_at: m.created_at,
                 reply_to: m.reply_to.clone(),
+                group_id: None,
             });
             if tx.send(frame).await.is_err() {
                 break;
@@ -632,6 +687,46 @@ impl ChatEngine {
                 self.emit_message(&m);
             }
         }
+    }
+
+    /// Toggles my reaction and tells the peer.
+    pub async fn react(self: &Arc<Self>, msg_id: &str, emoji: &str) -> Result<Option<ChatMessage>> {
+        let Some(m) = self.store.toggle_reaction(msg_id, emoji, "me", None)? else { return Ok(None) };
+        let add = m.reactions.get(emoji).map_or(false, |v| v.iter().any(|w| w == "me"));
+        if let Ok(tx) = self.connect_peer(m.peer_id).await {
+            let _ = tx
+                .send(Frame::Control(ControlMsg::React {
+                    msg_id: msg_id.to_string(),
+                    emoji: emoji.to_string(),
+                    add,
+                }))
+                .await;
+        }
+        self.emit_message(&m);
+        Ok(Some(m))
+    }
+
+    /// Edits one of my own text messages and tells the peer.
+    pub async fn edit(self: &Arc<Self>, msg_id: &str, body: &str) -> Result<Option<ChatMessage>> {
+        let Some(existing) = self.store.get_message(msg_id)? else { return Ok(None) };
+        if existing.direction != Direction::Out || existing.kind != MessageKind::Text {
+            return Err(AppError::Other("only your own text messages can be edited".into()));
+        }
+        let body = body.trim();
+        if body.is_empty() {
+            return Err(AppError::Other("message is empty".into()));
+        }
+        let Some(m) = self.store.edit_message(msg_id, body)? else { return Ok(None) };
+        if let Ok(tx) = self.connect_peer(m.peer_id).await {
+            let _ = tx
+                .send(Frame::Control(ControlMsg::Edit {
+                    msg_id: msg_id.to_string(),
+                    body: body.to_string(),
+                }))
+                .await;
+        }
+        self.emit_message(&m);
+        Ok(Some(m))
     }
 
     pub async fn send_typing(self: &Arc<Self>, row_id: i64) {
@@ -767,6 +862,7 @@ impl ChatEngine {
                 },
             )
             .await?;
+            self.wait_unpaused(transfer_id).await;
             done += n as u64;
             if done - last_emit >= 1024 * 1024 {
                 last_emit = done;
@@ -904,6 +1000,7 @@ impl ChatEngine {
         let mut done = 0u64;
         let mut last_emit = 0u64;
         loop {
+            self.wait_unpaused(transfer_id).await;
             let frame = tokio::time::timeout(Duration::from_secs(60), protocol::read_frame(stream))
                 .await
                 .map_err(|_| AppError::Other("transfer stalled".into()))??;
@@ -937,6 +1034,72 @@ impl ChatEngine {
             )));
         }
         Ok(())
+    }
+
+    async fn wait_unpaused(&self, transfer_id: &str) {
+        loop {
+            if !self.paused.lock().unwrap().contains(transfer_id) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    pub fn pause_transfer(&self, transfer_id: &str, pause: bool) {
+        let mut g = self.paused.lock().unwrap();
+        if pause {
+            g.insert(transfer_id.to_string());
+        } else {
+            g.remove(transfer_id);
+        }
+    }
+
+    pub async fn pin_message(self: &Arc<Self>, msg_id: &str, pinned: bool) -> Result<Option<ChatMessage>> {
+        let Some(m) = self.store.set_pinned(msg_id, pinned)? else { return Ok(None) };
+        if let Ok(tx) = self.connect_peer(m.peer_id).await {
+            let _ = tx
+                .send(Frame::Control(ControlMsg::Pin {
+                    msg_id: msg_id.to_string(),
+                    pinned,
+                }))
+                .await;
+        }
+        self.emit_message(&m);
+        Ok(Some(m))
+    }
+
+    pub async fn create_group(self: &Arc<Self>, name: &str, member_ids: Vec<i64>) -> Result<Peer> {
+        let peer = self.store.create_group(name.trim(), &member_ids)?;
+        let gid = peer.peer_id.clone().unwrap_or_default();
+        let members: Vec<String> = member_ids
+            .iter()
+            .filter_map(|id| self.store.get_peer(*id).ok()?.peer_id)
+            .collect();
+        for id in member_ids {
+            if let Ok(tx) = self.connect_peer(id).await {
+                let _ = tx
+                    .send(Frame::Control(ControlMsg::GroupInvite {
+                        group_id: gid.clone(),
+                        name: name.to_string(),
+                        members: members.clone(),
+                    }))
+                    .await;
+            }
+        }
+        Ok(peer)
+    }
+
+    fn spawn_preview(&self, msg_id: String, body: String) {
+        let store = self.store.clone();
+        let app = self.app.clone();
+        tauri::async_runtime::spawn(async move {
+            let Some(url) = first_http_url(&body) else { return };
+            if let Some(preview) = fetch_preview(&url).await {
+                if let Ok(Some(m)) = store.set_preview(&msg_id, &preview) {
+                    let _ = app.emit(EVENT_MESSAGE, m);
+                }
+            }
+        });
     }
 
     pub fn download_dir(&self) -> Result<PathBuf> {
@@ -983,4 +1146,34 @@ fn local_addresses() -> Vec<String> {
         }
     }
     out
+}
+
+fn first_http_url(body: &str) -> Option<String> {
+    body.split_whitespace().find_map(|w| {
+        let w = w.trim_end_matches(|c: char| matches!(c, '.' | ',' | ')' | ']' | '>'));
+        if w.starts_with("http://") || w.starts_with("https://") {
+            Some(w.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+async fn fetch_preview(url: &str) -> Option<LinkPreview> {
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(6)).build().ok()?;
+    let html = client.get(url).send().await.ok()?.text().await.ok()?;
+    let pick = |name: &str| -> Option<String> {
+        let pat = format!("property=\"og:{name}\"");
+        let idx = html.find(&pat).or_else(|| html.find(&format!("name=\"og:{name}\"")))?;
+        let slice = &html[idx..idx.saturating_add(400).min(html.len())];
+        let start = slice.find("content=\"")? + 9;
+        let end = slice[start..].find('"')?;
+        Some(slice[start..start + end].to_string())
+    };
+    Some(LinkPreview {
+        url: url.to_string(),
+        title: pick("title"),
+        description: pick("description"),
+        image: pick("image"),
+    })
 }

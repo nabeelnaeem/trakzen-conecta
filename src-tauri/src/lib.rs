@@ -2,6 +2,7 @@ mod chat;
 mod db;
 mod error;
 mod mail;
+mod notify;
 mod secrets;
 mod settings;
 mod util;
@@ -39,6 +40,8 @@ pub struct SettingsPatch {
     chat_download_dir: Option<String>,
     mail_show_images: Option<bool>,
     mail_signature: Option<String>,
+    /// account id → signature; `None` value removes the override.
+    account_signatures: Option<std::collections::HashMap<i64, Option<String>>>,
     mail_poll_seconds: Option<u64>,
     close_to_tray: Option<bool>,
     notifications: Option<bool>,
@@ -47,6 +50,7 @@ pub struct SettingsPatch {
     sound_chat: Option<String>,
     conversation_view: Option<bool>,
     undo_send_seconds: Option<u64>,
+    mail_templates: Option<String>,
 }
 
 #[tauri::command]
@@ -63,7 +67,11 @@ async fn settings_update(
         settings::set(&state.db, settings::GOOGLE_CLIENT_ID, v.trim())?;
     }
     if let Some(v) = patch.google_client_secret {
-        settings::set(&state.db, settings::GOOGLE_CLIENT_SECRET, v.trim())?;
+        if v.trim().is_empty() {
+            secrets::delete(secrets::GOOGLE_CLIENT_SECRET)?;
+        } else {
+            secrets::set(secrets::GOOGLE_CLIENT_SECRET, v.trim())?;
+        }
     }
     if let Some(v) = patch.chat_display_name {
         state.chat.set_display_name(&v)?;
@@ -81,6 +89,17 @@ async fn settings_update(
     }
     if let Some(v) = patch.mail_signature {
         settings::set(&state.db, settings::MAIL_SIGNATURE, v.trim_end())?;
+    }
+    if let Some(map) = patch.account_signatures {
+        for (id, sig) in map {
+            let key = settings::account_signature_key(id);
+            match sig {
+                Some(s) => settings::set(&state.db, &key, s.trim_end())?,
+                None => {
+                    state.db.conn().execute("DELETE FROM settings WHERE key = ?1", rusqlite::params![key])?;
+                }
+            }
+        }
     }
     if let Some(v) = patch.mail_poll_seconds {
         // Picked up by the poll loop on its next tick; 0 pauses it.
@@ -108,20 +127,26 @@ async fn settings_update(
     if let Some(v) = patch.undo_send_seconds {
         settings::set(&state.db, settings::UNDO_SEND_SECONDS, &v.min(60).to_string())?;
     }
+    if let Some(v) = patch.mail_templates {
+        settings::set(&state.db, settings::MAIL_TEMPLATES, v.trim())?;
+    }
     settings::view(&state.db)
 }
 
 fn show_main(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.unminimize();
-        let _ = w.show();
-        let _ = w.set_focus();
-    }
+    notify::focus_main(app);
 }
 
 #[tauri::command]
 async fn app_quit(app: AppHandle) {
     app.exit(0);
+}
+
+/// Clickable desktop notification; `route` is a conecta:// link to open.
+#[tauri::command]
+async fn app_notify(app: AppHandle, title: String, body: String, route: Option<String>) {
+    let r = route.as_deref().and_then(notify::parse_route);
+    notify::show(&app, &title, &body, r);
 }
 
 /// Unread total shown on the tray tooltip and window title.
@@ -139,6 +164,7 @@ async fn app_set_badge(app: AppHandle, count: u32) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    notify::set_app_user_model_id();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -147,6 +173,18 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        // Must be first: a second launch (e.g. from a conecta:// link or a
+        // notification while the app is closed) hands its arguments to the
+        // running instance and exits.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            let urls: Vec<String> = args.into_iter().filter(|a| a.starts_with("conecta://")).collect();
+            if urls.is_empty() {
+                notify::open_route(app, None);
+            } else {
+                notify::handle_urls(app, &urls);
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -154,6 +192,7 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(|window, event| {
             // Closing the main window hides it to the tray unless the user
             // turned that off; the tray menu has an explicit Quit.
@@ -206,6 +245,9 @@ pub fn run() {
             };
             let db = Arc::new(Db::open(&data_dir)?);
             tracing::info!(path = %data_dir.join(db::DB_FILE_NAME).display(), "database ready");
+            if let Err(e) = settings::migrate_secret_to_keyring(&db) {
+                tracing::warn!(%e, "could not move client secret to the credential store");
+            }
 
             let chat = ChatEngine::new(app.handle().clone(), db.clone())?;
             let state = AppState {
@@ -213,6 +255,7 @@ pub fn run() {
                 mail: MailStore::new(db.clone()),
                 providers: Providers {
                     gmail: Arc::new(mail::gmail::GmailProvider::new(db.clone())),
+                    imap: Arc::new(mail::imap::ImapProvider::new(db.clone())),
                 },
                 chat: chat.clone(),
                 sync_guard: Default::default(),
@@ -222,6 +265,31 @@ pub fn run() {
             app.manage(state);
             chat.start();
 
+            // conecta:// links: register the scheme for dev builds (installers
+            // do it themselves), route ones we were launched with, and listen
+            // for later ones.
+            #[cfg(any(windows, target_os = "linux"))]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                if cfg!(debug_assertions) {
+                    let _ = app.deep_link().register_all();
+                }
+                if let Ok(Some(urls)) = app.deep_link().get_current() {
+                    let list: Vec<String> = urls.iter().map(|u| u.to_string()).collect();
+                    let handle = app.handle().clone();
+                    // The webview is not up yet; give it a moment before routing.
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                        notify::handle_urls(&handle, &list);
+                    });
+                }
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    let list: Vec<String> = event.urls().iter().map(|u| u.to_string()).collect();
+                    notify::handle_urls(&handle, &list);
+                });
+            }
+
             // Refresh every account in the background at launch; the UI
             // renders from the local cache immediately.
             let handle = app.handle().clone();
@@ -229,6 +297,11 @@ pub fn run() {
                 Ok(n) if n > 0 => tracing::info!(messages = n, "built contacts from cached mail"),
                 Ok(_) => {}
                 Err(e) => tracing::warn!(%e, "contact backfill failed"),
+            }
+            if let Ok(n) = handle.state::<AppState>().mail.reclean_snippets() {
+                if n > 0 {
+                    tracing::info!(rows = n, "re-cleaned cached snippets");
+                }
             }
             let accounts = handle.state::<AppState>().mail.list_accounts()?;
             for a in accounts {
@@ -248,6 +321,7 @@ pub fn run() {
                     if !due.is_empty() {
                         let _ = snoozer.emit("mail://unsnoozed", &due);
                     }
+                    mail::commands::flush_outbox(&snoozer).await;
                 }
             });
 
@@ -291,8 +365,10 @@ pub fn run() {
             mail::commands::mail_create_label,
             mail::commands::mail_create_filter,
             mail::commands::mail_delete_filter,
+            mail::commands::mail_update_filter,
             mail::commands::mail_reauth,
             mail::commands::mail_search_server,
+            mail::commands::mail_unsubscribe,
             mail::commands::mail_snooze,
             mail::commands::mail_unsnooze,
             mail::commands::mail_list_snoozed,
@@ -301,6 +377,7 @@ pub fn run() {
             mail::commands::mail_open_draft,
             mail::commands::mail_list_accounts,
             mail::commands::mail_add_account,
+            mail::commands::mail_add_imap,
             mail::commands::mail_remove_account,
             mail::commands::mail_sync,
             mail::commands::mail_list_messages,
@@ -313,6 +390,8 @@ pub fn run() {
             mail::commands::mail_compose_draft,
             mail::commands::mail_send,
             mail::commands::mail_save_attachment,
+            mail::commands::mail_schedule,
+            mail::commands::mail_rsvp,
             mail::commands::mail_list_labels,
             mail::commands::mail_modify_labels,
             mail::commands::mail_fetch_more,
@@ -332,16 +411,22 @@ pub fn run() {
             chat::commands::chat_open_file,
             chat::commands::chat_stash_blob,
             chat::commands::chat_file_preview,
+            chat::commands::chat_pause_transfer,
+            chat::commands::chat_pin,
+            chat::commands::chat_create_group,
             chat::commands::chat_delete_message,
             chat::commands::chat_clear_chat,
             chat::commands::chat_storage_stats,
             chat::commands::chat_clear_storage,
             chat::commands::chat_typing,
+            chat::commands::chat_react,
+            chat::commands::chat_edit,
             chat::commands::chat_search,
             chat::commands::chat_nearby,
             chat::commands::chat_add_nearby,
             chat::commands::chat_pairing_qr,
             app_set_badge,
+            app_notify,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -24,6 +24,8 @@ pub struct Peer {
     pub unread: i64,
     pub last_message: Option<String>,
     pub last_message_at: Option<i64>,
+    #[serde(default)]
+    pub is_group: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +77,22 @@ pub struct ChatMessage {
     pub status: String,
     pub created_at: i64,
     pub reply_to: Option<String>,
+    /// emoji → who reacted, as seen from this machine ("me" / "peer").
+    pub reactions: std::collections::HashMap<String, Vec<String>>,
+    pub edited_at: Option<i64>,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub preview: Option<LinkPreview>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkPreview {
+    pub url: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

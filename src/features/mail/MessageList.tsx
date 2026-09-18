@@ -1,9 +1,10 @@
 import { useMail } from "./store";
 import { LabelChip } from "./LabelChip";
-import { Avatar } from "./Avatar";
+import { SenderAvatar } from "./SenderAvatar";
 import { shortDate } from "../../lib/format";
 import { Spinner } from "../../lib/Spinner";
 import type { SnoozedMessage } from "../../lib/types";
+import { Paperclip, Star } from "lucide-react";
 
 export function MessageList() {
   const {
@@ -75,24 +76,24 @@ export function MessageList() {
                 aria-label="Select"
               />
               <button
-                className={`text-base leading-none ${m.isStarred ? "text-amber-500" : "text-gray-300 hover:text-gray-500"}`}
+                className={`leading-none ${m.isStarred ? "text-amber-500" : "text-gray-300 hover:text-gray-500"}`}
                 onClick={(e) => {
                   e.stopPropagation();
                   void toggleStar(m);
                 }}
                 aria-label={m.isStarred ? "Unstar" : "Star"}
               >
-                ★
+                <Star size={15} fill={m.isStarred ? "currentColor" : "none"} />
               </button>
             </div>
-            <Avatar name={m.fromName || m.fromAddr} seed={m.fromAddr} />
+            <SenderAvatar name={m.fromName} email={m.fromAddr} />
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <span className={`min-w-0 flex-1 truncate ${unread ? "font-semibold text-gray-900" : "text-gray-700"}`}>
                   {m.fromName || m.fromAddr}
                   {m.threadCount > 1 && <span className="ml-1 font-normal text-gray-500">{m.threadCount}</span>}
                 </span>
-                {m.hasAttachments && <span className="text-gray-400" title="Has attachments">📎</span>}
+                {m.hasAttachments && <Paperclip size={13} className="text-gray-400" aria-label="Has attachments" />}
                 <span className={`shrink-0 text-xs ${unread ? "font-semibold text-gray-800" : "text-gray-500"}`}>
                   {until ? `⏰ ${shortDate(until)}` : shortDate(m.date)}
                 </span>

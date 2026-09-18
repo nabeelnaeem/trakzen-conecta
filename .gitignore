@@ -29,3 +29,7 @@ logs
 # Per-machine pnpm overrides (e.g. minimum-release-age)
 .npmrc
 pnpm-workspace.yaml
+
+# Updater signing private key (public key lives in tauri.conf.json)
+*.key
+src-tauri/.updater.key

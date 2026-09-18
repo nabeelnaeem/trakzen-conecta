@@ -14,6 +14,9 @@ importers:
       '@tauri-apps/plugin-autostart':
         specifier: ^2.5.1
         version: 2.5.1
+      '@tauri-apps/plugin-deep-link':
+        specifier: ^2.4.10
+        version: 2.4.10
       '@tauri-apps/plugin-dialog':
         specifier: ^2.7.3
         version: 2.7.3
@@ -23,6 +26,15 @@ importers:
       '@tauri-apps/plugin-opener':
         specifier: ^2
         version: 2.5.5
+      '@tauri-apps/plugin-updater':
+        specifier: ^2.11.0
+        version: 2.11.0
+      highlight.js:
+        specifier: ^11.12.0
+        version: 11.12.0
+      lucide-react:
+        specifier: ^1.47.0
+        version: 1.47.0(react@19.3.0)
       react:
         specifier: ^19.1.0
         version: 19.3.0
@@ -342,6 +354,9 @@ packages:
   '@tauri-apps/plugin-autostart@2.5.1':
     resolution: {integrity: sha512-zS/xx7yzveCcotkA+8TqkI2lysmG2wvQXv2HGAVExITmnFfHAdj1arGsbbfs3o6EktRHf6l34pJxc3YGG2mg7w==}
 
+  '@tauri-apps/plugin-deep-link@2.4.10':
+    resolution: {integrity: sha512-SuXI47ORUzYuwG6c8dluLDrStTvli5bAZDRa2+VuUEzK/9TEa7FZz7UKXBQriL7+CPFXRHQsz5tSocc47tRXQQ==}
+
   '@tauri-apps/plugin-dialog@2.7.3':
     resolution: {integrity: sha512-CRgE+7TP4tvq9MjBU6f04NLTFIqVMLKHk3hAqlhil00ngK9ACTrXPH3oHpKMProxILodd3YjBoKbMwSI4IEcfA==}
 
@@ -350,6 +365,9 @@ packages:
 
   '@tauri-apps/plugin-opener@2.5.5':
     resolution: {integrity: sha512-xvzGai5aQds8j8R8RsUK/lW6pGG50YgOYIPLzvkqmkwAj7dfySOD7sGtejRzvVdMmv1EQfKVEFh1MvmDp8QR0g==}
+
+  '@tauri-apps/plugin-updater@2.11.0':
+    resolution: {integrity: sha512-AE36XkOoSna24G40jZMY15nzAnkXEPL/73tGoseGrtGOHuI/cZwWzHpZFLjKXDPgzYZ435z1gHu28LgrsBwIxQ==}
 
   '@types/node@22.20.3':
     resolution: {integrity: sha512-DZmzkmwHzXrLPAXPyKNDzlIwMMUZCVacoD25ywdy5YTKGbOx/2ld+Q38Im2zJ0vBuZP5Prd3VZutKZyXwkOS8A==}
@@ -405,6 +423,10 @@ packages:
 
   graceful-fs@4.2.11:
     resolution: {integrity: sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==}
+
+  highlight.js@11.12.0:
+    resolution: {integrity: sha512-nbfWpyRMcMrPMmDwJB+dhX/eiaPKtc2RB+0QZskqJ3WjRA/FDS0e9hZrx8EC/lbEv8gXy98FcDbNa/dspAaJMg==}
+    engines: {node: '>=12.0.0'}
 
   jiti@2.7.0:
     resolution: {integrity: sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==}
@@ -549,6 +571,11 @@ packages:
   lightningcss@1.33.0:
     resolution: {integrity: sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==}
     engines: {node: '>= 12.0.0'}
+
+  lucide-react@1.47.0:
+    resolution: {integrity: sha512-o8C23aXpNQypRY73W7fW02EyvWJinEMXgKeGjFoKym0zj3Q73hD97A1IQps1g8C14HTGsOpZL0Am+xjfgFZAbg==}
+    peerDependencies:
+      react: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
 
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
@@ -861,6 +888,10 @@ snapshots:
     dependencies:
       '@tauri-apps/api': 2.11.1
 
+  '@tauri-apps/plugin-deep-link@2.4.10':
+    dependencies:
+      '@tauri-apps/api': 2.11.1
+
   '@tauri-apps/plugin-dialog@2.7.3':
     dependencies:
       '@tauri-apps/api': 2.11.1
@@ -870,6 +901,10 @@ snapshots:
       '@tauri-apps/api': 2.11.1
 
   '@tauri-apps/plugin-opener@2.5.5':
+    dependencies:
+      '@tauri-apps/api': 2.11.1
+
+  '@tauri-apps/plugin-updater@2.11.0':
     dependencies:
       '@tauri-apps/api': 2.11.1
 
@@ -907,6 +942,8 @@ snapshots:
     optional: true
 
   graceful-fs@4.2.11: {}
+
+  highlight.js@11.12.0: {}
 
   jiti@2.7.0: {}
 
@@ -1007,6 +1044,10 @@ snapshots:
       lightningcss-linux-x64-musl: 1.33.0
       lightningcss-win32-arm64-msvc: 1.33.0
       lightningcss-win32-x64-msvc: 1.33.0
+
+  lucide-react@1.47.0(react@19.3.0):
+    dependencies:
+      react: 19.3.0
 
   magic-string@0.30.21:
     dependencies:

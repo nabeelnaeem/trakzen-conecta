@@ -1,8 +1,97 @@
 @import "tailwindcss";
 
+/*
+ * Theming. Tailwind v4 utilities read their colours from CSS variables
+ * (`bg-gray-50` → `var(--color-gray-50)`), so a theme is just a block that
+ * redefines those variables under `[data-theme]`. Components keep using
+ * the ordinary gray/blue utilities; `--color-white` is the panel surface.
+ * See src/lib/theme.ts for how the attributes are set.
+ */
+
 @theme {
-  --font-sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  --font-sans: var(--app-font, ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif);
+  --color-bubble-own: var(--bubble-own);
+  --color-bubble-peer: var(--bubble-peer);
+  --color-bubble-own-fg: var(--bubble-own-fg);
+  --color-bubble-peer-fg: var(--bubble-peer-fg);
+  /* Text on accent-coloured surfaces; stays white in every theme. */
+  --color-on-accent: #ffffff;
 }
+
+:root {
+  --radius: 0.375rem;
+  --bubble-own: var(--color-blue-600);
+  --bubble-own-fg: #ffffff;
+  --bubble-peer: var(--color-gray-100);
+  --bubble-peer-fg: var(--color-gray-900);
+}
+
+[data-theme="dark"] {
+  --color-white: #171c26;
+  --color-black: #ffffff;
+  --color-gray-50: #10141b;
+  --color-gray-100: #1f2633;
+  --color-gray-200: #2a3342;
+  --color-gray-300: #3a4556;
+  --color-gray-400: #6b7788;
+  --color-gray-500: #8d98a8;
+  --color-gray-600: #aab4c2;
+  --color-gray-700: #c7cfda;
+  --color-gray-800: #dfe5ee;
+  --color-gray-900: #f1f4f8;
+  --color-blue-50: #16223b;
+  --color-blue-100: #1b2c4f;
+  --color-blue-800: #a9c4ff;
+  --color-blue-900: #c6d8ff;
+  --color-red-50: #3a1a1c;
+  --color-red-200: #6b2b30;
+  --color-red-800: #ffb4b8;
+  --color-green-50: #16301f;
+  --color-green-800: #a6e3b8;
+  --color-amber-50: #3a2d10;
+  --color-amber-900: #ffe2a6;
+  --bubble-peer: #232c3b;
+  --bubble-peer-fg: #f1f4f8;
+}
+
+[data-theme="contrast"] {
+  --color-white: #ffffff;
+  --color-gray-50: #ffffff;
+  --color-gray-100: #f2f2f2;
+  --color-gray-200: #000000;
+  --color-gray-300: #000000;
+  --color-gray-400: #333333;
+  --color-gray-500: #222222;
+  --color-gray-600: #111111;
+  --color-gray-700: #000000;
+  --color-gray-800: #000000;
+  --color-gray-900: #000000;
+  --color-blue-50: #e5eeff;
+  --color-blue-100: #cfe0ff;
+  --color-blue-600: #0000d6;
+  --color-blue-700: #0000a8;
+  --color-blue-800: #00007a;
+  --color-blue-900: #000055;
+  --bubble-peer: #e8e8e8;
+  --bubble-peer-fg: #000000;
+}
+
+/* Accent: the three shades every button, badge, tab and bubble uses. */
+[data-accent="indigo"] { --color-blue-500: #6366f1; --color-blue-600: #4f46e5; --color-blue-700: #4338ca; }
+[data-accent="violet"] { --color-blue-500: #8b5cf6; --color-blue-600: #7c3aed; --color-blue-700: #6d28d9; }
+[data-accent="teal"] { --color-blue-500: #14b8a6; --color-blue-600: #0d9488; --color-blue-700: #0f766e; }
+[data-accent="emerald"] { --color-blue-500: #10b981; --color-blue-600: #059669; --color-blue-700: #047857; }
+[data-accent="rose"] { --color-blue-500: #f43f5e; --color-blue-600: #e11d48; --color-blue-700: #be123c; }
+[data-accent="orange"] { --color-blue-500: #f97316; --color-blue-600: #ea580c; --color-blue-700: #c2410c; }
+
+[data-density="compact"] {
+  --spacing: 0.2rem;
+  font-size: 13px;
+}
+
+[data-font="inter"] { --app-font: "Inter", "Segoe UI", system-ui, sans-serif; }
+[data-font="serif"] { --app-font: Georgia, "Times New Roman", serif; }
+[data-font="mono"] { --app-font: ui-monospace, "Cascadia Code", "Fira Code", Consolas, monospace; }
 
 html,
 body,
@@ -12,26 +101,30 @@ body,
   overflow: hidden;
   font-family: var(--font-sans);
   font-size: 14px;
-  color: #1f2328;
-  background: #f6f8fa;
+  color: var(--color-gray-900);
+  background: var(--color-gray-50);
   -webkit-font-smoothing: antialiased;
 }
 
-/* Native-feeling scrollbars stay; just make them quieter. */
 *::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 *::-webkit-scrollbar-thumb {
-  background: #d0d7de;
+  background: var(--color-gray-300);
   border-radius: 6px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
 *::-webkit-scrollbar-thumb:hover {
-  background: #b0b8c0;
+  background: var(--color-gray-400);
   background-clip: content-box;
   border: 2px solid transparent;
+}
+
+select,
+input[type="datetime-local"] {
+  color-scheme: inherit;
 }
 
 @layer components {
@@ -39,13 +132,16 @@ body,
     @apply inline-flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-800 transition-colors hover:bg-gray-50 active:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 disabled:opacity-50 disabled:cursor-not-allowed;
   }
   .btn-primary {
-    @apply border-blue-600 bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800;
+    @apply border-blue-600 bg-blue-600 text-on-accent hover:bg-blue-700 active:bg-blue-800;
   }
   .btn-ghost {
     @apply border-transparent bg-transparent hover:bg-gray-200 active:bg-gray-300;
   }
+  .btn-danger {
+    @apply hover:border-red-300 hover:bg-red-50 hover:text-red-700;
+  }
   .input {
-    @apply w-full rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-sm outline-none transition-shadow focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30;
+    @apply w-full rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-sm text-gray-900 outline-none transition-shadow placeholder:text-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30;
   }
   .label {
     @apply mb-1 block text-xs font-medium text-gray-600;
@@ -60,13 +156,16 @@ body,
   @apply bg-white/20;
 }
 .md .md-codewrap {
-  @apply my-1 overflow-hidden rounded-md bg-gray-900 text-gray-100;
+  @apply my-1 overflow-hidden rounded-md bg-[#0f1219] text-gray-100;
+  color: #e6edf3;
 }
 .md .md-codebar {
-  @apply flex items-center justify-between border-b border-white/10 px-3 py-1 text-[10px] uppercase tracking-wide text-gray-400;
+  @apply flex items-center justify-between border-b border-white/10 px-3 py-1 text-[10px] uppercase tracking-wide;
+  color: #8b949e;
 }
 .md .md-copy {
-  @apply rounded px-1.5 py-0.5 normal-case tracking-normal text-gray-300 hover:bg-white/10 hover:text-white;
+  @apply rounded px-1.5 py-0.5 normal-case tracking-normal hover:bg-white/10;
+  color: #c9d1d9;
 }
 .md pre.md-pre {
   @apply m-0 overflow-x-auto px-3 py-2 font-mono text-[12px] leading-5;
@@ -90,3 +189,15 @@ body,
 .md strong {
   font-weight: 600;
 }
+
+/* highlight.js (github-dark-ish, kept small) */
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-section, .hljs-link { color: #ff7b72; }
+.hljs-function .hljs-keyword { color: #ff7b72; }
+.hljs-string, .hljs-attr, .hljs-template-tag, .hljs-regexp { color: #a5d6ff; }
+.hljs-number, .hljs-symbol, .hljs-bullet, .hljs-meta { color: #79c0ff; }
+.hljs-title, .hljs-title.function_, .hljs-title.class_ { color: #d2a8ff; }
+.hljs-comment, .hljs-quote { color: #8b949e; font-style: italic; }
+.hljs-variable, .hljs-template-variable, .hljs-type, .hljs-built_in { color: #ffa657; }
+.hljs-name, .hljs-tag { color: #7ee787; }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }

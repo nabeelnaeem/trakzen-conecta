@@ -4,12 +4,14 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
     Gmail,
+    Imap,
 }
 
 impl ProviderKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             ProviderKind::Gmail => "gmail",
+            ProviderKind::Imap => "imap",
         }
     }
 }
@@ -135,6 +137,11 @@ pub struct MailFilter {
     pub add_labels: Vec<String>,
     pub remove_labels: Vec<String>,
     pub forward: Option<String>,
+    /// Raw label ids, kept so a filter can be edited (names above are for display).
+    #[serde(default)]
+    pub add_label_ids: Vec<String>,
+    #[serde(default)]
+    pub remove_label_ids: Vec<String>,
 }
 
 /// A server-side draft opened for editing.
@@ -225,6 +232,10 @@ pub struct MessageDetail {
     pub message_id_hdr: Option<String>,
     pub references_hdr: Option<String>,
     pub attachments: Vec<AttachmentInfo>,
+    /// Present when the sender offers a mailing-list unsubscribe.
+    pub can_unsubscribe: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite: Option<super::ics::CalendarInvite>,
 }
 
 /// Metadata for one message as reported by a provider.
@@ -245,6 +256,8 @@ pub struct RemoteMessage {
     pub has_attachments: bool,
     pub message_id_hdr: Option<String>,
     pub references_hdr: Option<String>,
+    pub list_unsubscribe: Option<String>,
+    pub list_unsubscribe_post: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -273,6 +286,7 @@ pub struct FlagChange {
 #[serde(rename_all = "camelCase")]
 pub struct NewMailInfo {
     pub id: i64,
+    pub thread_id: Option<String>,
     pub from_name: String,
     pub subject: String,
 }

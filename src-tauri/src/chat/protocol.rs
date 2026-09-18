@@ -46,12 +46,25 @@ pub enum ControlMsg {
         sent_at: i64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply_to: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_id: Option<String>,
     },
     /// The peer is composing; UI shows "typing…" briefly.
     Typing,
     /// Receiver has displayed these messages.
     Read {
         msg_ids: Vec<String>,
+    },
+    /// Toggle an emoji reaction on a message.
+    React {
+        msg_id: String,
+        emoji: String,
+        add: bool,
+    },
+    /// Sender changed the text of one of their own messages.
+    Edit {
+        msg_id: String,
+        body: String,
     },
     Ack {
         msg_id: String,
@@ -68,6 +81,21 @@ pub enum ControlMsg {
     FileError {
         transfer_id: String,
         reason: String,
+    },
+    FilePause {
+        transfer_id: String,
+    },
+    FileResume {
+        transfer_id: String,
+    },
+    Pin {
+        msg_id: String,
+        pinned: bool,
+    },
+    GroupInvite {
+        group_id: String,
+        name: String,
+        members: Vec<String>,
     },
     /// Sender retracted a message ("delete for everyone").
     Delete {
@@ -154,6 +182,7 @@ mod tests {
                 body: "héllo".into(),
                 sent_at: 42,
                 reply_to: None,
+                group_id: None,
             }),
             Frame::Chunk {
                 transfer_id: transfer_id_bytes(&id),

@@ -132,7 +132,9 @@ impl GmailApi {
             .await
             .map_err(ApiError::Other)?;
         match status {
-            200 => serde_json::from_str(&body).map_err(|e| ApiError::Other(e.into())),
+            // 204 (e.g. an account with no filters) has no body at all.
+            200..=299 if body.trim().is_empty() => Ok(Value::Null),
+            200..=299 => serde_json::from_str(&body).map_err(|e| ApiError::Other(e.into())),
             404 => Err(ApiError::NotFound),
             status => Err(ApiError::Other(provider_error(status, &body))),
         }
@@ -440,6 +442,8 @@ impl GmailApi {
             ("metadataHeaders", "Subject"),
             ("metadataHeaders", "Message-ID"),
             ("metadataHeaders", "References"),
+            ("metadataHeaders", "List-Unsubscribe"),
+            ("metadataHeaders", "List-Unsubscribe-Post"),
         ];
         match self.get_json_raw(token, &format!("messages/{id}"), &q).await {
             Ok(v) => Ok(Some(parse_metadata(&v))),
@@ -547,6 +551,8 @@ fn parse_filter(f: &Value) -> MailFilter {
         add_labels: strings(&a["addLabelIds"]),
         remove_labels: strings(&a["removeLabelIds"]),
         forward: a["forward"].as_str().map(str::to_string),
+        add_label_ids: strings(&a["addLabelIds"]),
+        remove_label_ids: strings(&a["removeLabelIds"]),
     }
 }
 
@@ -607,7 +613,7 @@ pub fn parse_metadata(v: &Value) -> RemoteMessage {
         from_addr,
         to_addrs: header(payload, "To").unwrap_or_default().to_string(),
         cc_addrs: header(payload, "Cc").unwrap_or_default().to_string(),
-        snippet: decode_entities(v["snippet"].as_str().unwrap_or_default()),
+        snippet: clean_snippet(v["snippet"].as_str().unwrap_or_default()),
         date: v["internalDate"]
             .as_str()
             .and_then(|d| d.parse().ok())
@@ -617,6 +623,8 @@ pub fn parse_metadata(v: &Value) -> RemoteMessage {
         has_attachments: false,
         message_id_hdr: header(payload, "Message-ID").map(str::to_string),
         references_hdr: header(payload, "References").map(str::to_string),
+        list_unsubscribe: header(payload, "List-Unsubscribe").map(str::to_string),
+        list_unsubscribe_post: header(payload, "List-Unsubscribe-Post").map(str::to_string),
         labels,
     }
 }
@@ -664,12 +672,62 @@ fn walk_part(part: &Value, out: &mut RemoteBody) {
     }
 }
 
-/// Gmail's snippet field is HTML-escaped.
-fn decode_entities(s: &str) -> String {
-    s.replace("&amp;", "&")
+/// Gmail's snippet field is HTML-escaped, and marketing mail pads its
+/// preheader with invisible characters so the real body stays hidden in
+/// previews; Gmail then truncates that run with an ellipsis. Strip both so
+/// the row shows the text and the CSS handles any overflow.
+pub fn clean_snippet(s: &str) -> String {
+    let decoded = s
+        .replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
-        .replace("&nbsp;", " ")
+        .replace("&nbsp;", " ");
+    let invisible = |c: char| {
+        matches!(
+            c,
+            '\u{200B}'..='\u{200F}'
+                | '\u{034F}'
+                | '\u{FEFF}'
+                | '\u{00AD}'
+                | '\u{2800}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{180E}'
+                | '\u{3164}'
+                | '\u{115F}'
+                | '\u{1160}'
+        )
+    };
+    let mut out = String::with_capacity(decoded.len());
+    let mut last_space = false;
+    for c in decoded.chars() {
+        if invisible(c) {
+            continue;
+        }
+        if c.is_whitespace() {
+            if !last_space {
+                out.push(' ');
+            }
+            last_space = true;
+        } else {
+            out.push(c);
+            last_space = false;
+        }
+    }
+    // A trailing ellipsis only ever marks Gmail's own truncation.
+    out.trim().trim_end_matches('…').trim_end().to_string()
+}
+
+#[cfg(test)]
+mod snippet_tests {
+    use super::clean_snippet;
+
+    #[test]
+    fn strips_preheader_padding_and_trailing_ellipsis() {
+        let raw = "Unlock a free trial of LinkedIn Premium \u{034F} \u{034F} \u{034F} \u{200C} …";
+        assert_eq!(clean_snippet(raw), "Unlock a free trial of LinkedIn Premium");
+        assert_eq!(clean_snippet("a &amp; b&nbsp;c"), "a & b c");
+        assert_eq!(clean_snippet("Ends with a period."), "Ends with a period.");
+    }
 }

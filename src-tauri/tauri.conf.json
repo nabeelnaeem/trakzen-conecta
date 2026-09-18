@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Trakzen Conecta",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "identifier": "com.trakzen.conecta",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -20,7 +20,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'sha256-hWMsav+abEA4p9dz+53zE8XpPa4nxdvbs2iNl9Z6lV8='; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http: cid:; font-src 'self' data:; frame-src 'self' about: data:; connect-src ipc: http://ipc.localhost; media-src 'self'"
+      "csp": "default-src 'self'; script-src 'self' 'sha256-hWMsav+abEA4p9dz+53zE8XpPa4nxdvbs2iNl9Z6lV8='; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http: cid:; font-src 'self' data:; frame-src 'self' about: data:; connect-src ipc: http://ipc.localhost https://dns.google; media-src 'self'"
     }
   },
   "bundle": {
@@ -32,6 +32,26 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": false
+      }
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "conecta"
+        ]
+      }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRENUE5NEYxNjVGMzdEREQKUldUZGZmTmw4WlJhVFJXanZkTHo5dmI1NUZjMFNrcTlvS1psZXpzcURrdDFXKzJqSEUvYkhWR1EK",
+      "endpoints": [
+        "https://github.com/nabeelnaeem/trakzen-conecta/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

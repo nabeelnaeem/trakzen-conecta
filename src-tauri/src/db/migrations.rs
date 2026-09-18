@@ -117,6 +117,70 @@ const MIGRATIONS: &[&str] = &[
     ",
     // 5: quoted replies in chat
     "ALTER TABLE chat_messages ADD COLUMN reply_to TEXT;",
+    // 6: RFC 2369/8058 unsubscribe headers, captured with the other metadata
+    "
+    ALTER TABLE mail_messages ADD COLUMN list_unsubscribe TEXT;
+    ALTER TABLE mail_messages ADD COLUMN list_unsubscribe_post TEXT;
+    ",
+    // 7: reactions, edits, and full-text search over chat
+    "
+    ALTER TABLE chat_messages ADD COLUMN reactions TEXT NOT NULL DEFAULT '{}';
+    ALTER TABLE chat_messages ADD COLUMN edited_at INTEGER;
+    CREATE VIRTUAL TABLE chat_fts USING fts5(body, file_name, content='chat_messages', content_rowid='id', tokenize='unicode61');
+    INSERT INTO chat_fts(rowid, body, file_name) SELECT id, body, COALESCE(file_name, '') FROM chat_messages;
+    CREATE TRIGGER chat_fts_ai AFTER INSERT ON chat_messages BEGIN
+        INSERT INTO chat_fts(rowid, body, file_name) VALUES (new.id, new.body, COALESCE(new.file_name, ''));
+    END;
+    CREATE TRIGGER chat_fts_ad AFTER DELETE ON chat_messages BEGIN
+        INSERT INTO chat_fts(chat_fts, rowid, body, file_name) VALUES ('delete', old.id, old.body, COALESCE(old.file_name, ''));
+    END;
+    CREATE TRIGGER chat_fts_au AFTER UPDATE OF body, file_name ON chat_messages BEGIN
+        INSERT INTO chat_fts(chat_fts, rowid, body, file_name) VALUES ('delete', old.id, old.body, COALESCE(old.file_name, ''));
+        INSERT INTO chat_fts(rowid, body, file_name) VALUES (new.id, new.body, COALESCE(new.file_name, ''));
+    END;
+    ",
+    // 8: local mail FTS, scheduled send queue
+    "
+    CREATE VIRTUAL TABLE mail_fts USING fts5(
+        subject, from_name, from_addr, snippet, body_text,
+        content='mail_messages', content_rowid='id', tokenize='unicode61'
+    );
+    INSERT INTO mail_fts(rowid, subject, from_name, from_addr, snippet, body_text)
+        SELECT id, subject, from_name, from_addr, snippet, COALESCE(body_text, '') FROM mail_messages;
+    CREATE TRIGGER mail_fts_ai AFTER INSERT ON mail_messages BEGIN
+        INSERT INTO mail_fts(rowid, subject, from_name, from_addr, snippet, body_text)
+        VALUES (new.id, new.subject, new.from_name, new.from_addr, new.snippet, COALESCE(new.body_text, ''));
+    END;
+    CREATE TRIGGER mail_fts_ad AFTER DELETE ON mail_messages BEGIN
+        INSERT INTO mail_fts(mail_fts, rowid, subject, from_name, from_addr, snippet, body_text)
+        VALUES ('delete', old.id, old.subject, old.from_name, old.from_addr, old.snippet, COALESCE(old.body_text, ''));
+    END;
+    CREATE TRIGGER mail_fts_au AFTER UPDATE OF subject, from_name, from_addr, snippet, body_text ON mail_messages BEGIN
+        INSERT INTO mail_fts(mail_fts, rowid, subject, from_name, from_addr, snippet, body_text)
+        VALUES ('delete', old.id, old.subject, old.from_name, old.from_addr, old.snippet, COALESCE(old.body_text, ''));
+        INSERT INTO mail_fts(rowid, subject, from_name, from_addr, snippet, body_text)
+        VALUES (new.id, new.subject, new.from_name, new.from_addr, new.snippet, COALESCE(new.body_text, ''));
+    END;
+    CREATE TABLE mail_outbox (
+        id         INTEGER PRIMARY KEY,
+        account_id INTEGER NOT NULL REFERENCES mail_accounts(id) ON DELETE CASCADE,
+        payload    TEXT    NOT NULL,
+        send_at    INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX mail_outbox_send_at ON mail_outbox(send_at);
+    ",
+    // 9: chat pins, link previews, group membership
+    "
+    ALTER TABLE chat_messages ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE chat_messages ADD COLUMN preview TEXT;
+    ALTER TABLE chat_peers ADD COLUMN is_group INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE chat_group_members (
+        group_id  INTEGER NOT NULL REFERENCES chat_peers(id) ON DELETE CASCADE,
+        member_id INTEGER NOT NULL REFERENCES chat_peers(id) ON DELETE CASCADE,
+        PRIMARY KEY (group_id, member_id)
+    );
+    ",
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

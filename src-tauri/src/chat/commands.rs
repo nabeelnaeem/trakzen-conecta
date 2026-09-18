@@ -104,6 +104,16 @@ pub async fn chat_send_text(
 }
 
 #[tauri::command]
+pub async fn chat_react(state: State<'_, AppState>, msg_id: String, emoji: String) -> Result<Option<ChatMessage>> {
+    state.chat.react(&msg_id, &emoji).await
+}
+
+#[tauri::command]
+pub async fn chat_edit(state: State<'_, AppState>, msg_id: String, body: String) -> Result<Option<ChatMessage>> {
+    state.chat.edit(&msg_id, &body).await
+}
+
+#[tauri::command]
 pub async fn chat_typing(state: State<'_, AppState>, peer_id: i64) -> Result<()> {
     state.chat.send_typing(peer_id).await;
     Ok(())
@@ -313,6 +323,25 @@ pub async fn chat_file_preview(path: String) -> Result<Option<String>> {
         mime,
         base64::engine::general_purpose::STANDARD.encode(bytes)
     )))
+}
+
+#[tauri::command]
+pub async fn chat_pause_transfer(state: State<'_, AppState>, transfer_id: String, pause: bool) -> Result<()> {
+    state.chat.pause_transfer(&transfer_id, pause);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn chat_pin(state: State<'_, AppState>, msg_id: String, pinned: bool) -> Result<Option<ChatMessage>> {
+    state.chat.pin_message(&msg_id, pinned).await
+}
+
+#[tauri::command]
+pub async fn chat_create_group(state: State<'_, AppState>, name: String, member_ids: Vec<i64>) -> Result<Peer> {
+    if name.trim().is_empty() {
+        return Err(AppError::Other("group name is required".into()));
+    }
+    state.chat.create_group(&name, member_ids).await
 }
 
 fn urlencoding_decode(s: &str) -> String {

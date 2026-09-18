@@ -74,6 +74,8 @@ interface MailState {
   undoSeconds: number;
   pendingSend: PendingSend | null;
   filterEditor: NewFilter | null;
+  /** Set while editing an existing filter (replace on save). */
+  filterEditing: { accountId: number; filterId: string } | null;
   error: string | null;
   notice: string | null;
   /// Label of the long-running action in flight, for the progress toast.
@@ -100,10 +102,13 @@ interface MailState {
   fetchFromServer: (reset: boolean) => Promise<void>;
   loadMore: () => Promise<void>;
   open: (id: number | null) => Promise<void>;
+  /** Open a thread by id even if it is not in the current list (deep links). */
+  openThread: (accountId: number, threadId: string) => Promise<void>;
   openNext: (delta: number) => Promise<void>;
   expand: (id: number, on?: boolean) => Promise<void>;
   sync: () => Promise<void>;
   addAccount: () => Promise<void>;
+  addImap: (login: { host: string; username: string; password: string; port?: number; smtpHost?: string; smtpPort?: number }) => Promise<void>;
   removeAccount: (id: number) => Promise<void>;
   toggleStar: (m: MessageSummary) => Promise<void>;
   // Thread-level actions on the open thread (or a specific row).
@@ -122,8 +127,9 @@ interface MailState {
   discardDraft: () => Promise<void>;
   saveDraftNow: () => Promise<void>;
   send: () => Promise<void>;
+  scheduleSend: (when: number) => Promise<void>;
   undoSend: () => void;
-  openFilterEditor: (prefill?: Partial<NewFilter>) => void;
+  openFilterEditor: (prefill?: Partial<NewFilter>, editing?: { accountId: number; filterId: string }) => void;
   closeFilterEditor: () => void;
   createFilter: (f: NewFilter) => Promise<boolean>;
   clearError: () => void;
@@ -196,10 +202,11 @@ export const useMail = create<MailState>((set, get) => ({
   unread: 0,
   search: "",
   serverSearch: false,
-  showImages: true,
+  showImages: false,
   undoSeconds: 10,
   pendingSend: null,
   filterEditor: null,
+  filterEditing: null,
   error: null,
   notice: null,
   working: null,
@@ -250,7 +257,12 @@ export const useMail = create<MailState>((set, get) => ({
     });
     await mail.onUnsnoozed((due) => {
       void get().refresh();
-      for (const m of due) void notify(m.fromName || m.fromAddr, m.subject || "(no subject)", "mail");
+      for (const m of due) {
+        const route = m.threadId
+          ? `conecta://mail/${m.accountId}/${encodeURIComponent(m.threadId)}`
+          : undefined;
+        void notify(m.fromName || m.fromAddr, m.subject || "(no subject)", "mail", route);
+      }
     });
     await mail.onSync((ev: SyncEvent) => {
       const { syncing, activeAccountId } = get();
@@ -283,8 +295,10 @@ export const useMail = create<MailState>((set, get) => ({
           const focused = document.hasFocus();
           if (ev.messages.length === 1) {
             const m = ev.messages[0];
-            void notify(m.fromName, m.subject || "(no subject)", "mail").then(() => undefined);
+            const route = m.threadId ? `conecta://mail/${ev.accountId}/${encodeURIComponent(m.threadId)}` : undefined;
+            void notify(m.fromName, m.subject || "(no subject)", "mail", route);
           } else if (ev.messages.length > 1) {
+            const first = ev.messages[0];
             void notify(
               `${ev.messages.length} new messages${account ? ` · ${account.email}` : ""}`,
               ev.messages
@@ -292,6 +306,7 @@ export const useMail = create<MailState>((set, get) => ({
                 .map((m) => `${m.fromName}: ${m.subject}`)
                 .join("\n"),
               "mail",
+              first.threadId ? `conecta://mail/${ev.accountId}/${encodeURIComponent(first.threadId)}` : undefined,
             );
           }
           void focused;
@@ -501,6 +516,26 @@ export const useMail = create<MailState>((set, get) => ({
     }
   },
 
+  openThread: async (accountId, threadId) => {
+    try {
+      if (get().activeAccountId !== accountId) get().setAccount(accountId);
+      const thread = await mail.listThread(accountId, threadId);
+      if (thread.length === 0) {
+        set({ error: "That conversation is not in the local cache yet." });
+        return;
+      }
+      const last = thread[thread.length - 1];
+      lastSelectedId = last.id;
+      set({ openId: last.id, thread, expanded: [], loadingDetail: true });
+      const toExpand = thread.filter((m) => !m.isRead || m.id === last.id).map((m) => m.id);
+      for (const mid of toExpand) await get().expand(mid, true);
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    } finally {
+      set({ loadingDetail: false });
+    }
+  },
+
   openNext: async (delta) => {
     const { messages, openId } = get();
     if (messages.length === 0) return;
@@ -553,6 +588,19 @@ export const useMail = create<MailState>((set, get) => ({
     set({ busy: true, error: null });
     try {
       const account = await mail.addAccount("gmail");
+      set({ activeAccountId: account.id });
+      await get().loadAccounts();
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    } finally {
+      set({ busy: false });
+    }
+  },
+
+  addImap: async (login) => {
+    set({ busy: true, error: null });
+    try {
+      const account = await mail.addImap(login);
       set({ activeAccountId: account.id });
       await get().loadAccounts();
     } catch (e) {
@@ -741,7 +789,8 @@ export const useMail = create<MailState>((set, get) => ({
   },
 
   openCompose: async (mode, messageId) => {
-    const accountId = get().activeAccountId;
+    let accountId = get().activeAccountId;
+    if (accountId === 0) accountId = get().accounts[0]?.id ?? null;
     if (accountId === null) return;
     if (!mode || messageId === undefined) {
       set({ composer: emptyComposer(accountId) });
@@ -851,6 +900,23 @@ export const useMail = create<MailState>((set, get) => ({
     set({ composer: null, pendingSend: { message, composer: c, sendAt: Date.now() + delay * 1000, timer } });
   },
 
+  scheduleSend: async (when) => {
+    const c = get().composer;
+    if (!c) return;
+    const message = toOutgoing(c);
+    if (message.to.length === 0) {
+      set({ error: "Add at least one recipient." });
+      return;
+    }
+    try {
+      await mail.schedule(message, when);
+      set({ composer: null, notice: "Scheduled." });
+      window.setTimeout(() => set({ notice: null }), 3000);
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+  },
+
   undoSend: () => {
     const p = get().pendingSend;
     if (!p) return;
@@ -858,8 +924,9 @@ export const useMail = create<MailState>((set, get) => ({
     set({ pendingSend: null, composer: p.composer });
   },
 
-  openFilterEditor: (prefill) =>
+  openFilterEditor: (prefill, editing) =>
     set({
+      filterEditing: editing ?? null,
       filterEditor: {
         from: "",
         to: "",
@@ -879,14 +946,16 @@ export const useMail = create<MailState>((set, get) => ({
       },
     }),
 
-  closeFilterEditor: () => set({ filterEditor: null }),
+  closeFilterEditor: () => set({ filterEditor: null, filterEditing: null }),
 
   createFilter: async (f) => {
-    const id = get().activeAccountId;
+    const editing = get().filterEditing;
+    const id = editing?.accountId ?? get().activeAccountId;
     if (id === null) return false;
     try {
-      await mail.createFilter(id, f);
-      set({ filterEditor: null, notice: "Filter created." });
+      if (editing) await mail.updateFilter(editing.accountId, editing.filterId, f);
+      else await mail.createFilter(id, f);
+      set({ filterEditor: null, filterEditing: null, notice: editing ? "Filter updated." : "Filter created." });
       window.setTimeout(() => set({ notice: null }), 3000);
       return true;
     } catch (e) {

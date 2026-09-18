@@ -2,7 +2,7 @@
 
 // ---- mail -----------------------------------------------------------------
 
-export type ProviderKind = "gmail";
+export type ProviderKind = "gmail" | "imap";
 
 export interface Account {
   id: number;
@@ -48,6 +48,9 @@ export interface MailFilter {
   addLabels: string[];
   removeLabels: string[];
   forward: string | null;
+  /** raw label ids, for editing */
+  addLabelIds: string[];
+  removeLabelIds: string[];
 }
 
 export interface FetchResult {
@@ -115,6 +118,7 @@ export const emptyFilter = (): NewFilter => ({
 
 export interface NewMailInfo {
   id: number;
+  threadId: string | null;
   fromName: string;
   subject: string;
 }
@@ -133,6 +137,16 @@ export interface MessageDetail extends MessageSummary {
   messageIdHdr: string | null;
   referencesHdr: string | null;
   attachments: AttachmentInfo[];
+  canUnsubscribe: boolean;
+  invite?: CalendarInvite | null;
+}
+
+export interface CalendarInvite {
+  summary: string;
+  when: string | null;
+  organizer: string | null;
+  method: string;
+  uid: string | null;
 }
 
 export interface FlagChange {
@@ -215,6 +229,7 @@ export interface Peer {
   unread: number;
   lastMessage: string | null;
   lastMessageAt: number | null;
+  isGroup?: boolean;
 }
 
 export interface ChatMessage {
@@ -230,6 +245,11 @@ export interface ChatMessage {
   status: string;
   createdAt: number;
   replyTo: string | null;
+  /** emoji → who reacted ("me" / "peer") */
+  reactions: Record<string, string[]>;
+  editedAt: number | null;
+  pinned?: boolean;
+  preview?: { url: string; title: string | null; description: string | null; image: string | null } | null;
 }
 
 export interface Nearby {
@@ -248,7 +268,7 @@ export interface TransferProgress {
   fileName: string;
   bytesDone: number;
   bytesTotal: number;
-  state: "active" | "done" | "failed";
+  state: "active" | "paused" | "done" | "failed";
 }
 
 export interface DeletedEvent {
@@ -281,6 +301,7 @@ export interface SettingsView {
   chatDownloadDir: string;
   mailShowImages: boolean;
   mailSignature: string;
+  accountSignatures: Record<number, string>;
   mailPollSeconds: number;
   closeToTray: boolean;
   notifications: boolean;
@@ -289,6 +310,7 @@ export interface SettingsView {
   soundChat: string;
   conversationView: boolean;
   undoSendSeconds: number;
+  mailTemplates: string;
 }
 
 export interface Contact {
@@ -304,6 +326,8 @@ export interface SettingsPatch {
   chatDownloadDir?: string;
   mailShowImages?: boolean;
   mailSignature?: string;
+  /** account id → signature; null removes the override */
+  accountSignatures?: Record<number, string | null>;
   mailPollSeconds?: number;
   closeToTray?: boolean;
   notifications?: boolean;
@@ -312,4 +336,5 @@ export interface SettingsPatch {
   soundChat?: string;
   conversationView?: boolean;
   undoSendSeconds?: number;
+  mailTemplates?: string;
 }

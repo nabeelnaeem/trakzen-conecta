@@ -13,6 +13,8 @@ interface ChatState {
   nearby: Nearby[];
   /** peer row id → time the last "typing" arrived */
   typing: Record<number, number>;
+  /** conecta://pair link handed in by a deep link, consumed by the Add form. */
+  pendingPair: string | null;
   error: string | null;
   initialised: boolean;
 
@@ -25,7 +27,15 @@ interface ChatState {
   sendText: (body: string, replyTo?: string | null) => Promise<void>;
   sendFile: (path: string) => Promise<void>;
   addNearby: (peerId: string) => Promise<void>;
+  /** Select a peer by its uuid or row id (deep links). */
+  selectByRoute: (peer: string) => Promise<void>;
+  setPendingPair: (link: string | null) => void;
   deleteMessage: (msgId: string, forEveryone: boolean) => Promise<void>;
+  react: (msgId: string, emoji: string) => Promise<void>;
+  edit: (msgId: string, body: string) => Promise<boolean>;
+  /** Send a message to a specific peer (used by "share to chat" from mail). */
+  sendTo: (peerId: number, body: string) => Promise<void>;
+  createGroup: (name: string, memberIds: number[]) => Promise<void>;
   clearChat: (forEveryone: boolean) => Promise<void>;
   clearError: () => void;
 }
@@ -47,6 +57,7 @@ export const useChat = create<ChatState>((set, get) => ({
   transfers: {},
   nearby: [],
   typing: {},
+  pendingPair: null,
   error: null,
   initialised: false,
 
@@ -94,8 +105,9 @@ export const useChat = create<ChatState>((set, get) => ({
         if (viewing && m.direction === "in" && m.status === "unread") void chat.markRead(m.peerId);
       }
       if (m.direction === "in" && (m.status === "unread") && !viewing) {
-        const who = peers.find((p) => p.id === m.peerId)?.displayName ?? "New message";
-        void notify(who, m.kind === "file" ? `Sent a file: ${m.fileName ?? ""}` : m.body, "chat");
+        const peer = peers.find((p) => p.id === m.peerId);
+        const who = peer?.displayName ?? "New message";
+        void notify(who, m.kind === "file" ? `Sent a file: ${m.fileName ?? ""}` : m.body, "chat", `conecta://chat/${peer?.peerId ?? m.peerId}`);
       }
       void get().loadPeers();
     });
@@ -210,9 +222,58 @@ export const useChat = create<ChatState>((set, get) => ({
     }
   },
 
+  selectByRoute: async (peer) => {
+    if (get().peers.length === 0) await get().loadPeers();
+    const p = get().peers.find((x) => x.peerId === peer || String(x.id) === peer);
+    if (p) await get().selectPeer(p.id);
+    else set({ error: "That peer is not in your list." });
+  },
+
+  setPendingPair: (link) => set({ pendingPair: link }),
+
   addNearby: async (peerId) => {
     try {
       const p = await chat.addNearby(peerId);
+      set({ peers: [p, ...get().peers.filter((x) => x.id !== p.id)] });
+      await get().selectPeer(p.id);
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+  },
+
+  react: async (msgId, emoji) => {
+    try {
+      const m = await chat.react(msgId, emoji);
+      if (m) set({ messages: upsertMessage(get().messages, m) });
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+  },
+
+  edit: async (msgId, body) => {
+    try {
+      const m = await chat.edit(msgId, body);
+      if (m) set({ messages: upsertMessage(get().messages, m) });
+      return true;
+    } catch (e) {
+      set({ error: errorMessage(e) });
+      return false;
+    }
+  },
+
+  sendTo: async (peerId, body) => {
+    try {
+      const m = await chat.sendText(peerId, body, null);
+      if (get().activePeerId === peerId) set({ messages: upsertMessage(get().messages, m) });
+      void get().loadPeers();
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+  },
+
+  createGroup: async (name, memberIds) => {
+    try {
+      const p = await chat.createGroup(name, memberIds);
       set({ peers: [p, ...get().peers.filter((x) => x.id !== p.id)] });
       await get().selectPeer(p.id);
     } catch (e) {

@@ -6,9 +6,14 @@
 pub mod commands;
 pub mod compose;
 pub mod gmail;
+pub mod ics;
+pub mod imap;
 pub mod sanitize;
 pub mod store;
 pub mod types;
+
+/// `account_id` 0 in list/search/unread means every connected account.
+pub const UNIFIED_ACCOUNT: i64 = 0;
 
 use std::sync::Arc;
 
@@ -148,12 +153,14 @@ pub trait MailProvider: Send + Sync {
 
 pub struct Providers {
     pub gmail: Arc<gmail::GmailProvider>,
+    pub imap: Arc<imap::ImapProvider>,
 }
 
 impl Providers {
     pub fn provider_for(&self, kind: &str) -> Result<Arc<dyn MailProvider>> {
         match kind {
             "gmail" => Ok(self.gmail.clone()),
+            "imap" => Ok(self.imap.clone()),
             other => Err(AppError::Provider(format!("unknown provider '{other}'"))),
         }
     }

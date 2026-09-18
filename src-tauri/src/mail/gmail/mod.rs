@@ -1,7 +1,7 @@
 mod api;
 mod auth;
 
-pub use api::split_mailbox;
+pub use api::{clean_snippet, split_mailbox};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -255,6 +255,7 @@ impl GmailProvider {
                     .into_iter()
                     .map(|m| NewMailInfo {
                         id: m.id,
+                        thread_id: m.thread_id.clone().or(Some(m.remote_id.clone())),
                         from_name: if m.from_name.is_empty() { m.from_addr } else { m.from_name },
                         subject: m.subject,
                     })

@@ -6,19 +6,21 @@ import { Composer } from "./Composer";
 import { FilterEditor } from "./FilterEditor";
 import { LabelChip } from "./LabelChip";
 import { useMailShortcuts } from "./useShortcuts";
+import { LabelTree } from "./LabelTree";
 import { Spinner } from "../../lib/Spinner";
 import type { Category, Folder } from "../../lib/types";
+import { Archive, ChevronDown, ChevronRight, Clock, FileText, Inbox, Mails, PenLine, RefreshCw, Search, Send, ShieldAlert, Star, Tag, Trash2, type LucideIcon } from "lucide-react";
 
-const FOLDERS: { key: Folder; label: string; icon: string }[] = [
-  { key: "inbox", label: "Inbox", icon: "📥" },
-  { key: "starred", label: "Starred", icon: "★" },
-  { key: "snoozed", label: "Snoozed", icon: "⏰" },
-  { key: "sent", label: "Sent", icon: "📤" },
-  { key: "drafts", label: "Drafts", icon: "📝" },
-  { key: "archive", label: "Archive", icon: "🗄" },
-  { key: "spam", label: "Spam", icon: "⚠" },
-  { key: "trash", label: "Trash", icon: "🗑" },
-  { key: "all", label: "All mail", icon: "✉" },
+const FOLDERS: { key: Folder; label: string; icon: LucideIcon }[] = [
+  { key: "inbox", label: "Inbox", icon: Inbox },
+  { key: "starred", label: "Starred", icon: Star },
+  { key: "snoozed", label: "Snoozed", icon: Clock },
+  { key: "sent", label: "Sent", icon: Send },
+  { key: "drafts", label: "Drafts", icon: FileText },
+  { key: "archive", label: "Archive", icon: Archive },
+  { key: "spam", label: "Spam", icon: ShieldAlert },
+  { key: "trash", label: "Trash", icon: Trash2 },
+  { key: "all", label: "All mail", icon: Mails },
 ];
 
 const CATEGORIES: { key: Category; label: string; labelId: string }[] = [
@@ -33,6 +35,7 @@ export function MailView() {
   const s = useMail();
   const searchRef = useRef<HTMLInputElement>(null);
   useMailShortcuts(searchRef);
+  const [labelsOpen, setLabelsOpen] = useState(() => localStorage.getItem("tc.labelsOpen") !== "0");
 
   useEffect(() => {
     void s.init();
@@ -58,8 +61,12 @@ export function MailView() {
     );
   }
 
-  const active = s.accounts.find((a) => a.id === s.activeAccountId);
-  const sync = s.activeAccountId !== null ? s.syncing[s.activeAccountId] : null;
+  const sync =
+    s.activeAccountId === 0
+      ? Object.values(s.syncing).find((v) => v) ?? null
+      : s.activeAccountId !== null
+        ? s.syncing[s.activeAccountId]
+        : null;
   const userLabels = s.labels.filter((l) => l.kind === "user");
   const categoryUnread = (labelId: string) => s.labels.find((l) => l.remoteId === labelId)?.unread ?? 0;
   const inboxActive = s.folder === "inbox" && !s.label && !s.search;
@@ -70,7 +77,7 @@ export function MailView() {
       <aside className="flex w-56 shrink-0 flex-col border-r border-gray-200 bg-gray-50">
         <div className="p-3">
           <button className="btn btn-primary w-full justify-center shadow-sm" onClick={() => void s.openCompose()} title="Compose (c)">
-            ✎ Compose
+            <PenLine size={16} /> Compose
           </button>
         </div>
         <nav className="min-h-0 flex-1 overflow-y-auto px-2">
@@ -84,38 +91,38 @@ export function MailView() {
                   : "text-gray-700 hover:bg-gray-200"
               }`}
             >
-              <span className="w-4 text-center text-xs opacity-70">{f.icon}</span>
+              <f.icon size={16} strokeWidth={1.75} className="shrink-0 opacity-80" aria-hidden />
               <span className="flex-1">{f.label}</span>
               {f.key === "inbox" && s.unread > 0 && (
-                <span className="rounded-full bg-blue-600 px-1.5 text-xs text-white">{s.unread}</span>
+                <span className="rounded-full bg-blue-600 px-1.5 text-xs text-on-accent">{s.unread}</span>
               )}
             </button>
           ))}
 
           {userLabels.length > 0 && (
             <>
-              <div className="mt-4 mb-1 flex items-center justify-between px-3 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+              <button
+                className="mt-4 mb-1 flex w-full items-center gap-1 px-3 text-[11px] font-semibold uppercase tracking-wide text-gray-500 hover:text-gray-800"
+                onClick={() => {
+                  setLabelsOpen((v) => {
+                    localStorage.setItem("tc.labelsOpen", v ? "0" : "1");
+                    return !v;
+                  });
+                }}
+              >
+                {labelsOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                 Labels
-              </div>
-              {userLabels.map((l) => (
-                <button
-                  key={l.id}
-                  onClick={() => s.setLabel(l.remoteId)}
-                  title={`${l.total} message${l.total === 1 ? "" : "s"}`}
-                  className={`flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm ${
-                    s.label === l.remoteId && !s.search ? "bg-blue-100 font-medium text-blue-900" : "text-gray-700 hover:bg-gray-200"
-                  }`}
-                >
-                  <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ background: l.bgColor ?? "#9ca3af" }} />
-                  <span className="min-w-0 flex-1 truncate">{l.name}</span>
-                  {l.unread > 0 && <span className="text-xs font-semibold text-gray-700">{l.unread}</span>}
-                </button>
-              ))}
+                {!labelsOpen && userLabels.reduce((n, l) => n + l.unread, 0) > 0 && (
+                  <span className="ml-auto normal-case tracking-normal text-gray-700">{userLabels.reduce((n, l) => n + l.unread, 0)}</span>
+                )}
+              </button>
+              {labelsOpen && <LabelTree labels={userLabels} active={s.search ? null : s.label} onPick={(id) => s.setLabel(id)} />}
             </>
           )}
         </nav>
         <div className="border-t border-gray-200 p-2">
           <select className="input" value={s.activeAccountId ?? ""} onChange={(e) => s.setAccount(Number(e.target.value))}>
+            {s.accounts.length > 1 && <option value={0}>All accounts</option>}
             {s.accounts.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.email}
@@ -126,17 +133,6 @@ export function MailView() {
             <button className="btn btn-ghost flex-1 justify-center text-xs" onClick={() => void s.addAccount()} disabled={s.busy}>
               Add account
             </button>
-            {active && (
-              <button
-                className="btn btn-ghost text-xs text-red-700"
-                title={`Remove ${active.email}`}
-                onClick={() => {
-                  if (confirm(`Remove ${active.email} from this app?`)) void s.removeAccount(active.id);
-                }}
-              >
-                Remove
-              </button>
-            )}
           </div>
         </div>
       </aside>
@@ -155,10 +151,10 @@ export function MailView() {
                 if (e.key === "Escape") s.setSearch("");
               }}
             />
-            <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-gray-400">⌕</span>
+            <Search size={14} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-gray-400" aria-hidden />
           </div>
           <button className="btn btn-ghost" title="Sync now" onClick={() => void s.sync()} disabled={!!sync}>
-            {sync ? <Spinner className="text-blue-600" /> : "⟳"}
+            {sync ? <Spinner className="text-blue-600" /> : <RefreshCw size={16} />}
           </button>
         </div>
 
@@ -166,11 +162,11 @@ export function MailView() {
           <div className="flex flex-wrap items-center gap-x-0.5 gap-y-1 border-b border-gray-200 bg-blue-50 px-2 py-1 text-xs">
             <SelectMenu allSelected={allSelected} />
             <span className="mr-2 whitespace-nowrap font-medium">{s.selected.length} selected</span>
-            <BulkButton title="Archive (e)" onClick={() => void s.act("archive")}>🗄</BulkButton>
-            <BulkButton title="Trash (#)" onClick={() => void s.act("trash")}>🗑</BulkButton>
-            <BulkButton title="Report spam (!)" onClick={() => void s.act("spam")}>⚠</BulkButton>
-            <BulkButton title="Mark as read (Shift+I)" onClick={() => void s.act("read")}>✉</BulkButton>
-            <BulkButton title="Mark as unread (Shift+U)" onClick={() => void s.act("unread")}>●</BulkButton>
+            <BulkButton title="Archive (e)" onClick={() => void s.act("archive")}><Archive size={15} /></BulkButton>
+            <BulkButton title="Trash (#)" onClick={() => void s.act("trash")}><Trash2 size={15} /></BulkButton>
+            <BulkButton title="Report spam (!)" onClick={() => void s.act("spam")}><ShieldAlert size={15} /></BulkButton>
+            <BulkButton title="Mark as read (Shift+I)" onClick={() => void s.act("read")}><MailOpenIcon /></BulkButton>
+            <BulkButton title="Mark as unread (Shift+U)" onClick={() => void s.act("unread")}><MailDot /></BulkButton>
             <BulkLabelMenu />
             <div className="flex-1" />
             <BulkButton title="Clear selection (Esc)" onClick={() => s.selectAll(false)}>✕</BulkButton>
@@ -309,6 +305,13 @@ function SelectMenu({ allSelected }: { allSelected: boolean }) {
   );
 }
 
+function MailOpenIcon() {
+  return <Mails size={15} />;
+}
+function MailDot() {
+  return <span className="inline-block h-2.5 w-2.5 rounded-full bg-blue-600" />;
+}
+
 function BulkButton({ children, title, onClick }: { children: React.ReactNode; title: string; onClick: () => void }) {
   const working = useMail((m) => m.working);
   return (
@@ -338,8 +341,8 @@ function BulkLabelMenu() {
   const userLabels = labels.filter((l) => l.kind === "user");
   return (
     <div className="relative" ref={ref}>
-      <button className="rounded px-2 py-1 text-xs hover:bg-blue-100" title="Labels" onClick={() => setOpen((v) => !v)}>
-        🏷 ▾
+      <button className="flex items-center gap-1 rounded px-2 py-1 text-xs hover:bg-blue-100" title="Labels" onClick={() => setOpen((v) => !v)}>
+        <Tag size={14} /> ▾
       </button>
       {open && (
         <div className="absolute left-0 z-10 mt-1 max-h-72 w-56 overflow-y-auto rounded-md border border-gray-200 bg-white py-1 shadow-lg">
@@ -375,12 +378,12 @@ function Toasts() {
   return (
     <div className="pointer-events-none fixed bottom-4 left-1/2 z-40 flex -translate-x-1/2 flex-col items-center gap-2">
       {working && (
-        <div className="flex items-center gap-2 rounded-full bg-gray-900 px-4 py-2 text-sm text-white shadow-lg">
+        <div className="flex items-center gap-2 rounded-full bg-gray-900 px-4 py-2 text-sm text-on-accent shadow-lg">
           <Spinner size={14} className="text-blue-300" /> {working}
         </div>
       )}
       {pendingSend && (
-        <div className="pointer-events-auto flex items-center gap-3 rounded-full bg-gray-900 px-4 py-2 text-sm text-white shadow-lg">
+        <div className="pointer-events-auto flex items-center gap-3 rounded-full bg-gray-900 px-4 py-2 text-sm text-on-accent shadow-lg">
           Sending in {left}s…
           <button className="font-semibold text-blue-300 hover:text-blue-200" onClick={undoSend}>
             Undo
@@ -388,7 +391,7 @@ function Toasts() {
         </div>
       )}
       {!pendingSend && notice && !working && (
-        <div className="rounded-full bg-gray-900 px-4 py-2 text-sm text-white shadow-lg">{notice}</div>
+        <div className="rounded-full bg-gray-900 px-4 py-2 text-sm text-on-accent shadow-lg">{notice}</div>
       )}
     </div>
   );

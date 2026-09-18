@@ -7,6 +7,7 @@ use crate::error::{AppError, Result};
 
 use super::types::*;
 
+#[derive(Clone)]
 pub struct ChatStore {
     db: Arc<Db>,
 }
@@ -15,7 +16,8 @@ const PEER_COLS: &str = "p.id, p.peer_id, p.display_name, p.host, p.port, p.last
     (SELECT COUNT(*) FROM chat_messages m WHERE m.peer_id = p.id AND m.direction = 'in' AND m.status = 'unread'),
     (SELECT CASE m.kind WHEN 'file' THEN m.file_name ELSE m.body END FROM chat_messages m
         WHERE m.peer_id = p.id ORDER BY m.created_at DESC, m.id DESC LIMIT 1),
-    (SELECT m.created_at FROM chat_messages m WHERE m.peer_id = p.id ORDER BY m.created_at DESC, m.id DESC LIMIT 1)";
+    (SELECT m.created_at FROM chat_messages m WHERE m.peer_id = p.id ORDER BY m.created_at DESC, m.id DESC LIMIT 1),
+    p.is_group";
 
 fn row_to_peer(r: &Row) -> rusqlite::Result<Peer> {
     Ok(Peer {
@@ -29,11 +31,12 @@ fn row_to_peer(r: &Row) -> rusqlite::Result<Peer> {
         unread: r.get(6)?,
         last_message: r.get(7)?,
         last_message_at: r.get(8)?,
+        is_group: r.get::<_, i64>(9).unwrap_or(0) != 0,
     })
 }
 
 const MSG_COLS: &str =
-    "id, msg_id, peer_id, direction, kind, body, file_name, file_path, file_size, status, created_at, reply_to";
+    "id, msg_id, peer_id, direction, kind, body, file_name, file_path, file_size, status, created_at, reply_to, reactions, edited_at, pinned, preview";
 
 fn row_to_message(r: &Row) -> rusqlite::Result<ChatMessage> {
     let direction: String = r.get(3)?;
@@ -59,6 +62,10 @@ fn row_to_message(r: &Row) -> rusqlite::Result<ChatMessage> {
         status: r.get(9)?,
         created_at: r.get(10)?,
         reply_to: r.get(11)?,
+        reactions: serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or_default(),
+        edited_at: r.get(13)?,
+        pinned: r.get::<_, i64>(14).unwrap_or(0) != 0,
+        preview: r.get::<_, Option<String>>(15)?.and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
 
@@ -371,19 +378,170 @@ impl ChatStore {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Full-text search (FTS5, prefix matching on every term); falls back to
+    /// LIKE if the query cannot be parsed as an FTS expression.
     pub fn search_messages(&self, peer_id: i64, query: &str, limit: i64) -> Result<Vec<ChatMessage>> {
-        let like = format!("%{}%", query.replace('%', "").replace('_', ""));
         let conn = self.db.conn();
+        let terms: Vec<String> = query
+            .split_whitespace()
+            .map(|t| format!("\"{}\"*", t.replace('"', "")))
+            .collect();
+        let fts = terms.join(" ");
         let sql = format!(
             "SELECT {MSG_COLS} FROM chat_messages
-             WHERE peer_id = ?1 AND (body LIKE ?2 OR file_name LIKE ?2)
+             WHERE peer_id = ?1 AND id IN (SELECT rowid FROM chat_fts WHERE chat_fts MATCH ?2)
              ORDER BY id DESC LIMIT ?3"
         );
-        let mut stmt = conn.prepare_cached(&sql)?;
-        let mut rows: Vec<ChatMessage> = stmt
-            .query_map(params![peer_id, like, limit], row_to_message)?
-            .collect::<rusqlite::Result<_>>()?;
+        let via_fts: rusqlite::Result<Vec<ChatMessage>> = (|| {
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map(params![peer_id, fts, limit], row_to_message)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })();
+        let mut rows = match via_fts {
+            Ok(rows) => rows,
+            Err(_) => {
+                let like = format!("%{}%", query.replace('%', "").replace('_', ""));
+                let sql = format!(
+                    "SELECT {MSG_COLS} FROM chat_messages
+                     WHERE peer_id = ?1 AND (body LIKE ?2 OR file_name LIKE ?2)
+                     ORDER BY id DESC LIMIT ?3"
+                );
+                conn.prepare_cached(&sql)?
+                    .query_map(params![peer_id, like, limit], row_to_message)?
+                    .collect::<rusqlite::Result<_>>()?
+            }
+        };
         rows.reverse();
         Ok(rows)
+    }
+
+    /// Adds or removes `who` under `emoji`; returns the updated message.
+    pub fn toggle_reaction(&self, msg_id: &str, emoji: &str, who: &str, add: Option<bool>) -> Result<Option<ChatMessage>> {
+        let Some(m) = self.get_message(msg_id)? else { return Ok(None) };
+        let mut reactions = m.reactions.clone();
+        let list = reactions.entry(emoji.to_string()).or_default();
+        let present = list.iter().any(|w| w == who);
+        let want = add.unwrap_or(!present);
+        if want && !present {
+            list.push(who.to_string());
+        } else if !want && present {
+            list.retain(|w| w != who);
+        }
+        reactions.retain(|_, v| !v.is_empty());
+        self.db.conn().execute(
+            "UPDATE chat_messages SET reactions = ?2 WHERE msg_id = ?1",
+            params![msg_id, serde_json::to_string(&reactions)?],
+        )?;
+        self.get_message(msg_id)
+    }
+
+    pub fn edit_message(&self, msg_id: &str, body: &str) -> Result<Option<ChatMessage>> {
+        self.db.conn().execute(
+            "UPDATE chat_messages SET body = ?2, edited_at = ?3 WHERE msg_id = ?1 AND kind = 'text'",
+            params![msg_id, body, now_ms()],
+        )?;
+        self.get_message(msg_id)
+    }
+
+    pub fn set_pinned(&self, msg_id: &str, pinned: bool) -> Result<Option<ChatMessage>> {
+        self.db.conn().execute(
+            "UPDATE chat_messages SET pinned = ?2 WHERE msg_id = ?1",
+            params![msg_id, pinned as i64],
+        )?;
+        self.get_message(msg_id)
+    }
+
+    pub fn set_preview(&self, msg_id: &str, preview: &LinkPreview) -> Result<Option<ChatMessage>> {
+        self.db.conn().execute(
+            "UPDATE chat_messages SET preview = ?2 WHERE msg_id = ?1",
+            params![msg_id, serde_json::to_string(preview)?],
+        )?;
+        self.get_message(msg_id)
+    }
+
+    pub fn create_group(&self, name: &str, member_ids: &[i64]) -> Result<Peer> {
+        let gid = format!("group:{}", uuid::Uuid::new_v4());
+        self.db.conn().execute(
+            "INSERT INTO chat_peers(peer_id, display_name, host, port, created_at, is_group)
+             VALUES(?1, ?2, 'group', 0, ?3, 1)",
+            params![gid, name, now_ms()],
+        )?;
+        let id = self.db.conn().last_insert_rowid();
+        for m in member_ids {
+            let _ = self.db.conn().execute(
+                "INSERT OR IGNORE INTO chat_group_members(group_id, member_id) VALUES(?1, ?2)",
+                params![id, m],
+            );
+        }
+        self.get_peer(id)
+    }
+
+    pub fn group_members(&self, group_id: i64) -> Result<Vec<i64>> {
+        let conn = self.db.conn();
+        let mut stmt = conn.prepare("SELECT member_id FROM chat_group_members WHERE group_id = ?1")?;
+        let rows = stmt.query_map(params![group_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn mark_group(&self, id: i64) -> Result<()> {
+        self.db.conn().execute(
+            "UPDATE chat_peers SET is_group = 1, host = 'group', port = 0 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn is_group(&self, peer_id: i64) -> Result<bool> {
+        Ok(self.db.conn().query_row(
+            "SELECT is_group FROM chat_peers WHERE id = ?1",
+            params![peer_id],
+            |r| r.get::<_, i64>(0),
+        )? != 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_text_search_reactions_and_edits() {
+        let dir = std::env::temp_dir().join(format!("tc-chat-{}", uuid::Uuid::new_v4()));
+        let store = ChatStore::new(Arc::new(Db::open(&dir).unwrap()));
+        let peer = store.add_peer("Rabiya", "10.0.0.2", 47800).unwrap();
+        fn msg<'a>(peer_id: i64, id: &'a str, body: &'a str) -> NewMessage<'a> {
+            NewMessage {
+                msg_id: id,
+                peer_id,
+                direction: Direction::Out,
+                kind: MessageKind::Text,
+                body,
+                file_name: None,
+                file_path: None,
+                file_size: None,
+                status: "sent",
+                created_at: 1,
+                reply_to: None,
+            }
+        }
+        store.insert_message(&msg(peer.id, "a", "Deploying the health controller tonight")).unwrap();
+        store.insert_message(&msg(peer.id, "b", "lunch tomorrow?")).unwrap();
+
+        let hits = store.search_messages(peer.id, "health contr", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].msg_id, "a");
+        assert!(store.search_messages(peer.id, "nothing-here", 10).unwrap().is_empty());
+
+        let m = store.toggle_reaction("a", "👍", "me", None).unwrap().unwrap();
+        assert_eq!(m.reactions["👍"], vec!["me"]);
+        let m = store.toggle_reaction("a", "👍", "peer", Some(true)).unwrap().unwrap();
+        assert_eq!(m.reactions["👍"].len(), 2);
+        let m = store.toggle_reaction("a", "👍", "me", None).unwrap().unwrap();
+        assert_eq!(m.reactions["👍"], vec!["peer"]);
+
+        let m = store.edit_message("a", "Deploying tomorrow instead").unwrap().unwrap();
+        assert!(m.edited_at.is_some());
+        assert_eq!(store.search_messages(peer.id, "tomorrow", 10).unwrap().len(), 2);
+        assert!(store.search_messages(peer.id, "tonight", 10).unwrap().is_empty());
     }
 }
