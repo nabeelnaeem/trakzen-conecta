@@ -132,7 +132,9 @@ impl GmailApi {
             .await
             .map_err(ApiError::Other)?;
         match status {
-            200 => serde_json::from_str(&body).map_err(|e| ApiError::Other(e.into())),
+            // 204 (e.g. an account with no filters) has no body at all.
+            200..=299 if body.trim().is_empty() => Ok(Value::Null),
+            200..=299 => serde_json::from_str(&body).map_err(|e| ApiError::Other(e.into())),
             404 => Err(ApiError::NotFound),
             status => Err(ApiError::Other(provider_error(status, &body))),
         }
