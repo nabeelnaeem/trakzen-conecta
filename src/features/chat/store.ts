@@ -26,6 +26,10 @@ interface ChatState {
   sendFile: (path: string) => Promise<void>;
   addNearby: (peerId: string) => Promise<void>;
   deleteMessage: (msgId: string, forEveryone: boolean) => Promise<void>;
+  react: (msgId: string, emoji: string) => Promise<void>;
+  edit: (msgId: string, body: string) => Promise<boolean>;
+  /** Send a message to a specific peer (used by "share to chat" from mail). */
+  sendTo: (peerId: number, body: string) => Promise<void>;
   clearChat: (forEveryone: boolean) => Promise<void>;
   clearError: () => void;
 }
@@ -215,6 +219,36 @@ export const useChat = create<ChatState>((set, get) => ({
       const p = await chat.addNearby(peerId);
       set({ peers: [p, ...get().peers.filter((x) => x.id !== p.id)] });
       await get().selectPeer(p.id);
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+  },
+
+  react: async (msgId, emoji) => {
+    try {
+      const m = await chat.react(msgId, emoji);
+      if (m) set({ messages: upsertMessage(get().messages, m) });
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+  },
+
+  edit: async (msgId, body) => {
+    try {
+      const m = await chat.edit(msgId, body);
+      if (m) set({ messages: upsertMessage(get().messages, m) });
+      return true;
+    } catch (e) {
+      set({ error: errorMessage(e) });
+      return false;
+    }
+  },
+
+  sendTo: async (peerId, body) => {
+    try {
+      const m = await chat.sendText(peerId, body, null);
+      if (get().activePeerId === peerId) set({ messages: upsertMessage(get().messages, m) });
+      void get().loadPeers();
     } catch (e) {
       set({ error: errorMessage(e) });
     }

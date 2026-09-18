@@ -6,10 +6,14 @@ import { useChat } from "./store";
 import { Avatar } from "../mail/Avatar";
 import { bytes, shortDate, timeOnly } from "../../lib/format";
 import { chat as chatIpc, errorMessage } from "../../lib/ipc";
-import { codeFromCopyButton, renderMarkdown } from "../../lib/markdown";
+import { codeFromCopyButton, isOnlyCodeBlock, renderMarkdown } from "../../lib/markdown";
+import { navigateTo } from "../../lib/navigate";
+import { useMail } from "../mail/store";
 import { Spinner } from "../../lib/Spinner";
 import type { ChatMessage } from "../../lib/types";
-import { Check, CheckCheck, Clock, MoreHorizontal, Paperclip, QrCode, Search, Send, X } from "lucide-react";
+import { Check, CheckCheck, Clock, MoreHorizontal, Paperclip, Pencil, QrCode, Search, Send, SmilePlus, X } from "lucide-react";
+
+const QUICK_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🙏", "✅", "👀"];
 
 export function ChatView() {
   const s = useChat();
@@ -214,9 +218,17 @@ function IdentityCard() {
         {showAll && <div className="mt-1 font-mono text-gray-500">{identity.addresses.slice(1).join(", ")}</div>}
       </div>
       {qr && (
-        <div className="mt-2 rounded-md border border-gray-200 bg-white p-2 text-center">
-          <div dangerouslySetInnerHTML={{ __html: qr[1] }} className="mx-auto [&>svg]:mx-auto [&>svg]:h-44 [&>svg]:w-44" />
-          <div className="mt-1 select-all break-all font-mono text-[10px] text-gray-500">{qr[0]}</div>
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/40 p-4" onClick={() => setQr(null)}>
+          <div className="w-[360px] rounded-lg border border-gray-300 bg-white p-5 text-center shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="mb-1 font-medium">Pair with this machine</div>
+            <p className="mb-3 text-xs text-gray-500">Scan from another device, or paste the link into “Add peer”.</p>
+            <div dangerouslySetInnerHTML={{ __html: qr[1] }} className="mx-auto rounded bg-white p-2 [&>svg]:mx-auto [&>svg]:h-52 [&>svg]:w-52" />
+            <div className="mt-2 select-all break-all rounded bg-gray-50 p-2 font-mono text-[10px] text-gray-600">{qr[0]}</div>
+            <div className="mt-3 flex justify-center gap-2">
+              <button className="btn text-xs" onClick={() => void navigator.clipboard.writeText(qr[0])}>Copy link</button>
+              <button className="btn btn-ghost text-xs" onClick={() => setQr(null)}>Close</button>
+            </div>
+          </div>
         </div>
       )}
       {status?.error && <div className="mt-1 text-xs text-red-700">{status.error}</div>}
@@ -288,8 +300,9 @@ const MAX_ROWS = 8;
 const CODE_LANGS = ["", "typescript", "javascript", "python", "rust", "go", "java", "csharp", "sql", "bash", "json", "yaml", "html", "css"];
 
 function Conversation({ peerId, name, seed, host, online, typing }: { peerId: number; name: string; seed: string; host: string; online: boolean; typing: boolean }) {
-  const { messages, transfers, sendText, sendFile, removePeer, clearChat } = useChat();
+  const { messages, transfers, sendText, sendFile, removePeer, clearChat, edit } = useChat();
   const [text, setText] = useState("");
+  const [editing, setEditing] = useState<ChatMessage | null>(null);
   const [pending, setPending] = useState<Pending[]>([]);
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -329,6 +342,9 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
         if (search !== null) {
           setSearch(null);
           setResults(null);
+        } else if (editing) {
+          setEditing(null);
+          setText("");
         } else if (replyTo || pending.length || text) {
           setReplyTo(null);
           setPending([]);
@@ -338,7 +354,7 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [search, replyTo, pending.length, text]);
+  }, [search, replyTo, pending.length, text, editing]);
 
   useEffect(() => {
     if (search === null) return;
@@ -401,6 +417,15 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
   }, [peerId]);
 
   const submit = async () => {
+    if (editing) {
+      const body = text.trim();
+      if (!body) return;
+      if (await edit(editing.msgId, body)) {
+        setEditing(null);
+        setText("");
+      }
+      return;
+    }
     let body = codeMode ? text.replace(/^\n+|\n+$/g, "") : text.trim();
     const files = pending;
     if (!body && files.length === 0) return;
@@ -606,6 +631,12 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
                     setReplyTo(m);
                     area.current?.focus();
                   }}
+                  onEdit={() => {
+                    setEditing(m);
+                    setCodeMode(false);
+                    setText(m.body);
+                    area.current?.focus();
+                  }}
                 />
               </div>
             );
@@ -616,6 +647,13 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
 
       <div className="border-t border-gray-200">
         <div className="mx-auto w-full max-w-[880px] px-3 pt-2 pb-3">
+          {editing && (
+            <div className="mb-2 flex items-center gap-2 rounded-md border-l-4 border-amber-500 bg-gray-50 px-3 py-1.5 text-xs">
+              <Pencil size={12} className="text-amber-600" />
+              <div className="min-w-0 flex-1 text-gray-700">Editing message · Enter to save, Esc to cancel</div>
+              <button className="text-gray-500 hover:text-gray-900" onClick={() => { setEditing(null); setText(""); }} aria-label="Cancel edit">✕</button>
+            </div>
+          )}
           {replyTo && (
             <div className="mb-2 flex items-center gap-2 rounded-md border-l-4 border-blue-500 bg-gray-50 px-3 py-1.5 text-xs">
               <div className="min-w-0 flex-1">
@@ -748,16 +786,31 @@ function Bubble({
   progress,
   quoted,
   onReply,
+  onEdit,
 }: {
   m: ChatMessage;
   grouped: boolean;
   progress?: { bytesDone: number; bytesTotal: number };
   quoted: ChatMessage | null;
   onReply: () => void;
+  onEdit: () => void;
 }) {
   const mine = m.direction === "out";
-  const { deleteMessage } = useChat();
+  const { deleteMessage, react, peers } = useChat();
+  const openCompose = useMail((s) => s.openCompose);
+  const updateComposer = useMail((s) => s.updateComposer);
   const [menu, setMenu] = useState(false);
+  const [emojiRow, setEmojiRow] = useState(false);
+  // Images and code blocks stand on their own; only plain text gets the fill.
+  const frameless = m.kind === "file" || (m.kind === "text" && isOnlyCodeBlock(m.body));
+  const peerName = peers.find((p) => p.id === m.peerId)?.displayName ?? "peer";
+  const sendAsEmail = async () => {
+    setMenu(false);
+    await openCompose();
+    const body = m.kind === "file" ? "" : m.body;
+    updateComposer({ subject: `Chat with ${peerName}`, body, files: m.kind === "file" && m.filePath ? [m.filePath] : [] });
+    navigateTo("mail");
+  };
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!menu) return;
@@ -779,6 +832,14 @@ function Bubble({
       </button>
       {menu && (
         <div className={`absolute top-full z-10 mt-1 w-48 rounded-md border border-gray-200 bg-white py-1 shadow-lg ${mine ? "right-0" : "left-0"}`}>
+          <div className="flex justify-around px-2 py-1">
+            {QUICK_EMOJI.slice(0, 6).map((e) => (
+              <button key={e} className="rounded px-1 text-base hover:bg-gray-100" onClick={() => { setMenu(false); void react(m.msgId, e); }}>
+                {e}
+              </button>
+            ))}
+          </div>
+          <div className="my-1 border-t border-gray-100" />
           <MenuItem
             onClick={() => {
               setMenu(false);
@@ -787,6 +848,17 @@ function Bubble({
           >
             Reply
           </MenuItem>
+          {mine && m.kind === "text" && (
+            <MenuItem
+              onClick={() => {
+                setMenu(false);
+                onEdit();
+              }}
+            >
+              Edit
+            </MenuItem>
+          )}
+          <MenuItem onClick={() => void sendAsEmail()}>Send as email…</MenuItem>
           <MenuItem
             onClick={() => {
               setMenu(false);
@@ -822,16 +894,30 @@ function Bubble({
 
   return (
     <div
-      className={`group flex items-center gap-1 ${mine ? "justify-end" : "justify-start"} ${grouped ? "mt-0.5" : "mt-2"}`}
+      className={`group flex items-end gap-1 ${mine ? "justify-end" : "justify-start"} ${grouped ? "mt-0.5" : "mt-2"}`}
       onContextMenu={(e) => {
         e.preventDefault();
         setMenu(true);
       }}
     >
       {mine && menuEl}
+      {mine && (
+        <button
+          className={`rounded px-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 ${emojiRow ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+          onClick={() => setEmojiRow((v) => !v)}
+          aria-label="React"
+        >
+          <SmilePlus size={14} />
+        </button>
+      )}
+      <div className={`flex flex-col ${mine ? "items-end" : "items-start"} ${m.body.includes("```") || m.kind === "file" ? "max-w-[85%]" : "max-w-[60%]"}`}>
       <div
-        className={`${m.body.includes("```") ? "max-w-[85%]" : "max-w-[60%]"} px-3 py-1.5 text-sm ${
-          mine ? "rounded-2xl rounded-br-md bg-blue-600 text-on-accent" : "rounded-2xl rounded-bl-md bg-gray-100 text-gray-900"
+        className={`${frameless ? "p-0" : "px-3 py-1.5"} text-sm ${
+          frameless
+            ? "text-gray-900"
+            : mine
+              ? "rounded-2xl rounded-br-md bg-bubble-own text-bubble-own-fg"
+              : "rounded-2xl rounded-bl-md bg-bubble-peer text-bubble-peer-fg"
         } ${m.status === "failed" ? "opacity-60 ring-1 ring-red-400" : ""}`}
       >
         {m.replyTo && (
@@ -839,12 +925,55 @@ function Bubble({
             {quoted ? (quoted.kind === "file" ? `📄 ${quoted.fileName ?? ""}` : quoted.body.slice(0, 140)) : "Original message unavailable"}
           </div>
         )}
-        {m.kind === "text" ? <MarkdownBody body={m.body} mine={mine} /> : <FileCard m={m} mine={mine} progress={progress} />}
-        <div className={`mt-0.5 flex items-center justify-end gap-1 text-[10px] ${mine ? "text-blue-100" : "text-gray-500"}`}>
+        {m.kind === "text" ? <MarkdownBody body={m.body} mine={mine && !frameless} /> : <FileCard m={m} mine={mine} frameless progress={progress} />}
+        {!frameless && (
+          <div className={`mt-0.5 flex items-center justify-end gap-1 text-[10px] ${mine ? "text-bubble-own-fg/70" : "text-gray-500"}`}>
+            {m.editedAt && <span title={new Date(m.editedAt).toLocaleString()}>edited ·</span>}
+            {timeOnly(m.createdAt)}
+            <Ticks status={m.status} mine={mine} />
+          </div>
+        )}
+      </div>
+      {frameless && (
+        <div className={`mt-0.5 flex items-center gap-1 px-1 text-[10px] text-gray-500 ${mine ? "flex-row-reverse" : ""}`}>
           {timeOnly(m.createdAt)}
+          {m.editedAt && <span>· edited</span>}
           <Ticks status={m.status} mine={mine} />
         </div>
+      )}
+      {Object.keys(m.reactions ?? {}).length > 0 && (
+        <div className={`mt-0.5 flex flex-wrap gap-1 ${mine ? "justify-end" : ""}`}>
+          {Object.entries(m.reactions).map(([emoji, who]) => (
+            <button
+              key={emoji}
+              className={`rounded-full border px-1.5 py-0.5 text-xs ${who.includes("me") ? "border-blue-400 bg-blue-50 text-blue-900" : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"}`}
+              onClick={() => void react(m.msgId, emoji)}
+              title={who.map((w) => (w === "me" ? "You" : peerName)).join(", ")}
+            >
+              {emoji} {who.length > 1 ? who.length : ""}
+            </button>
+          ))}
+        </div>
+      )}
+      {emojiRow && (
+        <div className="mt-1 flex gap-1 rounded-full border border-gray-200 bg-white px-2 py-1 shadow">
+          {QUICK_EMOJI.map((e) => (
+            <button key={e} className="rounded px-0.5 text-base hover:bg-gray-100" onClick={() => { setEmojiRow(false); void react(m.msgId, e); }}>
+              {e}
+            </button>
+          ))}
+        </div>
+      )}
       </div>
+      {!mine && (
+        <button
+          className={`rounded px-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 ${emojiRow ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+          onClick={() => setEmojiRow((v) => !v)}
+          aria-label="React"
+        >
+          <SmilePlus size={14} />
+        </button>
+      )}
       {!mine && menuEl}
     </div>
   );
@@ -878,7 +1007,8 @@ function MarkdownBody({ body, mine }: { body: string; mine: boolean }) {
   );
 }
 
-function FileCard({ m, mine, progress }: { m: ChatMessage; mine: boolean; progress?: { bytesDone: number; bytesTotal: number } }) {
+function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: boolean; progress?: { bytesDone: number; bytesTotal: number }; frameless?: boolean }) {
+  void mine;
   const [preview, setPreview] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const done = m.status === "unread" || m.status === "received" || m.status === "delivered" || m.status === "read" || (mine && m.status !== "failed");
@@ -893,18 +1023,18 @@ function FileCard({ m, mine, progress }: { m: ChatMessage; mine: boolean; progre
   const pct = progress && progress.bytesTotal > 0 ? Math.round((progress.bytesDone / progress.bytesTotal) * 100) : null;
   const openIt = (reveal: boolean) => m.filePath && chatIpc.openFile(m.filePath, reveal).catch((e) => setErr(errorMessage(e)));
   return (
-    <div className="min-w-[200px]">
+    <div className={`min-w-[200px] ${frameless && !preview ? "rounded-xl border border-gray-200 bg-white px-3 py-2" : ""}`}>
       {preview ? (
-        <img src={preview} alt={m.fileName ?? ""} className="mb-1 max-h-72 cursor-pointer rounded-lg" onClick={() => void openIt(false)} />
+        <img src={preview} alt={m.fileName ?? ""} className="mb-1 max-h-80 cursor-pointer rounded-xl border border-gray-200" onClick={() => void openIt(false)} />
       ) : (
         <div className="flex items-center gap-2">
-          <span className="text-xl">📄</span>
+          <Paperclip size={16} className="text-gray-500" />
           <span className="truncate font-medium" title={m.fileName ?? ""}>
             {m.fileName}
           </span>
         </div>
       )}
-      <div className={`flex items-center gap-2 text-xs ${mine ? "text-blue-100" : "text-gray-500"}`}>
+      <div className="flex items-center gap-2 text-xs text-gray-500">
         {preview && <span className="truncate">{m.fileName}</span>}
         <span>{m.fileSize !== null ? bytes(m.fileSize) : ""}</span>
         {pct !== null && <span>· {pct}%</span>}
@@ -920,10 +1050,10 @@ function FileCard({ m, mine, progress }: { m: ChatMessage; mine: boolean; progre
         )}
         {done && !m.filePath && <span>(file removed)</span>}
       </div>
-      {err && <div className="text-xs text-red-200">{err}</div>}
+      {err && <div className="text-xs text-red-700">{err}</div>}
       {pct !== null && (
-        <div className={`mt-1 h-1 overflow-hidden rounded ${mine ? "bg-blue-400" : "bg-gray-300"}`}>
-          <div className={`h-full ${mine ? "bg-white" : "bg-blue-600"}`} style={{ width: `${pct}%` }} />
+        <div className="mt-1 h-1 overflow-hidden rounded bg-gray-300">
+          <div className="h-full bg-blue-600" style={{ width: `${pct}%` }} />
         </div>
       )}
     </div>

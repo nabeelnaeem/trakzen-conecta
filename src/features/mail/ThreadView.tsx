@@ -5,6 +5,8 @@ import { buildFrameDoc } from "./frame";
 import { LabelChip } from "./LabelChip";
 import { SenderAvatar } from "./SenderAvatar";
 import { Paperclip } from "lucide-react";
+import { useChat } from "../chat/store";
+import { navigateTo } from "../../lib/navigate";
 import { bytes, longDate, shortDate } from "../../lib/format";
 import { errorMessage, mail } from "../../lib/ipc";
 import { Spinner } from "../../lib/Spinner";
@@ -18,6 +20,7 @@ export function ThreadView() {
   const [labelMenu, setLabelMenu] = useState(false);
   const [snoozeMenu, setSnoozeMenu] = useState(false);
   const [moreMenu, setMoreMenu] = useState(false);
+  const [sharePicker, setSharePicker] = useState(false);
   const menusRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -207,6 +210,15 @@ export function ThreadView() {
               >
                 Filter messages like this
               </MenuItem>
+              <div className="my-1 border-t border-gray-100" />
+              <MenuItem
+                onClick={() => {
+                  setMoreMenu(false);
+                  setSharePicker(true);
+                }}
+              >
+                Share to chat…
+              </MenuItem>
             </Menu>
           )}
         </div>
@@ -229,6 +241,16 @@ export function ThreadView() {
         )}
       </div>
 
+      {sharePicker && (
+        <SharePicker
+          onClose={() => setSharePicker(false)}
+          build={() => {
+            const d = details[latest.id];
+            const text = (d?.bodyText ?? d?.bodyHtml?.replace(/<[^>]+>/g, " ") ?? latest.snippet).replace(/\s+/g, " ").trim().slice(0, 1500);
+            return `**${subject}**\nFrom: ${latest.fromName || latest.fromAddr} <${latest.fromAddr}> · ${longDate(latest.date)}\n\n> ${text}`;
+          }}
+        />
+      )}
       <div className="min-h-0 flex-1 overflow-y-auto bg-gray-50">
         {thread.map((m) => (
           <ThreadMessage
@@ -378,6 +400,43 @@ function AutoHeightFrame({ doc }: { doc: string }) {
     return () => window.removeEventListener("message", onMessage);
   }, []);
   return <iframe ref={ref} title="Message body" className="w-full border-0 bg-white" style={{ height }} sandbox="allow-scripts" srcDoc={doc} />;
+}
+
+/** "Share to chat": pick a peer, send a quoted summary of the message. */
+function SharePicker({ onClose, build }: { onClose: () => void; build: () => string }) {
+  const { peers, sendTo, init } = useChat();
+  useEffect(() => {
+    void init();
+  }, [init]);
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/30 p-4" onClick={onClose}>
+      <div className="w-[380px] rounded-lg border border-gray-300 bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="border-b border-gray-200 px-4 py-2 font-medium">Share to chat</div>
+        <ul className="max-h-72 overflow-y-auto py-1">
+          {peers.length === 0 && <li className="px-4 py-3 text-sm text-gray-500">No chat peers yet.</li>}
+          {peers.map((p) => (
+            <li key={p.id}>
+              <button
+                className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm hover:bg-gray-50"
+                onClick={() => {
+                  void sendTo(p.id, build());
+                  onClose();
+                  navigateTo("chat");
+                }}
+              >
+                <span className={`h-2 w-2 rounded-full ${p.online ? "bg-green-500" : "bg-gray-400"}`} />
+                <span className="flex-1 truncate">{p.displayName}</span>
+                <span className="text-xs text-gray-500">{p.online ? "online" : "queued"}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+        <div className="border-t border-gray-200 px-4 py-2 text-right">
+          <button className="btn btn-ghost text-xs" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function EmptyPane() {

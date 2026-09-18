@@ -117,6 +117,8 @@ export const chat = {
   sendText: (peerId: number, body: string, replyTo?: string | null) =>
     invoke<ChatMessage>("chat_send_text", { peerId, body, replyTo: replyTo ?? null }),
   typing: (peerId: number) => invoke<void>("chat_typing", { peerId }),
+  react: (msgId: string, emoji: string) => invoke<ChatMessage | null>("chat_react", { msgId, emoji }),
+  edit: (msgId: string, body: string) => invoke<ChatMessage | null>("chat_edit", { msgId, body }),
   search: (peerId: number, query: string) => invoke<ChatMessage[]>("chat_search", { peerId, query }),
   nearby: () => invoke<Nearby[]>("chat_nearby"),
   addNearby: (peerId: string) => invoke<Peer>("chat_add_nearby", { peerId }),

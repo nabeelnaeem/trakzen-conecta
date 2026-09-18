@@ -9,6 +9,7 @@ import { app as appIpc } from "./lib/ipc";
 import { isDark, onTheme, toggleDark } from "./lib/theme";
 import { Mail, MessageSquare, Moon, Settings, Sun, type LucideIcon } from "lucide-react";
 import { getLastTab, getRailOrder, getStartIn, setLastTab, setRailOrder, type RailItem } from "./lib/prefs";
+import { onNavigate } from "./lib/navigate";
 
 type Tab = "mail" | "chat" | "settings";
 
@@ -22,6 +23,7 @@ export default function App() {
   useEffect(() => {
     if (tab === "mail" || tab === "chat") setLastTab(tab);
   }, [tab]);
+  useEffect(() => onNavigate((t) => setTab(t)), []);
   const reorder = (target: RailItem) => {
     if (!dragging || dragging === target) return;
     const next = order.filter((x) => x !== dragging);

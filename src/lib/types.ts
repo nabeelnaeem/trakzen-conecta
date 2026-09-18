@@ -234,6 +234,9 @@ export interface ChatMessage {
   status: string;
   createdAt: number;
   replyTo: string | null;
+  /** emoji → who reacted ("me" / "peer") */
+  reactions: Record<string, string[]>;
+  editedAt: number | null;
 }
 
 export interface Nearby {
