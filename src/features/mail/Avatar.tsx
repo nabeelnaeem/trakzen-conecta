@@ -12,7 +12,7 @@ export function Avatar({ name, seed, size = 36 }: { name: string; seed: string; 
   const bg = PALETTE[h % PALETTE.length];
   return (
     <div
-      className="flex shrink-0 items-center justify-center rounded-full font-semibold text-white"
+      className="flex shrink-0 items-center justify-center rounded-full font-semibold text-on-accent"
       style={{ width: size, height: size, background: bg, fontSize: size * 0.36 }}
       aria-hidden
     >

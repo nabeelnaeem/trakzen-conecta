@@ -9,8 +9,15 @@
 export const FRAME_SCRIPT =
   "document.addEventListener('click',function(e){var t=e.target;var a=t&&t.closest?t.closest('a[href]'):null;if(!a)return;e.preventDefault();parent.postMessage({type:'tc-open',href:a.href},'*');});function h(){parent.postMessage({type:'tc-height',height:document.documentElement.scrollHeight},'*');}window.addEventListener('load',h);if(window.ResizeObserver){new ResizeObserver(h).observe(document.body);}setTimeout(h,50);setTimeout(h,500);";
 
-export function buildFrameDoc(bodyHtml: string, allowRemoteImages: boolean): string {
+/**
+ * `invert` renders the mail with colours flipped for dark mode (images and
+ * videos are flipped back); by default mail stays on white paper.
+ */
+export function buildFrameDoc(bodyHtml: string, allowRemoteImages: boolean, invert = false): string {
   const img = allowRemoteImages ? "img-src * data: cid:" : "img-src data: cid:";
+  const invertCss = invert
+    ? "html{filter:invert(0.93) hue-rotate(180deg);background:#fff}img,video,picture,[style*=\"background-image\"]{filter:invert(1) hue-rotate(180deg)}"
+    : "";
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; ${img}; style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:">
 <style>
@@ -21,5 +28,6 @@ export function buildFrameDoc(bodyHtml: string, allowRemoteImages: boolean): str
   pre{white-space:pre-wrap}
   blockquote{margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex;color:#555}
   table{max-width:100%}
+  ${invertCss}
 </style></head><body>${bodyHtml}<script>${FRAME_SCRIPT}</script></body></html>`;
 }

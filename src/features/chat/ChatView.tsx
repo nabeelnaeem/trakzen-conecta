@@ -82,7 +82,7 @@ export function ChatView() {
                   <span className={`truncate text-xs ${p.unread ? "text-gray-800" : "text-gray-500"}`}>
                     {s.typing[p.id] ? <em className="text-blue-700">typing…</em> : (p.lastMessage ?? `${p.host}:${p.port}`)}
                   </span>
-                  {p.unread > 0 && <span className="rounded-full bg-blue-600 px-1.5 text-[11px] text-white">{p.unread}</span>}
+                  {p.unread > 0 && <span className="rounded-full bg-blue-600 px-1.5 text-[11px] text-on-accent">{p.unread}</span>}
                 </div>
               </div>
             </li>
@@ -639,7 +639,7 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
                     </div>
                   )}
                   <button
-                    className="absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full bg-gray-800 text-[11px] text-white shadow hover:bg-red-600"
+                    className="absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full bg-gray-800 text-[11px] text-on-accent shadow hover:bg-red-600"
                     onClick={() => setPending((cur) => cur.filter((x) => x.path !== f.path))}
                     aria-label={`Remove ${f.name}`}
                   >
@@ -683,7 +683,7 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
             <button className={`btn ${toolbar ? "bg-gray-100" : ""}`} onClick={() => setToolbar((v) => !v)} title="Formatting (Markdown also works: **bold**, _italic_, `code`)">
               Aa
             </button>
-            <button className={`btn ${codeMode ? "bg-gray-800 text-white" : ""}`} onClick={() => setCodeMode((v) => !v)} title="Code block (Ctrl+Shift+E)">
+            <button className={`btn ${codeMode ? "bg-gray-800 text-on-accent" : ""}`} onClick={() => setCodeMode((v) => !v)} title="Code block (Ctrl+Shift+E)">
               {"{ }"}
             </button>
             <textarea
@@ -829,7 +829,7 @@ function Bubble({
       {mine && menuEl}
       <div
         className={`${m.body.includes("```") ? "max-w-[85%]" : "max-w-[60%]"} px-3 py-1.5 text-sm ${
-          mine ? "rounded-2xl rounded-br-md bg-blue-600 text-white" : "rounded-2xl rounded-bl-md bg-gray-100 text-gray-900"
+          mine ? "rounded-2xl rounded-br-md bg-blue-600 text-on-accent" : "rounded-2xl rounded-bl-md bg-gray-100 text-gray-900"
         } ${m.status === "failed" ? "opacity-60 ring-1 ring-red-400" : ""}`}
       >
         {m.replyTo && (

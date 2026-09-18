@@ -8,6 +8,7 @@ import { bytes, longDate, shortDate } from "../../lib/format";
 import { errorMessage, mail } from "../../lib/ipc";
 import { Spinner } from "../../lib/Spinner";
 import type { MessageDetail, MessageSummary } from "../../lib/types";
+import { isDark, onTheme, themePrefs } from "../../lib/theme";
 
 export function ThreadView() {
   const s = useMail();
@@ -256,12 +257,18 @@ function ThreadMessage({
   const [showImagesOnce, setShowImagesOnce] = useState(false);
   const [attError, setAttError] = useState<string | null>(null);
   const showImages = showImagesDefault || showImagesOnce;
+  // Dark mode: invert per the appearance setting, with a per-message override.
+  const [theme, setThemeState] = useState(themePrefs());
+  useEffect(() => onTheme(setThemeState), []);
+  const [invertOverride, setInvertOverride] = useState<boolean | null>(null);
+  const darkNow = isDark(theme);
+  const invert = darkNow && (invertOverride ?? theme.mailDark === "invert");
 
   const doc = useMemo(() => {
     if (!detail) return "";
     const body = detail.bodyHtml ?? `<pre>${escapeHtml(detail.bodyText ?? "")}</pre>`;
-    return buildFrameDoc(body, showImages);
-  }, [detail, showImages]);
+    return buildFrameDoc(body, showImages, invert);
+  }, [detail, showImages, invert]);
   const hasRemoteImages = useMemo(
     () => !!detail?.bodyHtml && /<img[^>]+src=["']?https?:/i.test(detail.bodyHtml),
     [detail],
@@ -308,6 +315,13 @@ function ThreadMessage({
               Remote images are blocked.
               <button className="underline" onClick={() => setShowImagesOnce(true)}>
                 Show images
+              </button>
+            </div>
+          )}
+          {darkNow && detail && (
+            <div className="mx-4 mb-1 text-right text-[11px] text-gray-500">
+              <button className="hover:underline" onClick={() => setInvertOverride(!invert)}>
+                {invert ? "Show original colours" : "Invert for dark mode"}
               </button>
             </div>
           )}
