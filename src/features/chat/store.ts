@@ -35,6 +35,7 @@ interface ChatState {
   edit: (msgId: string, body: string) => Promise<boolean>;
   /** Send a message to a specific peer (used by "share to chat" from mail). */
   sendTo: (peerId: number, body: string) => Promise<void>;
+  createGroup: (name: string, memberIds: number[]) => Promise<void>;
   clearChat: (forEveryone: boolean) => Promise<void>;
   clearError: () => void;
 }
@@ -265,6 +266,16 @@ export const useChat = create<ChatState>((set, get) => ({
       const m = await chat.sendText(peerId, body, null);
       if (get().activePeerId === peerId) set({ messages: upsertMessage(get().messages, m) });
       void get().loadPeers();
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
+  },
+
+  createGroup: async (name, memberIds) => {
+    try {
+      const p = await chat.createGroup(name, memberIds);
+      set({ peers: [p, ...get().peers.filter((x) => x.id !== p.id)] });
+      await get().selectPeer(p.id);
     } catch (e) {
       set({ error: errorMessage(e) });
     }

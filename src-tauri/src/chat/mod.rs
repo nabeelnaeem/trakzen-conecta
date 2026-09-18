@@ -6,6 +6,7 @@ pub mod discovery;
 pub mod engine;
 pub mod protocol;
 pub mod store;
+pub mod transport;
 pub mod types;
 
 pub use engine::ChatEngine;

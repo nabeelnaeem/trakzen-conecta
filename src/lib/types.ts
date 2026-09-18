@@ -229,6 +229,7 @@ export interface Peer {
   unread: number;
   lastMessage: string | null;
   lastMessageAt: number | null;
+  isGroup?: boolean;
 }
 
 export interface ChatMessage {
@@ -247,6 +248,8 @@ export interface ChatMessage {
   /** emoji → who reacted ("me" / "peer") */
   reactions: Record<string, string[]>;
   editedAt: number | null;
+  pinned?: boolean;
+  preview?: { url: string; title: string | null; description: string | null; image: string | null } | null;
 }
 
 export interface Nearby {

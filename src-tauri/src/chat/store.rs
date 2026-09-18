@@ -7,6 +7,7 @@ use crate::error::{AppError, Result};
 
 use super::types::*;
 
+#[derive(Clone)]
 pub struct ChatStore {
     db: Arc<Db>,
 }
@@ -15,7 +16,8 @@ const PEER_COLS: &str = "p.id, p.peer_id, p.display_name, p.host, p.port, p.last
     (SELECT COUNT(*) FROM chat_messages m WHERE m.peer_id = p.id AND m.direction = 'in' AND m.status = 'unread'),
     (SELECT CASE m.kind WHEN 'file' THEN m.file_name ELSE m.body END FROM chat_messages m
         WHERE m.peer_id = p.id ORDER BY m.created_at DESC, m.id DESC LIMIT 1),
-    (SELECT m.created_at FROM chat_messages m WHERE m.peer_id = p.id ORDER BY m.created_at DESC, m.id DESC LIMIT 1)";
+    (SELECT m.created_at FROM chat_messages m WHERE m.peer_id = p.id ORDER BY m.created_at DESC, m.id DESC LIMIT 1),
+    p.is_group";
 
 fn row_to_peer(r: &Row) -> rusqlite::Result<Peer> {
     Ok(Peer {
@@ -29,11 +31,12 @@ fn row_to_peer(r: &Row) -> rusqlite::Result<Peer> {
         unread: r.get(6)?,
         last_message: r.get(7)?,
         last_message_at: r.get(8)?,
+        is_group: r.get::<_, i64>(9).unwrap_or(0) != 0,
     })
 }
 
 const MSG_COLS: &str =
-    "id, msg_id, peer_id, direction, kind, body, file_name, file_path, file_size, status, created_at, reply_to, reactions, edited_at";
+    "id, msg_id, peer_id, direction, kind, body, file_name, file_path, file_size, status, created_at, reply_to, reactions, edited_at, pinned, preview";
 
 fn row_to_message(r: &Row) -> rusqlite::Result<ChatMessage> {
     let direction: String = r.get(3)?;
@@ -61,6 +64,8 @@ fn row_to_message(r: &Row) -> rusqlite::Result<ChatMessage> {
         reply_to: r.get(11)?,
         reactions: serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or_default(),
         edited_at: r.get(13)?,
+        pinned: r.get::<_, i64>(14).unwrap_or(0) != 0,
+        preview: r.get::<_, Option<String>>(15)?.and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
 
@@ -436,6 +441,62 @@ impl ChatStore {
             params![msg_id, body, now_ms()],
         )?;
         self.get_message(msg_id)
+    }
+
+    pub fn set_pinned(&self, msg_id: &str, pinned: bool) -> Result<Option<ChatMessage>> {
+        self.db.conn().execute(
+            "UPDATE chat_messages SET pinned = ?2 WHERE msg_id = ?1",
+            params![msg_id, pinned as i64],
+        )?;
+        self.get_message(msg_id)
+    }
+
+    pub fn set_preview(&self, msg_id: &str, preview: &LinkPreview) -> Result<Option<ChatMessage>> {
+        self.db.conn().execute(
+            "UPDATE chat_messages SET preview = ?2 WHERE msg_id = ?1",
+            params![msg_id, serde_json::to_string(preview)?],
+        )?;
+        self.get_message(msg_id)
+    }
+
+    pub fn create_group(&self, name: &str, member_ids: &[i64]) -> Result<Peer> {
+        let gid = format!("group:{}", uuid::Uuid::new_v4());
+        self.db.conn().execute(
+            "INSERT INTO chat_peers(peer_id, display_name, host, port, created_at, is_group)
+             VALUES(?1, ?2, 'group', 0, ?3, 1)",
+            params![gid, name, now_ms()],
+        )?;
+        let id = self.db.conn().last_insert_rowid();
+        for m in member_ids {
+            let _ = self.db.conn().execute(
+                "INSERT OR IGNORE INTO chat_group_members(group_id, member_id) VALUES(?1, ?2)",
+                params![id, m],
+            );
+        }
+        self.get_peer(id)
+    }
+
+    pub fn group_members(&self, group_id: i64) -> Result<Vec<i64>> {
+        let conn = self.db.conn();
+        let mut stmt = conn.prepare("SELECT member_id FROM chat_group_members WHERE group_id = ?1")?;
+        let rows = stmt.query_map(params![group_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn mark_group(&self, id: i64) -> Result<()> {
+        self.db.conn().execute(
+            "UPDATE chat_peers SET is_group = 1, host = 'group', port = 0 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn is_group(&self, peer_id: i64) -> Result<bool> {
+        Ok(self.db.conn().query_row(
+            "SELECT is_group FROM chat_peers WHERE id = ?1",
+            params![peer_id],
+            |r| r.get::<_, i64>(0),
+        )? != 0)
     }
 }
 

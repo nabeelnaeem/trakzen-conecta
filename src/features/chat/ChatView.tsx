@@ -62,6 +62,7 @@ export function ChatView() {
           </div>
         )}
         <AddPeer />
+        <NewGroup />
         <ul className="flex-1 overflow-y-auto">
           {s.peers.map((p) => (
             <li
@@ -80,7 +81,10 @@ export function ChatView() {
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline justify-between gap-2">
-                  <span className={`truncate ${p.unread ? "font-semibold" : "font-medium"}`}>{p.displayName}</span>
+                  <span className={`truncate ${p.unread ? "font-semibold" : "font-medium"}`}>
+                    {p.displayName}
+                    {p.isGroup ? <span className="ml-1 text-[10px] font-normal text-gray-500">group</span> : null}
+                  </span>
                   {p.lastMessageAt && <span className="shrink-0 text-[11px] text-gray-500">{shortDate(p.lastMessageAt)}</span>}
                 </div>
                 <div className="flex items-center justify-between gap-2">
@@ -237,11 +241,14 @@ function IdentityCard() {
 }
 
 function AddPeer() {
-  const { addPeer, identity, pendingPair, setPendingPair } = useChat();
+  const { addPeer, identity, pendingPair, setPendingPair, peers } = useChat();
   const [name, setName] = useState("");
   const [host, setHost] = useState("");
   const [port, setPort] = useState("");
   const [openForm, setOpenForm] = useState(false);
+  const [groupOpen, setGroupOpen] = useState(false);
+  const [groupName, setGroupName] = useState("");
+  const [picked, setPicked] = useState<number[]>([]);
   // A conecta://pair link opened from outside lands here prefilled.
   useEffect(() => {
     if (pendingPair) {
@@ -290,7 +297,54 @@ function AddPeer() {
         <button className="btn btn-primary flex-1 justify-center" onClick={() => void submit()} disabled={!host.trim()}>
           Add
         </button>
-        <button className="btn" onClick={() => setOpenForm(false)}>
+    </div>
+  );
+}
+
+function NewGroup() {
+  const { peers, createGroup } = useChat();
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [picked, setPicked] = useState<number[]>([]);
+  const people = peers.filter((p) => !p.isGroup);
+  if (!open) {
+    return (
+      <div className="px-2 pb-2">
+        <button className="btn w-full justify-center text-xs" onClick={() => setOpen(true)}>
+          + New group
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2 border-b border-gray-200 p-2">
+      <input className="input" placeholder="Group name" value={name} onChange={(e) => setName(e.target.value)} />
+      <div className="max-h-28 overflow-y-auto text-xs">
+        {people.map((p) => (
+          <label key={p.id} className="flex items-center gap-2 py-0.5">
+            <input
+              type="checkbox"
+              checked={picked.includes(p.id)}
+              onChange={() => setPicked((cur) => (cur.includes(p.id) ? cur.filter((id) => id !== p.id) : [...cur, p.id]))}
+            />
+            {p.displayName}
+          </label>
+        ))}
+      </div>
+      <div className="flex gap-2">
+        <button
+          className="btn btn-primary flex-1 justify-center text-xs"
+          disabled={!name.trim() || picked.length === 0}
+          onClick={() => {
+            void createGroup(name, picked);
+            setOpen(false);
+            setName("");
+            setPicked([]);
+          }}
+        >
+          Create
+        </button>
+        <button className="btn text-xs" onClick={() => setOpen(false)}>
           Cancel
         </button>
       </div>
@@ -601,6 +655,14 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
 
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-[880px] px-4 py-3">
+          {messages.filter((m) => m.pinned).length > 0 && (
+            <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              <div className="mb-1 font-semibold">Pinned</div>
+              {messages.filter((m) => m.pinned).map((m) => (
+                <div key={m.msgId} className="truncate">{m.kind === "file" ? m.fileName : m.body}</div>
+              ))}
+            </div>
+          )}
           {shown.length === 0 && (
             <div className="flex flex-col items-center justify-center gap-2 py-24 text-center text-gray-400">
               {results ? (
@@ -870,6 +932,29 @@ function Bubble({
           <MenuItem
             onClick={() => {
               setMenu(false);
+              void chatIpc.pin(m.msgId, !m.pinned).then((next) => {
+                if (!next) return;
+                const list = useChat.getState().messages;
+                const i = list.findIndex((x) => x.msgId === next.msgId);
+                useChat.setState({
+                  messages: i === -1 ? [...list, next] : list.map((x, n) => (n === i ? next : x)),
+                });
+              });
+            }}
+          >
+            {m.pinned ? "Unpin" : "Pin"}
+          </MenuItem>
+          <MenuItem
+            onClick={() => {
+              setMenu(false);
+              void chatIpc.pin(m.msgId, !m.pinned).then((next) => next && useChat.setState((s) => ({ messages: s.messages.map((x) => (x.msgId === next.msgId ? next : x)) })));
+            }}
+          >
+            {m.pinned ? "Unpin" : "Pin"}
+          </MenuItem>
+          <MenuItem
+            onClick={() => {
+              setMenu(false);
               void navigator.clipboard.writeText(m.kind === "file" ? (m.filePath ?? m.fileName ?? "") : m.body);
             }}
           >
@@ -934,6 +1019,20 @@ function Bubble({
           </div>
         )}
         {m.kind === "text" ? <MarkdownBody body={m.body} mine={mine && !frameless} /> : <FileCard m={m} mine={mine} frameless progress={progress} />}
+        {m.preview?.title && (
+          <a href={m.preview.url} className="mt-1 block overflow-hidden rounded-lg border border-gray-200 bg-white text-left text-xs text-gray-800" onClick={(e) => { e.preventDefault(); void openUrl(m.preview!.url); }}>
+            {m.preview.image && <img src={m.preview.image} alt="" className="max-h-32 w-full object-cover" />}
+            <div className="px-2 py-1 font-medium">{m.preview.title}</div>
+            {m.preview.description && <div className="px-2 pb-1 text-gray-500 line-clamp-2">{m.preview.description}</div>}
+          </a>
+        )}
+        {m.preview?.title && (
+          <a href={m.preview.url} className="mt-1 block overflow-hidden rounded-md border border-gray-200 bg-white text-left text-xs text-gray-800" onClick={(e) => { e.preventDefault(); void openUrl(m.preview!.url); }}>
+            {m.preview.image && <img src={m.preview.image} alt="" className="max-h-32 w-full object-cover" />}
+            <div className="px-2 py-1 font-medium">{m.preview.title}</div>
+            {m.preview.description && <div className="px-2 pb-1 text-gray-500">{m.preview.description}</div>}
+          </a>
+        )}
         {!frameless && (
           <div className={`mt-0.5 flex items-center justify-end gap-1 text-[10px] ${mine ? "text-bubble-own-fg/70" : "text-gray-500"}`}>
             {m.editedAt && <span title={new Date(m.editedAt).toLocaleString()}>edited ·</span>}
@@ -988,7 +1087,7 @@ function Bubble({
 }
 
 function MarkdownBody({ body, mine }: { body: string; mine: boolean }) {
-  const html = renderMarkdown(body);
+  const html = renderMarkdown(body).replace(/@([\w.-]+)/g, '<span class="font-semibold text-blue-800">@$1</span>');
   return (
     <div
       className={`md break-words ${mine ? "md-mine" : ""}`}
@@ -1046,6 +1145,23 @@ function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: bool
         {preview && <span className="truncate">{m.fileName}</span>}
         <span>{m.fileSize !== null ? bytes(m.fileSize) : ""}</span>
         {pct !== null && <span>· {pct}%</span>}
+        {progress && (
+          <button
+            className="underline"
+            onClick={() => {
+              const pause = progress.state !== "paused";
+              void chatIpc.pauseTransfer(progress.transferId, pause);
+            }}
+          >
+            {progress.state === "paused" ? "Resume" : "Pause"}
+          </button>
+        )}
+        {progress && progress.state === "active" && (
+          <button className="underline" onClick={() => void chatIpc.pauseTransfer(progress.transferId, true)}>Pause</button>
+        )}
+        {progress && progress.state === "paused" && (
+          <button className="underline" onClick={() => void chatIpc.pauseTransfer(progress.transferId, false)}>Resume</button>
+        )}
         {done && m.filePath && (
           <>
             <button className="underline" onClick={() => void openIt(false)}>

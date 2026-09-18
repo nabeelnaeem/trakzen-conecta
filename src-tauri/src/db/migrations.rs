@@ -170,6 +170,17 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX mail_outbox_send_at ON mail_outbox(send_at);
     ",
+    // 9: chat pins, link previews, group membership
+    "
+    ALTER TABLE chat_messages ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE chat_messages ADD COLUMN preview TEXT;
+    ALTER TABLE chat_peers ADD COLUMN is_group INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE chat_group_members (
+        group_id  INTEGER NOT NULL REFERENCES chat_peers(id) ON DELETE CASCADE,
+        member_id INTEGER NOT NULL REFERENCES chat_peers(id) ON DELETE CASCADE,
+        PRIMARY KEY (group_id, member_id)
+    );
+    ",
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {
