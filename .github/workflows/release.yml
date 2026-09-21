@@ -1,32 +1,71 @@
 name: Release
 
+# Run from main by hand rather than on tag pushes: caches are scoped to the
+# ref that made them, so builds triggered by tags never reuse the previous
+# release's cache and re-upload a gigabyte per OS every time. Running on
+# main keeps one Rust cache per OS that every release restores.
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, e.g. 0.4.2 (must match package.json)"
+        required: true
+      macos:
+        description: "Also build macOS (10x the minute cost)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version matches the sources
+        run: |
+          set -e
+          v='${{ inputs.version }}'
+          for f in package.json src-tauri/tauri.conf.json; do
+            grep -q "\"version\": \"$v\"" "$f" || { echo "$f is not at $v"; exit 1; }
+          done
+          grep -q "^version = \"$v\"" src-tauri/Cargo.toml || { echo "Cargo.toml is not at $v"; exit 1; }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: test
+      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libdbus-1-dev pkg-config
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+
   build:
+    needs: check
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-22.04
             args: "--config src-tauri/updater.bundle.json"
+            enabled: true
           - os: windows-latest
             args: "--config src-tauri/updater.bundle.json"
+            enabled: true
           - os: macos-latest
             args: "--target universal-apple-darwin --config src-tauri/updater.bundle.json"
+            enabled: ${{ inputs.macos }}
 
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Skipped by input
+        if: ${{ !matrix.enabled }}
+        run: echo "macOS build not requested"
+
       - uses: actions/checkout@v4
+        if: ${{ matrix.enabled }}
 
       - name: Linux build dependencies
-        if: runner.os == 'Linux'
+        if: ${{ matrix.enabled && runner.os == 'Linux' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
@@ -34,36 +73,41 @@ jobs:
             libdbus-1-dev pkg-config patchelf
 
       - uses: pnpm/action-setup@v4
+        if: ${{ matrix.enabled }}
         with:
           version: 10
 
       - uses: actions/setup-node@v4
+        if: ${{ matrix.enabled }}
         with:
           node-version: 22
           cache: pnpm
 
       - uses: dtolnay/rust-toolchain@stable
+        if: ${{ matrix.enabled }}
         with:
           targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - uses: swatinem/rust-cache@v2
+        if: ${{ matrix.enabled }}
         with:
           workspaces: src-tauri
+          shared-key: release
 
       - run: pnpm install --frozen-lockfile
-
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
+        if: ${{ matrix.enabled }}
 
       - uses: tauri-apps/tauri-action@v0
+        if: ${{ matrix.enabled }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Passwordless key: do not set TAURI_SIGNING_PRIVATE_KEY_PASSWORD
           # (GitHub cannot store an empty secret; a space there breaks decode).
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         with:
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
-          releaseName: "Trakzen Conecta ${{ github.ref_name }}"
-          releaseBody: "Installers for Windows (.exe), Ubuntu/Debian (.deb, .AppImage) and macOS (.dmg)."
+          tagName: v${{ inputs.version }}
+          releaseName: "Trakzen Conecta v${{ inputs.version }}"
+          releaseBody: "Installers for Windows (.exe, .msi), Ubuntu/Debian (.deb, .AppImage, .rpm) and, when built, macOS (.dmg)."
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
