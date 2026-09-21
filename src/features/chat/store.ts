@@ -134,7 +134,7 @@ export const useChat = create<ChatState>((set, get) => ({
     });
     await chat.onTransfer((t) => {
       const transfers = { ...get().transfers };
-      if (t.state === "active") transfers[t.msgId] = t;
+      if (t.state === "active" || t.state === "paused") transfers[t.msgId] = t;
       else delete transfers[t.msgId];
       set({ transfers });
     });

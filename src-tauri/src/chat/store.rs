@@ -386,6 +386,46 @@ impl ChatStore {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Outgoing files waiting for the peer, oldest first.
+    pub fn queued_files(&self, peer_id: i64) -> Result<Vec<ChatMessage>> {
+        let conn = self.db.conn();
+        let sql = format!(
+            "SELECT {MSG_COLS} FROM chat_messages
+             WHERE peer_id = ?1 AND direction = 'out' AND kind = 'file' AND status = 'queued'
+             ORDER BY id ASC"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params![peer_id], row_to_message)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Peers that have outgoing files waiting.
+    pub fn peers_with_queued_files(&self) -> Result<Vec<i64>> {
+        let conn = self.db.conn();
+        let mut stmt = conn.prepare_cached(
+            "SELECT DISTINCT peer_id FROM chat_messages
+             WHERE direction = 'out' AND kind = 'file' AND status = 'queued'",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Called once at start-up: anything still marked in flight was cut off
+    /// by the previous exit. Outgoing work goes back on the queue; incoming
+    /// files wait for the sender to offer them again.
+    pub fn requeue_unfinished(&self) -> Result<()> {
+        let conn = self.db.conn();
+        conn.execute(
+            "UPDATE chat_messages SET status = 'queued' WHERE direction = 'out' AND status = 'sending'",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE chat_messages SET status = 'interrupted' WHERE direction = 'in' AND status = 'receiving'",
+            [],
+        )?;
+        Ok(())
+    }
+
     /// Full-text search (FTS5, prefix matching on every term); falls back to
     /// LIKE if the query cannot be parsed as an FTS expression.
     pub fn search_messages(&self, peer_id: i64, query: &str, limit: i64) -> Result<Vec<ChatMessage>> {
@@ -551,5 +591,39 @@ mod tests {
         assert!(m.edited_at.is_some());
         assert_eq!(store.search_messages(peer.id, "tomorrow", 10).unwrap().len(), 2);
         assert!(store.search_messages(peer.id, "tonight", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn file_queue_and_restart_recovery() {
+        let dir = std::env::temp_dir().join(format!("tc-chat-{}", uuid::Uuid::new_v4()));
+        let store = ChatStore::new(Arc::new(Db::open(&dir).unwrap()));
+        let peer = store.add_peer("Rabiya", "10.0.0.2", 47800).unwrap();
+        let file = |id: &'static str, direction, status: &'static str| NewMessage {
+            msg_id: id,
+            peer_id: peer.id,
+            direction,
+            kind: MessageKind::File,
+            body: "",
+            file_name: Some("a.bin"),
+            file_path: Some("C:/a.bin"),
+            file_size: Some(10),
+            status,
+            created_at: 1,
+            reply_to: None,
+        };
+        store.insert_message(&file("q1", Direction::Out, "queued")).unwrap();
+        store.insert_message(&file("s1", Direction::Out, "sending")).unwrap();
+        store.insert_message(&file("d1", Direction::Out, "delivered")).unwrap();
+        store.insert_message(&file("r1", Direction::In, "receiving")).unwrap();
+
+        let ids: Vec<String> = store.queued_files(peer.id).unwrap().into_iter().map(|m| m.msg_id).collect();
+        assert_eq!(ids, vec!["q1"]);
+        assert_eq!(store.peers_with_queued_files().unwrap(), vec![peer.id]);
+
+        store.requeue_unfinished().unwrap();
+        let ids: Vec<String> = store.queued_files(peer.id).unwrap().into_iter().map(|m| m.msg_id).collect();
+        assert_eq!(ids, vec!["q1", "s1"]);
+        assert_eq!(store.get_message("d1").unwrap().unwrap().status, "delivered");
+        assert_eq!(store.get_message("r1").unwrap().unwrap().status, "interrupted");
     }
 }

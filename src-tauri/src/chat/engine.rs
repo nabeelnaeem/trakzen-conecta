@@ -29,6 +29,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const RECONNECT_TICK: Duration = Duration::from_secs(5);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// How long a sender waits for `FileAccept` before assuming an older peer.
+const ACCEPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Conn {
     generation: u64,
@@ -54,6 +56,21 @@ pub struct ChatEngine {
     backoff: Mutex<HashMap<i64, (u32, std::time::Instant)>>,
     pub discovery: Mutex<Option<Arc<super::discovery::Discovery>>>,
     paused: Mutex<HashSet<String>>,
+    /// Transfers in progress, by transfer id.
+    transfers: Mutex<HashMap<String, TransferProgress>>,
+    /// Peers whose file queue is being drained right now.
+    sending_files: Mutex<HashSet<i64>>,
+}
+
+/// Why a transfer stopped. `Transient` keeps the file queued (outgoing) or
+/// partial on disk (incoming) so the next attempt resumes it.
+enum TransferError {
+    Transient(AppError),
+    Fatal(AppError),
+}
+
+fn fatal(e: std::io::Error) -> TransferError {
+    TransferError::Fatal(e.into())
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -105,10 +122,15 @@ impl ChatEngine {
             backoff: Mutex::new(HashMap::new()),
             discovery: Mutex::new(None),
             paused: Mutex::new(HashSet::new()),
+            transfers: Mutex::new(HashMap::new()),
+            sending_files: Mutex::new(HashSet::new()),
         }))
     }
 
     pub fn start(self: &Arc<Self>) {
+        if let Err(e) = self.store.requeue_unfinished() {
+            tracing::warn!(%e, "could not requeue unfinished transfers");
+        }
         let engine = self.clone();
         tauri::async_runtime::spawn(async move {
             let port = engine.me.read().unwrap().port;
@@ -272,6 +294,14 @@ impl ChatEngine {
                     });
                 }
             }
+            // A transfer that broke while the chat link stayed up is retried
+            // here, since nothing else would kick its queue again.
+            if let Ok(ids) = self.store.peers_with_queued_files() {
+                for id in ids.into_iter().filter(|id| self.is_online(*id)) {
+                    let engine = self.clone();
+                    tauri::async_runtime::spawn(async move { engine.flush_files(id).await });
+                }
+            }
             tokio::time::sleep(RECONNECT_TICK).await;
         }
     }
@@ -403,7 +433,10 @@ impl ChatEngine {
         self.emit_peer(row_id);
         let flush = self.clone();
         let flush_tx = tx.clone();
-        tauri::async_runtime::spawn(async move { flush.flush_queue(row_id, &flush_tx).await });
+        tauri::async_runtime::spawn(async move {
+            flush.flush_queue(row_id, &flush_tx).await;
+            flush.flush_files(row_id).await;
+        });
 
         let (mut rd, mut wr) = stream.into_split();
         tauri::async_runtime::spawn(async move {
@@ -568,6 +601,7 @@ impl ChatEngine {
                 let _ = self.store.mark_group(id);
             }
             ControlMsg::FileOffer { .. }
+            | ControlMsg::FileAccept { .. }
             | ControlMsg::FileDone { .. }
             | ControlMsg::FileError { .. } => {
                 tracing::debug!("file control frame on chat connection ignored");
@@ -776,7 +810,6 @@ impl ChatEngine {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "file".into());
-        let size = meta.len();
         let msg_id = uuid::Uuid::new_v4().to_string();
         let msg = self.store.insert_message(&NewMessage {
             msg_id: &msg_id,
@@ -786,44 +819,65 @@ impl ChatEngine {
             body: "",
             file_name: Some(&name),
             file_path: Some(&path.to_string_lossy()),
-            file_size: Some(size as i64),
-            status: "sending",
+            file_size: Some(meta.len() as i64),
+            status: "queued",
             created_at: now_ms(),
             reply_to: None,
         })?;
-
         let engine = self.clone();
-        let result_msg = msg.clone();
-        tauri::async_runtime::spawn(async move {
+        tauri::async_runtime::spawn(async move { engine.flush_files(row_id).await });
+        Ok(msg)
+    }
+
+    /// Sends the peer's queued files one at a time. Stops at the first
+    /// failure; a transient one leaves the file queued for the next attempt.
+    async fn flush_files(self: Arc<Self>, row_id: i64) {
+        if !self.sending_files.lock().unwrap().insert(row_id) {
+            return;
+        }
+        loop {
+            let Ok(queued) = self.store.queued_files(row_id) else { break };
+            let Some(m) = queued.into_iter().next() else { break };
+            let (Some(name), Some(path), Some(size)) = (m.file_name.clone(), m.file_path.clone(), m.file_size) else {
+                let _ = self.store.set_status(&m.msg_id, "failed");
+                continue;
+            };
+            if let Ok(Some(m)) = self.store.set_status(&m.msg_id, "sending") {
+                self.emit_message(&m);
+            }
             let transfer_id = uuid::Uuid::new_v4().to_string();
-            let outcome = engine
-                .push_file(row_id, &transfer_id, &result_msg.msg_id, &name, size, &path)
+            let outcome = self
+                .push_file(row_id, &transfer_id, &m.msg_id, &name, size as u64, &PathBuf::from(&path))
                 .await;
             let (status, state) = match &outcome {
                 Ok(()) => ("delivered", "done"),
-                Err(e) => {
+                Err(TransferError::Transient(e)) => {
+                    tracing::debug!(row_id, %e, "file send interrupted, will retry");
+                    ("queued", "failed")
+                }
+                Err(TransferError::Fatal(e)) => {
                     tracing::warn!(row_id, %e, "file send failed");
                     ("failed", "failed")
                 }
             };
-            if let Ok(Some(m)) = engine.store.set_status(&result_msg.msg_id, status) {
-                engine.emit_message(&m);
+            if let Ok(Some(m)) = self.store.set_status(&m.msg_id, status) {
+                self.emit_message(&m);
             }
-            let _ = engine.app.emit(
-                EVENT_TRANSFER,
-                TransferProgress {
-                    transfer_id,
-                    msg_id: result_msg.msg_id.clone(),
-                    peer_id: row_id,
-                    direction: Direction::Out,
-                    file_name: name,
-                    bytes_done: size,
-                    bytes_total: size,
-                    state: state.into(),
-                },
-            );
-        });
-        Ok(msg)
+            self.emit_progress(TransferProgress {
+                transfer_id,
+                msg_id: m.msg_id.clone(),
+                peer_id: row_id,
+                direction: Direction::Out,
+                file_name: name,
+                bytes_done: size as u64,
+                bytes_total: size as u64,
+                state: state.into(),
+            });
+            if outcome.is_err() {
+                break;
+            }
+        }
+        self.sending_files.lock().unwrap().remove(&row_id);
     }
 
     async fn push_file(
@@ -834,10 +888,12 @@ impl ChatEngine {
         name: &str,
         size: u64,
         path: &PathBuf,
-    ) -> Result<()> {
-        use tokio::io::AsyncReadExt;
+    ) -> std::result::Result<(), TransferError> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-        let peer = self.store.get_peer(row_id)?;
+        let mut file = tokio::fs::File::open(path).await.map_err(|e| TransferError::Fatal(e.into()))?;
+
+        let peer = self.store.get_peer(row_id).map_err(TransferError::Fatal)?;
         let mut stream = None;
         let mut last_err = AppError::Other("no address".into());
         for (host, port) in self.candidate_addresses(&peer) {
@@ -849,8 +905,8 @@ impl ChatEngine {
                 Err(e) => last_err = e,
             }
         }
-        let Some(mut stream) = stream else { return Err(last_err) };
-        self.handshake(&mut stream, Purpose::Transfer).await?;
+        let Some(mut stream) = stream else { return Err(TransferError::Transient(last_err)) };
+        self.handshake(&mut stream, Purpose::Transfer).await.map_err(TransferError::Transient)?;
 
         protocol::write_frame(
             &mut stream,
@@ -859,17 +915,46 @@ impl ChatEngine {
                 msg_id: msg_id.to_string(),
                 name: name.to_string(),
                 size,
+                resumable: true,
             }),
         )
-        .await?;
+        .await
+        .map_err(TransferError::Transient)?;
+
+        // A receiver from before resume support never answers the offer and
+        // just waits for chunks, so a silent peer means "start from zero".
+        let offset = match tokio::time::timeout(ACCEPT_TIMEOUT, protocol::read_frame(&mut stream)).await {
+            Ok(Ok(Some(Frame::Control(ControlMsg::FileAccept { offset, .. })))) => offset,
+            Ok(Ok(Some(Frame::Control(ControlMsg::FileError { reason, .. })))) => {
+                return Err(TransferError::Fatal(AppError::Other(format!("receiver rejected file: {reason}"))));
+            }
+            Ok(Ok(_)) => return Err(TransferError::Transient(AppError::Other("unexpected reply to file offer".into()))),
+            Ok(Err(e)) => return Err(TransferError::Transient(e)),
+            Err(_) => 0,
+        };
+        if offset > size {
+            return Err(TransferError::Fatal(AppError::Other("receiver claims more bytes than the file has".into())));
+        }
+        file.seek(std::io::SeekFrom::Start(offset)).await.map_err(|e| TransferError::Fatal(e.into()))?;
+
+        let progress = |done: u64, state: &str| TransferProgress {
+            transfer_id: transfer_id.to_string(),
+            msg_id: msg_id.to_string(),
+            peer_id: row_id,
+            direction: Direction::Out,
+            file_name: name.to_string(),
+            bytes_done: done,
+            bytes_total: size,
+            state: state.into(),
+        };
+        self.emit_progress(progress(offset, "active"));
 
         let tid = protocol::transfer_id_bytes(transfer_id);
-        let mut file = tokio::fs::File::open(path).await?;
         let mut buf = vec![0u8; protocol::CHUNK_SIZE];
-        let mut done = 0u64;
-        let mut last_emit = 0u64;
+        let mut done = offset;
+        let mut last_emit = offset;
         loop {
-            let n = file.read(&mut buf).await?;
+            let n = file.read(&mut buf).await.map_err(|e| TransferError::Fatal(e.into()))?;
             if n == 0 {
                 break;
             }
@@ -880,25 +965,19 @@ impl ChatEngine {
                     data: buf[..n].to_vec(),
                 },
             )
-            .await?;
+            .await
+            .map_err(TransferError::Transient)?;
             self.wait_unpaused(transfer_id).await;
             done += n as u64;
             if done - last_emit >= 1024 * 1024 {
                 last_emit = done;
-                let _ = self.app.emit(
-                    EVENT_TRANSFER,
-                    TransferProgress {
-                        transfer_id: transfer_id.to_string(),
-                        msg_id: msg_id.to_string(),
-                        peer_id: row_id,
-                        direction: Direction::Out,
-                        file_name: name.to_string(),
-                        bytes_done: done,
-                        bytes_total: size,
-                        state: "active".into(),
-                    },
-                );
+                self.emit_progress(progress(done, "active"));
             }
+        }
+        if done != size {
+            return Err(TransferError::Fatal(AppError::Other(format!(
+                "file changed while sending: expected {size} bytes, read {done}"
+            ))));
         }
         protocol::write_frame(
             &mut stream,
@@ -906,18 +985,20 @@ impl ChatEngine {
                 transfer_id: transfer_id.to_string(),
             }),
         )
-        .await?;
+        .await
+        .map_err(TransferError::Transient)?;
 
         // Wait for the receiver to confirm it wrote everything out.
         let ack = tokio::time::timeout(Duration::from_secs(60), protocol::read_frame(&mut stream))
             .await
-            .map_err(|_| AppError::Other("receiver did not acknowledge".into()))??;
+            .map_err(|_| TransferError::Transient(AppError::Other("receiver did not acknowledge".into())))?
+            .map_err(TransferError::Transient)?;
         match ack {
             Some(Frame::Control(ControlMsg::Ack { msg_id: id })) if id == msg_id => Ok(()),
             Some(Frame::Control(ControlMsg::FileError { reason, .. })) => {
-                Err(AppError::Other(format!("receiver rejected file: {reason}")))
+                Err(TransferError::Fatal(AppError::Other(format!("receiver rejected file: {reason}"))))
             }
-            _ => Err(AppError::Other("unexpected reply after file".into())),
+            _ => Err(TransferError::Transient(AppError::Other("unexpected reply after file".into()))),
         }
     }
 
@@ -925,37 +1006,84 @@ impl ChatEngine {
         let offer = tokio::time::timeout(HANDSHAKE_TIMEOUT, protocol::read_frame(&mut stream))
             .await
             .map_err(|_| AppError::Other("no file offer".into()))??;
-        let (transfer_id, msg_id, name, size) = match offer {
+        let (transfer_id, msg_id, name, size, resumable) = match offer {
             Some(Frame::Control(ControlMsg::FileOffer {
                 transfer_id,
                 msg_id,
                 name,
                 size,
-            })) => (transfer_id, msg_id, name, size),
+                resumable,
+            })) => (transfer_id, msg_id, name, size, resumable),
             _ => return Err(AppError::Other("expected a file offer".into())),
         };
 
         let dir = self.download_dir()?;
         tokio::fs::create_dir_all(&dir).await?;
-        let safe_name = sanitize_filename::sanitize(&name);
-        let safe_name = if safe_name.is_empty() { "file".to_string() } else { safe_name };
-        let path = crate::util::unique_path(&dir, &safe_name);
 
-        let msg = self.store.insert_message(&NewMessage {
-            msg_id: &msg_id,
-            peer_id: row_id,
-            direction: Direction::In,
-            kind: MessageKind::File,
-            body: "",
-            file_name: Some(&name),
-            file_path: Some(&path.to_string_lossy()),
-            file_size: Some(size as i64),
-            status: "receiving",
-            created_at: now_ms(),
-            reply_to: None,
-        })?;
-        self.emit_message(&msg);
-        self.emit_peer(row_id);
+        // A re-offer of a message we already started keeps its partial file;
+        // anything else starts fresh under a name nobody else is using.
+        let existing = self.store.get_message(&msg_id)?.filter(|m| m.peer_id == row_id);
+        let (final_path, part_path, mut offset) = match existing.as_ref().and_then(|m| m.file_path.clone()) {
+            Some(p) if p.ends_with(".part") => {
+                let part = PathBuf::from(&p);
+                let have = tokio::fs::metadata(&part).await.map(|m| m.len()).unwrap_or(0);
+                let final_path = PathBuf::from(&p[..p.len() - 5]);
+                (final_path, part, have.min(size))
+            }
+            Some(p) if existing.as_ref().map_or(false, |m| m.status != "failed") => {
+                let final_path = PathBuf::from(&p);
+                let have = tokio::fs::metadata(&final_path).await.map(|m| m.len()).unwrap_or(0);
+                if have == size {
+                    (final_path, PathBuf::new(), size)
+                } else {
+                    let final_path = crate::util::unique_download_path(&dir, &safe_file_name(&name));
+                    let part = crate::util::part_path(&final_path);
+                    (final_path, part, 0)
+                }
+            }
+            _ => {
+                let final_path = crate::util::unique_download_path(&dir, &safe_file_name(&name));
+                let part = crate::util::part_path(&final_path);
+                (final_path, part, 0)
+            }
+        };
+        if !resumable {
+            offset = 0;
+        }
+
+        let already_complete = offset == size && part_path.as_os_str().is_empty();
+        if !already_complete {
+            let msg = self.store.insert_message(&NewMessage {
+                msg_id: &msg_id,
+                peer_id: row_id,
+                direction: Direction::In,
+                kind: MessageKind::File,
+                body: "",
+                file_name: Some(&name),
+                file_path: Some(&part_path.to_string_lossy()),
+                file_size: Some(size as i64),
+                status: "receiving",
+                created_at: now_ms(),
+                reply_to: None,
+            })?;
+            let msg = self
+                .store
+                .set_file_result(&msg.msg_id, "receiving", Some(&part_path.to_string_lossy()))?
+                .unwrap_or(msg);
+            self.emit_message(&msg);
+            self.emit_peer(row_id);
+        }
+
+        if resumable {
+            protocol::write_frame(
+                &mut stream,
+                &Frame::Control(ControlMsg::FileAccept {
+                    transfer_id: transfer_id.clone(),
+                    offset,
+                }),
+            )
+            .await?;
+        }
 
         let progress = |done: u64, state: &str| TransferProgress {
             transfer_id: transfer_id.clone(),
@@ -968,31 +1096,47 @@ impl ChatEngine {
             state: state.into(),
         };
 
-        let outcome = self
-            .pull_file(&mut stream, &transfer_id, size, &path, &progress)
-            .await;
+        let outcome = if already_complete {
+            drain_to_done(&mut stream).await.map_err(TransferError::Transient)
+        } else {
+            self.emit_progress(progress(offset, "active"));
+            self.pull_file(&mut stream, &transfer_id, offset, size, &part_path, &progress).await
+        };
 
         match outcome {
             Ok(()) => {
-                if let Some(m) =
-                    self.store
-                        .set_file_result(&msg_id, "unread", Some(&path.to_string_lossy()))?
-                {
-                    self.emit_message(&m);
+                if !already_complete {
+                    tokio::fs::rename(&part_path, &final_path).await?;
+                    if let Some(m) =
+                        self.store
+                            .set_file_result(&msg_id, "unread", Some(&final_path.to_string_lossy()))?
+                    {
+                        self.emit_message(&m);
+                    }
+                    self.emit_peer(row_id);
                 }
-                self.emit_peer(row_id);
-                let _ = self.app.emit(EVENT_TRANSFER, progress(size, "done"));
+                self.emit_progress(progress(size, "done"));
                 protocol::write_frame(&mut stream, &Frame::Control(ControlMsg::Ack { msg_id }))
                     .await?;
                 let _ = stream.shutdown().await;
                 Ok(())
             }
             Err(e) => {
-                let _ = tokio::fs::remove_file(&path).await;
-                if let Some(m) = self.store.set_status(&msg_id, "failed")? {
-                    self.emit_message(&m);
+                // The partial file stays so the sender can resume; only a
+                // corrupt stream throws it away.
+                let (status, e) = match e {
+                    TransferError::Transient(e) => ("interrupted", e),
+                    TransferError::Fatal(e) => {
+                        let _ = tokio::fs::remove_file(&part_path).await;
+                        ("failed", e)
+                    }
+                };
+                if !already_complete {
+                    if let Some(m) = self.store.set_status(&msg_id, status)? {
+                        self.emit_message(&m);
+                    }
                 }
-                let _ = self.app.emit(EVENT_TRANSFER, progress(0, "failed"));
+                self.emit_progress(progress(0, "failed"));
                 let _ = protocol::write_frame(
                     &mut stream,
                     &Frame::Control(ControlMsg::FileError {
@@ -1010,47 +1154,60 @@ impl ChatEngine {
         &self,
         stream: &mut TcpStream,
         transfer_id: &str,
+        offset: u64,
         size: u64,
         path: &PathBuf,
         progress: &(dyn Fn(u64, &str) -> TransferProgress + Send + Sync),
-    ) -> Result<()> {
+    ) -> std::result::Result<(), TransferError> {
+        use tokio::io::AsyncSeekExt;
+
         let expected = protocol::transfer_id_bytes(transfer_id);
-        let mut file = tokio::fs::File::create(path).await?;
-        let mut done = 0u64;
-        let mut last_emit = 0u64;
+        let mut file = if offset > 0 {
+            let mut f = tokio::fs::OpenOptions::new().write(true).open(path).await.map_err(fatal)?;
+            f.set_len(offset).await.map_err(fatal)?;
+            f.seek(std::io::SeekFrom::Start(offset)).await.map_err(fatal)?;
+            f
+        } else {
+            tokio::fs::File::create(path).await.map_err(fatal)?
+        };
+        let mut done = offset;
+        let mut last_emit = offset;
         loop {
             self.wait_unpaused(transfer_id).await;
             let frame = tokio::time::timeout(Duration::from_secs(60), protocol::read_frame(stream))
                 .await
-                .map_err(|_| AppError::Other("transfer stalled".into()))??;
+                .map_err(|_| TransferError::Transient(AppError::Other("transfer stalled".into())))?
+                .map_err(TransferError::Transient)?;
             match frame {
                 Some(Frame::Chunk { transfer_id, data }) => {
                     if transfer_id != expected {
-                        return Err(AppError::Other("chunk for unknown transfer".into()));
+                        return Err(TransferError::Fatal(AppError::Other("chunk for unknown transfer".into())));
                     }
-                    file.write_all(&data).await?;
+                    file.write_all(&data).await.map_err(fatal)?;
                     done += data.len() as u64;
                     if done > size {
-                        return Err(AppError::Other("received more data than offered".into()));
+                        return Err(TransferError::Fatal(AppError::Other("received more data than offered".into())));
                     }
                     if done - last_emit >= 1024 * 1024 {
                         last_emit = done;
-                        let _ = self.app.emit(EVENT_TRANSFER, progress(done, "active"));
+                        self.emit_progress(progress(done, "active"));
                     }
                 }
                 Some(Frame::Control(ControlMsg::FileDone { .. })) => break,
                 Some(Frame::Control(ControlMsg::FileError { reason, .. })) => {
-                    return Err(AppError::Other(format!("sender aborted: {reason}")));
+                    return Err(TransferError::Transient(AppError::Other(format!("sender aborted: {reason}"))));
                 }
                 Some(_) => continue,
-                None => return Err(AppError::Other("connection dropped mid-transfer".into())),
+                None => {
+                    return Err(TransferError::Transient(AppError::Other("connection dropped mid-transfer".into())));
+                }
             }
         }
-        file.flush().await?;
+        file.flush().await.map_err(fatal)?;
         if done != size {
-            return Err(AppError::Other(format!(
+            return Err(TransferError::Transient(AppError::Other(format!(
                 "size mismatch: expected {size} bytes, got {done}"
-            )));
+            ))));
         }
         Ok(())
     }
@@ -1064,13 +1221,43 @@ impl ChatEngine {
         }
     }
 
-    pub fn pause_transfer(&self, transfer_id: &str, pause: bool) {
-        let mut g = self.paused.lock().unwrap();
-        if pause {
-            g.insert(transfer_id.to_string());
+    /// Records live transfers so pause/resume can find their peer, and tells
+    /// the UI. Finished transfers drop out of the table.
+    fn emit_progress(&self, p: TransferProgress) {
+        let mut live = self.transfers.lock().unwrap();
+        if p.state == "active" || p.state == "paused" {
+            live.insert(p.transfer_id.clone(), p.clone());
         } else {
-            g.remove(transfer_id);
+            live.remove(&p.transfer_id);
         }
+        drop(live);
+        let _ = self.app.emit(EVENT_TRANSFER, p);
+    }
+
+    /// Pauses on both ends: the peer's loop must stop too, or its stall
+    /// timeout would give up on us after a minute.
+    pub fn pause_transfer(&self, transfer_id: &str, pause: bool) {
+        {
+            let mut g = self.paused.lock().unwrap();
+            if pause {
+                g.insert(transfer_id.to_string());
+            } else {
+                g.remove(transfer_id);
+            }
+        }
+        let current = self.transfers.lock().unwrap().get(transfer_id).cloned();
+        let Some(mut p) = current else { return };
+        p.state = if pause { "paused" } else { "active" }.into();
+        let tx = self.conns.lock().unwrap().get(&p.peer_id).map(|c| c.tx.clone());
+        if let Some(tx) = tx {
+            let msg = if pause {
+                ControlMsg::FilePause { transfer_id: transfer_id.to_string() }
+            } else {
+                ControlMsg::FileResume { transfer_id: transfer_id.to_string() }
+            };
+            let _ = tx.try_send(Frame::Control(msg));
+        }
+        self.emit_progress(p);
     }
 
     pub async fn pin_message(self: &Arc<Self>, msg_id: &str, pinned: bool) -> Result<Option<ChatMessage>> {
@@ -1133,6 +1320,29 @@ impl ChatEngine {
             .download_dir()
             .map_err(|e| AppError::Other(format!("no downloads dir: {e}")))?
             .join("Trakzen Conecta"))
+    }
+}
+
+fn safe_file_name(name: &str) -> String {
+    let safe = sanitize_filename::sanitize(name);
+    if safe.is_empty() { "file".to_string() } else { safe }
+}
+
+/// We already have the whole file: let the sender run through its offer
+/// (it sends nothing but `FileDone` when told the offset equals the size).
+async fn drain_to_done(stream: &mut TcpStream) -> Result<()> {
+    loop {
+        match tokio::time::timeout(Duration::from_secs(60), protocol::read_frame(stream))
+            .await
+            .map_err(|_| AppError::Other("transfer stalled".into()))??
+        {
+            Some(Frame::Control(ControlMsg::FileDone { .. })) => return Ok(()),
+            Some(Frame::Control(ControlMsg::FileError { reason, .. })) => {
+                return Err(AppError::Other(format!("sender aborted: {reason}")));
+            }
+            Some(_) => continue,
+            None => return Err(AppError::Other("connection dropped".into())),
+        }
     }
 }
 

@@ -1165,6 +1165,9 @@ function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: bool
           </>
         )}
         {done && !m.filePath && <span>(file removed)</span>}
+        {!mine && m.status === "interrupted" && <span>· waiting for the sender to reconnect</span>}
+        {!mine && m.status === "receiving" && !progress && <span>· receiving…</span>}
+        {mine && m.status === "queued" && <span>· queued</span>}
       </div>
       {err && <div className="text-xs text-red-700">{err}</div>}
       {pct !== null && (

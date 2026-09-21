@@ -9,6 +9,10 @@
 //! A connection starts with both sides sending `Hello`. Chat connections stay
 //! open and carry text; each file transfer opens its own connection so a large
 //! file never delays messages.
+//!
+//! Transfer connection: `FileOffer` → `FileAccept { offset }` → chunks →
+//! `FileDone` → `Ack`. The receiver keeps partial files, so a transfer that
+//! drops is re-offered under the same `msg_id` and picks up at `offset`.
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -79,6 +83,15 @@ pub enum ControlMsg {
         msg_id: String,
         name: String,
         size: u64,
+        /// Sender will wait for `FileAccept` and start at the offset it
+        /// names. Absent from older builds, which always stream from zero.
+        #[serde(default)]
+        resumable: bool,
+    },
+    /// Receiver already holds `offset` bytes of this message's file.
+    FileAccept {
+        transfer_id: String,
+        offset: u64,
     },
     FileDone {
         transfer_id: String,
