@@ -200,8 +200,10 @@ dependencies; if `pnpm install` fails with
 `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`, create a local
 `pnpm-workspace.yaml` containing `minimumReleaseAge: 0` (it is git-ignored).
 
-Releases are built by GitHub Actions on version tags (`v*`) for all three
-platforms.
+Releases are built by the *Release* GitHub Actions workflow, started by
+hand from `main` with the version number (Actions → Release → Run
+workflow); it tags the commit and publishes the installers. macOS is
+built only when asked for.
 
 ### Testing chat on one machine
 
