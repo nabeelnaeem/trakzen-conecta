@@ -879,11 +879,15 @@ pub async fn mail_send(state: State<'_, AppState>, mut message: OutgoingMessage)
     }
     let sig = crate::settings::signature_for(&state.db, message.account_id)?;
     if !sig.trim().is_empty() {
-        message.body_text = format!("{}\n\n-- \n{}", message.body_text.trim_end(), sig.trim());
-        if let Some(h) = message.body_html.as_mut() {
-            h.push_str("<br><br>-- <br>");
-            h.push_str(&sanitize::text_to_html(sig.trim()));
-        }
+        let sig_html = compose::signature_html(&sig);
+        let sig_text = sanitize::html_to_text(&sig_html);
+        message.body_text = format!("{}\n\n-- \n{}", message.body_text.trim_end(), sig_text.trim());
+        let html = message
+            .body_html
+            .take()
+            .filter(|h| !h.trim().is_empty())
+            .unwrap_or_else(|| sanitize::text_to_html(&message.body_text));
+        message.body_html = Some(format!("{html}<br><br>-- <br>{sig_html}"));
     }
     let account = state.mail.get_account(message.account_id)?;
     let provider = state.providers.provider_for(&account.provider)?;
