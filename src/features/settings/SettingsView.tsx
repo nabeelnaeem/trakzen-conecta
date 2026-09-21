@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { confirmDialog } from "../../lib/confirm";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { disable as autostartDisable, enable as autostartEnable, isEnabled as autostartEnabled } from "@tauri-apps/plugin-autostart";
@@ -777,7 +778,13 @@ function ChatTab({ s, save }: { s: Settings; save: Save }) {
     void load();
   }, []);
   const clear = async (which: "received" | "outgoing", label: string) => {
-    if (!confirm(`Delete all ${label}? Messages stay, but their files will be gone.`)) return;
+    const ok = await confirmDialog({
+      title: `Delete all ${label}?`,
+      message: "Messages stay, but their files will be gone.",
+      confirmLabel: "Delete files",
+      danger: true,
+    });
+    if (!ok) return;
     const n = await chatIpc.clearStorage(which);
     setMsg(`${n} file${n === 1 ? "" : "s"} deleted.`);
     void load();
@@ -785,7 +792,8 @@ function ChatTab({ s, save }: { s: Settings; save: Save }) {
   return (
     <div className="space-y-5 text-sm">
       <TextField label="Display name (what peers see)" value={s.chatDisplayName} onCommit={(v) => void save({ chatDisplayName: v })} />
-      <TextField label="Listen port" value={String(s.chatPort)} numeric width="w-32" onCommit={(v) => void save({ chatPort: Number(v) || undefined }, "Port changes apply after a restart.")} hint="Peers connect to this port; allow it through your firewall." />
+      <TextField label="Listen port" value={String(s.chatPort)} numeric width="w-32" onCommit={(v) => void save({ chatPort: Number(v) || undefined })} hint="Peers connect to this port; allow it through your firewall. Changes apply immediately." />
+      <Toggle v={s.chatAskFiles} on={(v) => void save({ chatAskFiles: v })} label="Ask before accepting incoming files" hint="Off: files from peers are saved to the folder below straight away." />
       <div>
         <label className="label">Received files folder</label>
         <div className="flex gap-2">

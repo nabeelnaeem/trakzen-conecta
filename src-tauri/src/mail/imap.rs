@@ -264,35 +264,43 @@ impl MailProvider for ImapProvider {
                     .and_then(|f| f.body())
                     .ok_or_else(|| AppError::NotFound(uid.clone()))?;
                 let parsed = mailparse::parse_mail(raw).map_err(|e| AppError::Other(e.to_string()))?;
-                let mut html = None;
-                let mut text = None;
-                fn walk(p: &mailparse::ParsedMail, html: &mut Option<String>, text: &mut Option<String>) {
-                    let ct = p.ctype.mimetype.to_ascii_lowercase();
-                    if ct == "text/html" {
-                        if html.is_none() {
-                            *html = p.get_body().ok();
-                        }
-                    } else if ct == "text/plain" && text.is_none() {
-                        *text = p.get_body().ok();
-                    }
-                    for s in &p.subparts {
-                        walk(s, html, text);
-                    }
-                }
-                walk(&parsed, &mut html, &mut text);
-                Ok(RemoteBody {
-                    html,
-                    text,
-                    attachments: vec![],
-                })
+                let mut out = RemoteBody::default();
+                walk_parts(&parsed, "", &mut out);
+                Ok(out)
             })
         })
         .await
         .map_err(|e| AppError::Other(e.to_string()))?
     }
 
-    async fn fetch_attachment(&self, _account: &Account, _remote_id: &str, _att: &str) -> Result<Vec<u8>> {
-        Err(unsupported("IMAP attachment download"))
+    /// `att` is the part path handed out by `walk_parts` ("1.2"); the whole
+    /// message is fetched again and that part decoded.
+    async fn fetch_attachment(&self, account: &Account, remote_id: &str, att: &str) -> Result<Vec<u8>> {
+        let (cfg, pass) = self.config(account)?;
+        let uid = remote_id.to_string();
+        let path = att.to_string();
+        tokio::task::spawn_blocking(move || {
+            with_session(&cfg, &pass, |s| {
+                s.select("INBOX").map_err(|e| AppError::Other(e.to_string()))?;
+                let fetches = s
+                    .uid_fetch(&uid, "BODY.PEEK[]")
+                    .map_err(|e| AppError::Other(e.to_string()))?;
+                let raw = fetches
+                    .iter()
+                    .next()
+                    .and_then(|f| f.body())
+                    .ok_or_else(|| AppError::NotFound(uid.clone()))?;
+                let parsed = mailparse::parse_mail(raw).map_err(|e| AppError::Other(e.to_string()))?;
+                let mut part = &parsed;
+                for idx in path.split('.').filter(|s| !s.is_empty()) {
+                    let i: usize = idx.parse().map_err(|_| AppError::NotFound(format!("part {path}")))?;
+                    part = part.subparts.get(i).ok_or_else(|| AppError::NotFound(format!("part {path}")))?;
+                }
+                part.get_body_raw().map_err(|e| AppError::Other(e.to_string()))
+            })
+        })
+        .await
+        .map_err(|e| AppError::Other(e.to_string()))?
     }
 
     async fn send(&self, account: &Account, raw: Vec<u8>, _thread_id: Option<&str>) -> Result<()> {
@@ -440,4 +448,45 @@ impl MailProvider for ImapProvider {
             oldest: None,
         })
     }
+}
+
+/// Collects the first text/html and text/plain bodies plus every part that
+/// is an attachment or an inline image. Attachment ids are the part path
+/// within the message, e.g. "1.0", so they can be found again later.
+fn walk_parts(p: &mailparse::ParsedMail, path: &str, out: &mut RemoteBody) {
+    let ct = p.ctype.mimetype.to_ascii_lowercase();
+    let disposition = p.get_content_disposition();
+    let filename = disposition.params.get("filename").cloned().or_else(|| p.ctype.params.get("name").cloned());
+    let content_id = p
+        .headers
+        .iter()
+        .find(|h| h.get_key_ref().eq_ignore_ascii_case("Content-ID"))
+        .map(|h| strip_angle_brackets(&h.get_value()));
+    let is_attachment = disposition.disposition == mailparse::DispositionType::Attachment
+        || (disposition.disposition == mailparse::DispositionType::Inline && content_id.is_some())
+        || (filename.is_some() && !ct.starts_with("text/") && !ct.starts_with("multipart/"));
+
+    if is_attachment && !path.is_empty() {
+        out.attachments.push(RemoteAttachment {
+            remote_id: path.to_string(),
+            filename: filename.unwrap_or_else(|| "inline".into()),
+            mime_type: if ct.is_empty() { "application/octet-stream".into() } else { ct.clone() },
+            size: p.get_body_raw().map(|b| b.len() as i64).unwrap_or(0),
+            content_id,
+        });
+    } else if ct == "text/html" {
+        if out.html.is_none() {
+            out.html = p.get_body().ok();
+        }
+    } else if ct == "text/plain" && out.text.is_none() {
+        out.text = p.get_body().ok();
+    }
+    for (i, sub) in p.subparts.iter().enumerate() {
+        let child = if path.is_empty() { i.to_string() } else { format!("{path}.{i}") };
+        walk_parts(sub, &child, out);
+    }
+}
+
+fn strip_angle_brackets(s: &str) -> String {
+    s.trim().trim_start_matches('<').trim_end_matches('>').to_string()
 }

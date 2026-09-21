@@ -26,6 +26,13 @@ pub struct Peer {
     pub last_message_at: Option<i64>,
     #[serde(default)]
     pub is_group: bool,
+    /// Set once this machine has left (or been removed from) the group;
+    /// history stays but nothing more can be sent.
+    #[serde(default)]
+    pub group_left: bool,
+    /// Files from this peer are taken without asking.
+    #[serde(default)]
+    pub auto_accept_files: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,7 +84,12 @@ pub struct ChatMessage {
     pub status: String,
     pub created_at: i64,
     pub reply_to: Option<String>,
-    /// emoji → who reacted, as seen from this machine ("me" / "peer").
+    /// Author's peer id for incoming group messages; `None` for direct
+    /// chats and for anything this machine sent.
+    pub sender_id: Option<String>,
+    pub sender_name: Option<String>,
+    /// emoji → who reacted, as seen from this machine: "me", "peer" in a
+    /// direct chat, or the member's peer id in a group.
     pub reactions: std::collections::HashMap<String, Vec<String>>,
     pub edited_at: Option<i64>,
     #[serde(default)]
@@ -106,4 +118,13 @@ pub struct TransferProgress {
     pub bytes_done: u64,
     pub bytes_total: u64,
     pub state: String,
+}
+
+/// One entry of a group roster as exchanged between members.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupMember {
+    pub peer_id: String,
+    pub display_name: String,
+    pub host: String,
+    pub port: u16,
 }

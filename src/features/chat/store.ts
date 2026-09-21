@@ -11,8 +11,8 @@ interface ChatState {
   messages: ChatMessage[];
   transfers: Record<string, TransferProgress>;
   nearby: Nearby[];
-  /** peer row id → time the last "typing" arrived */
-  typing: Record<number, number>;
+  /** peer row id → when the last "typing" arrived and, in a group, from whom */
+  typing: Record<number, { at: number; who: string | null }>;
   /** conecta://pair link handed in by a deep link, consumed by the Add form. */
   pendingPair: string | null;
   error: string | null;
@@ -36,7 +36,7 @@ interface ChatState {
   /** Send a message to a specific peer (used by "share to chat" from mail). */
   sendTo: (peerId: number, body: string) => Promise<void>;
   createGroup: (name: string, memberIds: number[]) => Promise<void>;
-  clearChat: (forEveryone: boolean) => Promise<void>;
+  clearChat: () => Promise<void>;
   clearError: () => void;
 }
 
@@ -46,6 +46,12 @@ function upsertMessage(list: ChatMessage[], m: ChatMessage): ChatMessage[] {
   const next = list.slice();
   next[i] = m;
   return next;
+}
+
+// A command's return value is a snapshot from before the peer answered. If
+// the event stream already put a newer copy in the list, keep that one.
+function addMessage(list: ChatMessage[], m: ChatMessage): ChatMessage[] {
+  return list.some((x) => x.msgId === m.msgId) ? list : [...list, m];
 }
 
 export const useChat = create<ChatState>((set, get) => ({
@@ -104,20 +110,22 @@ export const useChat = create<ChatState>((set, get) => ({
         set({ messages: upsertMessage(messages, m) });
         if (viewing && m.direction === "in" && m.status === "unread") void chat.markRead(m.peerId);
       }
-      if (m.direction === "in" && (m.status === "unread") && !viewing) {
+      if (m.direction === "in" && (m.status === "unread" || m.status === "offered") && !viewing) {
         const peer = peers.find((p) => p.id === m.peerId);
         const who = peer?.displayName ?? "New message";
-        void notify(who, m.kind === "file" ? `Sent a file: ${m.fileName ?? ""}` : m.body, "chat", `conecta://chat/${peer?.peerId ?? m.peerId}`);
+        const what = m.status === "offered" ? `Wants to send you ${m.fileName ?? "a file"}` : m.kind === "file" ? `Sent a file: ${m.fileName ?? ""}` : m.body;
+        const body = peer?.isGroup && m.senderName ? `${m.senderName}: ${what}` : what;
+        void notify(who, body, "chat", `conecta://chat/${peer?.peerId ?? m.peerId}`);
       }
       void get().loadPeers();
     });
     chat.nearby().then((nearby) => set({ nearby })).catch(() => undefined);
     await chat.onNearby((nearby) => set({ nearby }));
-    await chat.onTyping((peerId) => {
-      set({ typing: { ...get().typing, [peerId]: Date.now() } });
+    await chat.onTyping(({ peerId, who }) => {
+      set({ typing: { ...get().typing, [peerId]: { at: Date.now(), who } } });
       window.setTimeout(() => {
         const t = get().typing;
-        if (Date.now() - (t[peerId] ?? 0) >= 3900) {
+        if (Date.now() - (t[peerId]?.at ?? 0) >= 3900) {
           const next = { ...t };
           delete next[peerId];
           set({ typing: next });
@@ -134,7 +142,7 @@ export const useChat = create<ChatState>((set, get) => ({
     });
     await chat.onTransfer((t) => {
       const transfers = { ...get().transfers };
-      if (t.state === "active") transfers[t.msgId] = t;
+      if (t.state === "active" || t.state === "paused") transfers[t.msgId] = t;
       else delete transfers[t.msgId];
       set({ transfers });
     });
@@ -202,7 +210,7 @@ export const useChat = create<ChatState>((set, get) => ({
     if (id === null || !body.trim()) return;
     try {
       const m = await chat.sendText(id, body, replyTo);
-      set({ messages: upsertMessage(get().messages, m) });
+      set({ messages: addMessage(get().messages, m) });
     } catch (e) {
       // The failed message is already in the DB with status=failed and an
       // event has updated the list; just surface the reason.
@@ -216,7 +224,7 @@ export const useChat = create<ChatState>((set, get) => ({
     if (id === null) return;
     try {
       const m = await chat.sendFile(id, path);
-      set({ messages: upsertMessage(get().messages, m) });
+      set({ messages: addMessage(get().messages, m) });
     } catch (e) {
       set({ error: errorMessage(e) });
     }
@@ -264,7 +272,7 @@ export const useChat = create<ChatState>((set, get) => ({
   sendTo: async (peerId, body) => {
     try {
       const m = await chat.sendText(peerId, body, null);
-      if (get().activePeerId === peerId) set({ messages: upsertMessage(get().messages, m) });
+      if (get().activePeerId === peerId) set({ messages: addMessage(get().messages, m) });
       void get().loadPeers();
     } catch (e) {
       set({ error: errorMessage(e) });
@@ -290,11 +298,11 @@ export const useChat = create<ChatState>((set, get) => ({
     }
   },
 
-  clearChat: async (forEveryone) => {
+  clearChat: async () => {
     const id = get().activePeerId;
     if (id === null) return;
     try {
-      await chat.clearChat(id, forEveryone);
+      await chat.clearChat(id);
       set({ messages: [] });
       void get().loadPeers();
     } catch (e) {

@@ -18,7 +18,10 @@ React. Storage is a single SQLite file, `trakzen-conecta.db`. Licensed under
 
 ## Features
 
-### Mail (Gmail)
+### Mail (Gmail, or any IMAP/SMTP account)
+- Gmail through its REST API (OAuth, labels, filters, incremental sync) or
+  any other provider over IMAP/SMTP with a password or app password
+  (Settings → Mail → *IMAP (any provider)*)
 - Instant inbox from the local cache; background sync every 60 s
   (configurable) and on window focus; new-mail notifications with sound
 - Conversation view with the newest and unread messages expanded
@@ -26,6 +29,8 @@ React. Storage is a single SQLite file, `trakzen-conecta.db`. Licensed under
   colours and unread counts, label add/remove, new labels
 - Reply, reply-all, forward with proper threading; attachments; recipient
   suggestions from your mail history; signature
+- Rich-text composer (bold, italic, underline, lists, quotes, links) with a
+  plain-text part sent alongside; drafts reopen with your text editable
 - Drafts autosaved to Gmail; undo send (configurable delay)
 - Archive, trash, spam / not spam, star, mark read/unread — singly, in bulk
   with multi-select, or across a whole folder ("select all N conversations")
@@ -33,8 +38,9 @@ React. Storage is a single SQLite file, `trakzen-conecta.db`. Licensed under
   existing mail; "filter messages like this"
 - Snooze (local), server-side search with Gmail operators, Gmail keyboard
   shortcuts (`j` `k` `e` `#` `!` `r` `a` `f` `c` `s` `x` `*` `/`)
-- HTML mail sanitised and rendered in a sandboxed frame; remote images on or
-  off; links open in the system browser
+- HTML mail sanitised and rendered in a sandboxed frame; embedded (`cid:`)
+  images shown inline; remote images on or off; links open in the system
+  browser
 
 ### Chat (LAN)
 - Automatic peer discovery over mDNS; manual IP and QR / `conecta://`
@@ -44,13 +50,19 @@ React. Storage is a single SQLite file, `trakzen-conecta.db`. Licensed under
   Copy button
 - Paste screenshots, drag-and-drop or attach files; they wait in the compose
   box until you press Enter; inline image previews; progress bars
-- Typing indicator, delivered vs read ticks, reply/quote, in-chat search
-  (Ctrl+F), peer switcher (Ctrl+K)
-- Messages typed while a peer is offline are queued and sent when it returns;
-  reconnects back off exponentially and try every known address
-- Delete for me / delete for everyone, clear chat for me / for everyone;
-  files the app saved are removed with their messages; storage clean-up in
-  Settings
+- Typing indicator, delivered vs read ticks, reply/quote, edit, reactions,
+  pins, in-chat search (Ctrl+F), peer switcher (Ctrl+K)
+- Group chats: anyone in the group can add or remove members, rename it or
+  leave; messages show who wrote them and everything (files included) goes
+  to every member
+- Messages and files sent while a peer is offline are queued and delivered
+  when it returns; an interrupted file transfer resumes from where it
+  stopped; reconnects back off exponentially and try every known address
+- Incoming files are offered first: accept, decline, or always accept from
+  that peer (or turn the prompt off in Settings). An unanswered offer stays
+  open for seven days, even across restarts
+- Delete for me / delete for everyone, clear chat on this machine; files the
+  app saved are removed with their messages; storage clean-up in Settings
 - Seven notification sounds, chosen separately for mail and chat
 
 ### App
@@ -139,14 +151,18 @@ the app stays far inside its quota.
 
 ## Using chat
 
-1. Run the app on both machines. Each listens on TCP **47800** (Settings →
-   Chat) and advertises itself on the LAN.
+1. Run the app on both machines. Each listens on TCP **47800** (change it in
+   Settings → Chat; it takes effect immediately) and advertises itself on
+   the LAN.
 2. The other machine appears under **Nearby** in the Chat tab — click **Add**.
    If discovery is blocked, use *Add peer by IP or pairing link*; the ▦
    button shows your own address as a QR code / `conecta://` link.
 3. Type to chat. Enter sends, Shift+Enter adds a line, `{ }` opens code mode
    (Ctrl+Enter sends), paste or drop files to attach them. Received files
-   land in `Downloads/Trakzen Conecta` (configurable).
+   land in `Downloads/Trakzen Conecta` (configurable) once you accept them.
+4. **+ New group** picks peers that have connected at least once. The
+   group's member list is kept in sync between members, so someone who was
+   offline during a change catches up when they reconnect.
 
 Traffic is plain TCP on your LAN. Do not expose the port to the internet;
 end-to-end encryption and a relay for remote use are on the roadmap.
@@ -213,7 +229,7 @@ src-tauri/src/
     sanitize.rs         HTML mail cleaning (ammonia)
   chat/
     protocol.rs         framed TCP wire format
-    engine.rs           listener, connections, queue, transfers
+    engine.rs           listener, connections, queue, transfers, groups
     discovery.rs        mDNS advertise + browse
     store.rs            peers + history
   secrets.rs            OS credential store access
@@ -233,7 +249,14 @@ Design notes:
   only script forwards link clicks to the system browser.
 - **Chat wire format** is `kind:u8 | len:u32 | payload`. Control frames are
   JSON, file chunks are binary. A file transfer opens its own TCP connection
-  so a large upload never delays messages.
+  so a large upload never delays messages. The receiver keeps partial files
+  and tells a re-offering sender how many bytes it already has, so
+  transfers resume rather than restart. Unknown control frames are skipped,
+  so builds with different feature sets keep talking.
+- **Groups** have no server: every member holds the roster, and whoever
+  changes it pushes a versioned copy to the others (and again whenever a
+  connection comes up). Each member's delivery of a message is tracked
+  separately, so retries go only to those who missed it.
 - **Adding a provider** means implementing `MailProvider` in a new module and
   registering it in `Providers::provider_for`. The UI and store do not change.
 
@@ -243,10 +266,8 @@ Design notes:
   authentication
 - Optional relay server for chat outside the LAN
 - Audio / video calls (WebRTC, signalling over the existing connection)
-- Dark mode, message editing, reactions, avatar images
-- Resumable file transfers
-- Inline (`cid:`) images in HTML mail
-- Second mail provider (IMAP/SMTP, then Outlook)
+- Outlook / Microsoft 365 via Microsoft Graph
+- Avatar images
 
 Contributions and bug reports are welcome.
 

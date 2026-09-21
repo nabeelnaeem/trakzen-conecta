@@ -172,6 +172,8 @@ export interface OutgoingMessage {
   bcc: string[];
   subject: string;
   bodyText: string;
+  /** HTML from the rich editor; bodyText is its plain rendering. */
+  bodyHtml?: string | null;
   quotedHtml?: string | null;
   inReplyTo?: string | null;
   references?: string | null;
@@ -187,6 +189,7 @@ export interface DraftContent {
   bcc: string[];
   subject: string;
   bodyText: string;
+  bodyHtml?: string | null;
   threadId: string | null;
   inReplyTo: string | null;
   references: string | null;
@@ -230,6 +233,10 @@ export interface Peer {
   lastMessage: string | null;
   lastMessageAt: number | null;
   isGroup?: boolean;
+  /** True once this machine left (or was removed from) the group. */
+  groupLeft?: boolean;
+  /** Files from this peer are accepted without asking. */
+  autoAcceptFiles?: boolean;
 }
 
 export interface ChatMessage {
@@ -245,7 +252,10 @@ export interface ChatMessage {
   status: string;
   createdAt: number;
   replyTo: string | null;
-  /** emoji → who reacted ("me" / "peer") */
+  /** Author's peer id for incoming group messages. */
+  senderId: string | null;
+  senderName: string | null;
+  /** emoji → who reacted: "me", "peer" in a direct chat, or a member's peer id in a group */
   reactions: Record<string, string[]>;
   editedAt: number | null;
   pinned?: boolean;
@@ -269,6 +279,12 @@ export interface TransferProgress {
   bytesDone: number;
   bytesTotal: number;
   state: "active" | "paused" | "done" | "failed";
+}
+
+export interface TypingEvent {
+  peerId: number;
+  /** Who is typing, in a group. */
+  who: string | null;
 }
 
 export interface DeletedEvent {
@@ -299,6 +315,7 @@ export interface SettingsView {
   chatDisplayName: string;
   chatPort: number;
   chatDownloadDir: string;
+  chatAskFiles: boolean;
   mailShowImages: boolean;
   mailSignature: string;
   accountSignatures: Record<number, string>;
@@ -324,6 +341,7 @@ export interface SettingsPatch {
   chatDisplayName?: string;
   chatPort?: number;
   chatDownloadDir?: string;
+  chatAskFiles?: boolean;
   mailShowImages?: boolean;
   mailSignature?: string;
   /** account id → signature; null removes the override */

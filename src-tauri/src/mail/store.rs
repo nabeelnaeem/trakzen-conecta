@@ -801,7 +801,7 @@ impl MailStore {
             .ok_or_else(|| AppError::NotFound(format!("message {id}")))?;
 
         let mut stmt = conn.prepare_cached(
-            "SELECT id, remote_id, filename, mime_type, size FROM mail_attachments
+            "SELECT id, remote_id, filename, mime_type, size, content_id FROM mail_attachments
              WHERE message_id = ?1 ORDER BY id",
         )?;
         let attachments = stmt
@@ -812,6 +812,7 @@ impl MailStore {
                     filename: r.get(2)?,
                     mime_type: r.get(3)?,
                     size: r.get(4)?,
+                    content_id: r.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -853,9 +854,9 @@ impl MailStore {
         )?;
         for a in &body.attachments {
             tx.execute(
-                "INSERT INTO mail_attachments(message_id, remote_id, filename, mime_type, size)
-                 VALUES(?1, ?2, ?3, ?4, ?5)",
-                params![id, a.remote_id, a.filename, a.mime_type, a.size],
+                "INSERT INTO mail_attachments(message_id, remote_id, filename, mime_type, size, content_id)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, a.remote_id, a.filename, a.mime_type, a.size, a.content_id],
             )?;
         }
         tx.commit()?;
@@ -866,7 +867,7 @@ impl MailStore {
         self.db
             .conn()
             .query_row(
-                "SELECT message_id, id, remote_id, filename, mime_type, size
+                "SELECT message_id, id, remote_id, filename, mime_type, size, content_id
                  FROM mail_attachments WHERE id = ?1",
                 params![id],
                 |r| {
@@ -878,6 +879,7 @@ impl MailStore {
                             filename: r.get(3)?,
                             mime_type: r.get(4)?,
                             size: r.get(5)?,
+                            content_id: r.get(6)?,
                         },
                     ))
                 },

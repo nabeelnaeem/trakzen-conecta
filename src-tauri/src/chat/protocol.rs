@@ -9,6 +9,10 @@
 //! A connection starts with both sides sending `Hello`. Chat connections stay
 //! open and carry text; each file transfer opens its own connection so a large
 //! file never delays messages.
+//!
+//! Transfer connection: `FileOffer` → `FileAccept { offset }` → chunks →
+//! `FileDone` → `Ack`. The receiver keeps partial files, so a transfer that
+//! drops is re-offered under the same `msg_id` and picks up at `offset`.
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -50,7 +54,18 @@ pub enum ControlMsg {
         group_id: Option<String>,
     },
     /// The peer is composing; UI shows "typing…" briefly.
-    Typing,
+    Typing {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_id: Option<String>,
+    },
+    /// Sender changed their display name or listen port; peers otherwise
+    /// only learn these from `Hello`, which chat connections send once and
+    /// then stay open for hours.
+    Rename {
+        display_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        port: Option<u16>,
+    },
     /// Receiver has displayed these messages.
     Read {
         msg_ids: Vec<String>,
@@ -74,6 +89,29 @@ pub enum ControlMsg {
         msg_id: String,
         name: String,
         size: u64,
+        /// Sender will wait for `FileAccept` and start at the offset it
+        /// names. Absent from older builds, which always stream from zero.
+        #[serde(default)]
+        resumable: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_id: Option<String>,
+    },
+    /// Receiver is asking its user whether to take the file; `FileAccept`
+    /// or `FileError` follows once they decide, or `FileError("pending")`
+    /// if that takes too long to keep the connection open for.
+    FilePending {
+        transfer_id: String,
+    },
+    /// Receiver's late answer to an offer that went pending, sent over the
+    /// chat connection. `accept` asks the sender to offer the file again.
+    FileAnswer {
+        msg_id: String,
+        accept: bool,
+    },
+    /// Receiver already holds `offset` bytes of this message's file.
+    FileAccept {
+        transfer_id: String,
+        offset: u64,
     },
     FileDone {
         transfer_id: String,
@@ -92,19 +130,30 @@ pub enum ControlMsg {
         msg_id: String,
         pinned: bool,
     },
-    GroupInvite {
+    /// Full roster of a group as the sender sees it. Sent to every member
+    /// (and to anyone just removed) after a change, and again whenever a
+    /// chat connection to a member comes up. `rev` is the change time;
+    /// receivers ignore anything older than what they hold.
+    GroupUpdate {
         group_id: String,
         name: String,
-        members: Vec<String>,
+        rev: i64,
+        members: Vec<crate::chat::types::GroupMember>,
     },
     /// Sender retracted a message ("delete for everyone").
     Delete {
         msg_id: String,
     },
-    /// Sender cleared the whole conversation on both sides.
+    /// Retired: builds up to 0.3.0 sent this to wipe the other side too.
+    /// Kept so their frames still decode; it is ignored on receipt.
     ClearChat,
     Ping,
     Pong,
+    /// Any `type` this build does not know. Newer peers may send frames we
+    /// have not learned yet; dropping the connection over one would be worse
+    /// than skipping it.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug)]
@@ -217,6 +266,33 @@ mod tests {
             Some(Frame::Control(ControlMsg::Ping))
         ));
         assert!(read_frame(&mut cursor).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn unknown_control_type_is_tolerated() {
+        let payload = br#"{"type":"from_the_future","x":1}"#;
+        let mut buf = vec![KIND_CONTROL];
+        buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        buf.extend_from_slice(payload);
+        write_frame(
+            &mut buf,
+            &Frame::Control(ControlMsg::Rename { display_name: "Benji".into(), port: None }),
+        )
+        .await
+        .unwrap();
+
+        let mut cursor = std::io::Cursor::new(buf);
+        assert!(matches!(
+            read_frame(&mut cursor).await.unwrap(),
+            Some(Frame::Control(ControlMsg::Unknown))
+        ));
+        match read_frame(&mut cursor).await.unwrap().unwrap() {
+            Frame::Control(ControlMsg::Rename { display_name, port }) => {
+                assert_eq!(display_name, "Benji");
+                assert_eq!(port, None);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[tokio::test]

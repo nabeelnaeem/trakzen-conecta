@@ -27,6 +27,7 @@ import type {
   SettingsView,
   SyncEvent,
   TransferProgress,
+  TypingEvent,
 } from "./types";
 
 // Typed wrappers so components never touch raw command names.
@@ -128,7 +129,7 @@ export const chat = {
   addNearby: (peerId: string) => invoke<Peer>("chat_add_nearby", { peerId }),
   pairingQr: () => invoke<[string, string]>("chat_pairing_qr"),
   onNearby: (cb: (n: Nearby[]) => void) => listen<Nearby[]>("chat://nearby", (e) => cb(e.payload)),
-  onTyping: (cb: (peerId: number) => void) => listen<number>("chat://typing", (e) => cb(e.payload)),
+  onTyping: (cb: (t: TypingEvent) => void) => listen<TypingEvent>("chat://typing", (e) => cb(e.payload)),
   sendFile: (peerId: number, path: string) =>
     invoke<ChatMessage>("chat_send_file", { peerId, path }),
   openFile: (path: string, reveal: boolean) => invoke<void>("chat_open_file", { path, reveal }),
@@ -136,11 +137,18 @@ export const chat = {
     invoke<string>("chat_stash_blob", bytes, { headers: { "x-file-name": encodeURIComponent(name) } }),
   filePreview: (path: string) => invoke<string | null>("chat_file_preview", { path }),
   pauseTransfer: (transferId: string, pause: boolean) => invoke<void>("chat_pause_transfer", { transferId, pause }),
+  answerFile: (msgId: string, accept: boolean, always = false) => invoke<void>("chat_answer_file", { msgId, accept, always }),
+  setAutoAccept: (peerId: number, on: boolean) => invoke<Peer>("chat_set_auto_accept", { peerId, on }),
   pin: (msgId: string, pinned: boolean) => invoke<ChatMessage | null>("chat_pin", { msgId, pinned }),
   createGroup: (name: string, memberIds: number[]) => invoke<Peer>("chat_create_group", { name, memberIds }),
+  groupMembers: (groupId: number) => invoke<Peer[]>("chat_group_members", { groupId }),
+  groupAddMembers: (groupId: number, memberIds: number[]) => invoke<Peer>("chat_group_add_members", { groupId, memberIds }),
+  groupRemoveMember: (groupId: number, memberId: number) => invoke<Peer>("chat_group_remove_member", { groupId, memberId }),
+  groupRename: (groupId: number, name: string) => invoke<Peer>("chat_group_rename", { groupId, name }),
+  groupLeave: (groupId: number) => invoke<Peer>("chat_group_leave", { groupId }),
   deleteMessage: (msgId: string, forEveryone: boolean) =>
     invoke<void>("chat_delete_message", { msgId, forEveryone }),
-  clearChat: (peerId: number, forEveryone: boolean) => invoke<void>("chat_clear_chat", { peerId, forEveryone }),
+  clearChat: (peerId: number) => invoke<void>("chat_clear_chat", { peerId }),
   storageStats: () => invoke<StorageStats>("chat_storage_stats"),
   clearStorage: (which: "received" | "outgoing") => invoke<number>("chat_clear_storage", { which }),
   onDeleted: (cb: (d: DeletedEvent) => void) =>

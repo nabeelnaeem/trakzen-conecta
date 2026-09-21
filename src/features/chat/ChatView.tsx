@@ -8,10 +8,11 @@ import { bytes, shortDate, timeOnly } from "../../lib/format";
 import { chat as chatIpc, errorMessage } from "../../lib/ipc";
 import { codeFromCopyButton, isOnlyCodeBlock, renderMarkdown } from "../../lib/markdown";
 import { navigateTo } from "../../lib/navigate";
-import { useMail } from "../mail/store";
+import { textToHtml, useMail } from "../mail/store";
 import { Spinner } from "../../lib/Spinner";
-import type { ChatMessage, TransferProgress } from "../../lib/types";
-import { Check, CheckCheck, Clock, MoreHorizontal, Paperclip, Pencil, QrCode, Search, Send, SmilePlus, X } from "lucide-react";
+import type { ChatMessage, Peer, TransferProgress } from "../../lib/types";
+import { confirmDialog } from "../../lib/confirm";
+import { Check, CheckCheck, Clock, MoreHorizontal, Paperclip, Pencil, QrCode, Search, Send, SmilePlus, Users, X } from "lucide-react";
 
 const QUICK_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🙏", "✅", "👀"];
 
@@ -118,12 +119,13 @@ export function ChatView() {
         {active ? (
           <Conversation
             key={active.id}
+            peer={active}
             peerId={active.id}
             name={active.displayName}
             seed={active.peerId ?? active.host}
             host={`${active.host}:${active.port}`}
             online={active.online}
-            typing={!!s.typing[active.id]}
+            typing={s.typing[active.id] ?? null}
           />
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 text-sm text-gray-400">
@@ -362,8 +364,22 @@ interface Pending {
 const MAX_ROWS = 8;
 const CODE_LANGS = ["", "typescript", "javascript", "python", "rust", "go", "java", "csharp", "sql", "bash", "json", "yaml", "html", "css"];
 
-function Conversation({ peerId, name, seed, host, online, typing }: { peerId: number; name: string; seed: string; host: string; online: boolean; typing: boolean }) {
+function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer: Peer; peerId: number; name: string; seed: string; host: string; online: boolean; typing: { who: string | null } | null }) {
   const { messages, transfers, sendText, sendFile, removePeer, clearChat, edit } = useChat();
+  const isGroup = !!peer.isGroup;
+  const left = !!peer.groupLeft;
+  const [members, setMembers] = useState<Peer[] | null>(null);
+  const [showMembers, setShowMembers] = useState(false);
+  const peerVersion = useChat((st) => st.peers);
+  useEffect(() => {
+    if (!isGroup) return;
+    let alive = true;
+    chatIpc.groupMembers(peerId).then((m) => alive && setMembers(m)).catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+    // Re-read whenever any peer changes: a roster update arrives as a peer event.
+  }, [isGroup, peerId, peerVersion]);
   const [text, setText] = useState("");
   const [editing, setEditing] = useState<ChatMessage | null>(null);
   const [pending, setPending] = useState<Pending[]>([]);
@@ -586,7 +602,15 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
         <div className="min-w-0">
           <div className="truncate font-medium">{name}</div>
           <div className="text-xs text-gray-500">
-            {typing ? <em className="text-blue-700">typing…</em> : <>{host} · {online ? <span className="text-green-700">online</span> : "offline"}</>}
+            {typing ? (
+              <em className="text-blue-700">{typing.who ? `${typing.who} is typing…` : "typing…"}</em>
+            ) : isGroup ? (
+              <button className="hover:underline" onClick={() => setShowMembers(true)}>
+                {left ? "you left this group" : members ? `${members.length + 1} members · ${members.filter((m) => m.online).length} online` : "group"}
+              </button>
+            ) : (
+              <>{host} · {online ? <span className="text-green-700">online</span> : "offline"}</>
+            )}
           </div>
         </div>
         <div className="flex-1" />
@@ -606,36 +630,90 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
           </button>
           {menu && (
             <div className="absolute right-0 z-10 mt-1 w-60 rounded-md border border-gray-200 bg-white py-1 shadow-lg">
+              {isGroup && (
+                <MenuItem
+                  onClick={() => {
+                    setMenu(false);
+                    setShowMembers(true);
+                  }}
+                >
+                  Members…
+                </MenuItem>
+              )}
+              {!isGroup && (
+                <MenuItem
+                  onClick={() => {
+                    setMenu(false);
+                    void chatIpc.setAutoAccept(peerId, !peer.autoAcceptFiles).then((p) => useChat.getState().loadPeers().then(() => p));
+                  }}
+                >
+                  {peer.autoAcceptFiles ? "Ask before accepting files" : "Always accept files"}
+                </MenuItem>
+              )}
               <MenuItem
                 onClick={() => {
                   setMenu(false);
-                  if (confirm("Clear this chat on this machine only?")) void clearChat(false);
+                  void confirmDialog({
+                    title: "Clear this chat?",
+                    message: `Messages and received files from ${name} are removed from this machine only. ${name} keeps their copy.`,
+                    confirmLabel: "Clear chat",
+                    danger: true,
+                  }).then((ok) => {
+                    if (ok) void clearChat();
+                  });
                 }}
               >
                 Clear chat for me
               </MenuItem>
-              <MenuItem
-                onClick={() => {
-                  setMenu(false);
-                  if (confirm(`Clear this chat for you and ${name}?`)) void clearChat(true);
-                }}
-              >
-                Clear chat for everyone
-              </MenuItem>
               <div className="my-1 border-t border-gray-100" />
+              {isGroup && !left && (
+                <MenuItem
+                  danger
+                  onClick={() => {
+                    setMenu(false);
+                    void confirmDialog({
+                      title: `Leave ${name}?`,
+                      message: "The other members are told you left. The history stays on this machine until you delete the group.",
+                      confirmLabel: "Leave group",
+                      danger: true,
+                    }).then((ok) => {
+                      if (ok) void chatIpc.groupLeave(peerId).catch((e) => useChat.setState({ error: errorMessage(e) }));
+                    });
+                  }}
+                >
+                  Leave group
+                </MenuItem>
+              )}
               <MenuItem
                 danger
                 onClick={() => {
                   setMenu(false);
-                  if (confirm(`Remove ${name} and the chat history?`)) void removePeer(peerId);
+                  void confirmDialog({
+                    title: isGroup ? `Delete ${name}?` : `Remove ${name}?`,
+                    message: isGroup
+                      ? left
+                        ? "The group and its history are deleted from this machine."
+                        : "You leave the group and its history is deleted from this machine."
+                      : "The peer and the whole chat history are deleted from this machine.",
+                    confirmLabel: isGroup ? "Delete group" : "Remove peer",
+                    danger: true,
+                  }).then(async (ok) => {
+                    if (!ok) return;
+                    if (isGroup && !left) await chatIpc.groupLeave(peerId).catch(() => undefined);
+                    void removePeer(peerId);
+                  });
                 }}
               >
-                Remove peer
+                {isGroup ? "Delete group" : "Remove peer"}
               </MenuItem>
             </div>
           )}
         </div>
       </div>
+
+      {showMembers && isGroup && (
+        <GroupMembers groupId={peerId} name={name} left={left} members={members ?? []} onClose={() => setShowMembers(false)} />
+      )}
 
       {search !== null && (
         <div className="flex items-center gap-2 border-b border-gray-200 bg-gray-50 px-4 py-1.5">
@@ -680,9 +758,10 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
           {shown.map((m) => {
             const day = new Date(m.createdAt).toDateString();
             const showDay = day !== lastDay;
-            const grouped = !showDay && lastFrom === m.direction && m.createdAt - lastAt < 3 * 60_000;
+            const from = m.direction === "out" ? "me" : (m.senderId ?? "peer");
+            const grouped = !showDay && lastFrom === from && m.createdAt - lastAt < 3 * 60_000;
             lastDay = day;
-            lastFrom = m.direction;
+            lastFrom = from;
             lastAt = m.createdAt;
             return (
               <div key={m.msgId}>
@@ -716,6 +795,9 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
         </div>
       </div>
 
+      {left ? (
+        <div className="border-t border-gray-200 px-4 py-3 text-center text-sm text-gray-500">You are no longer in this group.</div>
+      ) : (
       <div className="border-t border-gray-200">
         <div className="mx-auto w-full max-w-[880px] px-3 pt-2 pb-3">
           {editing && (
@@ -801,7 +883,13 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
               className={`input min-h-[40px] flex-1 resize-none ${codeMode ? "rounded-t-none border-gray-700 bg-gray-900 font-mono text-[13px] text-gray-100 placeholder:text-gray-500 focus:border-gray-500 focus:ring-0" : "font-sans"}`}
               rows={1}
               spellCheck={!codeMode}
-              placeholder={codeMode ? "Paste or type code…" : online ? "Message… (Enter to send, Shift+Enter for a new line)" : "Peer is offline — messages are queued and sent when it returns"}
+              placeholder={
+                codeMode
+                  ? "Paste or type code…"
+                  : isGroup || online
+                    ? "Message… (Enter to send, Shift+Enter for a new line)"
+                    : "Peer is offline — messages are queued and sent when it returns"
+              }
               value={text}
               onChange={(e) => onChange(e.target.value)}
               onKeyDown={onKey}
@@ -814,6 +902,7 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
           </div>
         </div>
       </div>
+      )}
 
       {dragging && (
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-blue-600/10 backdrop-blur-[1px]">
@@ -822,6 +911,113 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function GroupMembers({ groupId, name, left, members, onClose }: { groupId: number; name: string; left: boolean; members: Peer[]; onClose: () => void }) {
+  const { peers, identity } = useChat();
+  const [title, setTitle] = useState(name);
+  const [adding, setAdding] = useState(false);
+  const [picked, setPicked] = useState<number[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const memberIds = new Set(members.map((m) => m.id));
+  const candidates = peers.filter((p) => !p.isGroup && !memberIds.has(p.id));
+  const run = (p: Promise<unknown>) => p.then(() => setErr(null)).catch((e) => setErr(errorMessage(e)));
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="w-[420px] rounded-lg border border-gray-300 bg-white p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-3 flex items-center gap-2">
+          <Users size={16} className="text-gray-500" />
+          {left ? (
+            <div className="flex-1 font-medium">{name}</div>
+          ) : (
+            <input
+              className="input flex-1"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              onBlur={() => title.trim() && title.trim() !== name && run(chatIpc.groupRename(groupId, title))}
+              onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
+              aria-label="Group name"
+            />
+          )}
+          <button className="btn btn-ghost text-xs" onClick={onClose}>
+            Close
+          </button>
+        </div>
+        <ul className="max-h-64 space-y-1 overflow-y-auto text-sm">
+          <li className="flex items-center gap-2 py-1">
+            <Avatar name={identity?.displayName ?? "Me"} seed={identity?.peerId ?? "me"} size={24} />
+            <span className="flex-1 truncate">{identity?.displayName ?? "Me"}</span>
+            <span className="text-[11px] text-gray-500">{left ? "left" : "you"}</span>
+          </li>
+          {members.map((m) => (
+            <li key={m.id} className="flex items-center gap-2 py-1">
+              <Avatar name={m.displayName} seed={m.peerId ?? m.host} size={24} />
+              <span className="flex-1 truncate">{m.displayName}</span>
+              <span className={`h-2 w-2 rounded-full ${m.online ? "bg-green-500" : "bg-gray-400"}`} title={m.online ? "Online" : "Offline"} />
+              {!left && (
+                <button
+                  className="rounded px-1 text-gray-400 hover:bg-gray-100 hover:text-red-700"
+                  title="Remove from group"
+                  onClick={() =>
+                    void confirmDialog({
+                      title: `Remove ${m.displayName} from ${name}?`,
+                      message: "They are told they were removed and stop receiving the group's messages.",
+                      confirmLabel: "Remove",
+                      danger: true,
+                    }).then((ok) => {
+                      if (ok) void run(chatIpc.groupRemoveMember(groupId, m.id));
+                    })
+                  }
+                >
+                  <X size={14} />
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+        {!left && !adding && candidates.length > 0 && (
+          <button className="btn mt-3 w-full justify-center text-xs" onClick={() => setAdding(true)}>
+            + Add members
+          </button>
+        )}
+        {adding && (
+          <div className="mt-3 space-y-2 border-t border-gray-200 pt-2">
+            <div className="max-h-32 overflow-y-auto text-xs">
+              {candidates.map((p) => (
+                <label key={p.id} className="flex items-center gap-2 py-0.5">
+                  <input
+                    type="checkbox"
+                    checked={picked.includes(p.id)}
+                    onChange={() => setPicked((cur) => (cur.includes(p.id) ? cur.filter((id) => id !== p.id) : [...cur, p.id]))}
+                  />
+                  {p.displayName}
+                  {!p.peerId && <span className="text-gray-400">(never connected)</span>}
+                </label>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <button
+                className="btn btn-primary flex-1 justify-center text-xs"
+                disabled={picked.length === 0}
+                onClick={() =>
+                  void run(chatIpc.groupAddMembers(groupId, picked)).then(() => {
+                    setPicked([]);
+                    setAdding(false);
+                  })
+                }
+              >
+                Add
+              </button>
+              <button className="btn text-xs" onClick={() => setAdding(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+        {err && <div className="mt-2 text-xs text-red-700">{err}</div>}
+      </div>
     </div>
   );
 }
@@ -845,10 +1041,12 @@ function FmtButton({ children, title, onClick }: { children: React.ReactNode; ti
 function Ticks({ status, mine }: { status: string; mine: boolean }) {
   if (!mine) return null;
   if (status === "queued") return <Clock size={11} aria-label="Queued until the peer is online" />;
+  if (status === "offered") return <Clock size={11} aria-label="Waiting for the peer to accept" />;
   if (status === "sending") return <Check size={12} aria-label="Sending" />;
   if (status === "failed") return <X size={12} aria-label="Failed" />;
-  if (status === "read") return <CheckCheck size={13} className="text-cyan-300" aria-label="Read" />;
-  return <CheckCheck size={13} className="opacity-70" aria-label="Delivered" />;
+  if (status === "declined") return <X size={12} aria-label="Declined by the peer" />;
+  if (status === "read") return <CheckCheck size={13} className="text-emerald-300" aria-label="Read" />;
+  return <CheckCheck size={13} className="text-sky-300" aria-label="Delivered" />;
 }
 
 function Bubble({
@@ -874,12 +1072,16 @@ function Bubble({
   const [emojiRow, setEmojiRow] = useState(false);
   // Images and code blocks stand on their own; only plain text gets the fill.
   const frameless = m.kind === "file" || (m.kind === "text" && isOnlyCodeBlock(m.body));
-  const peerName = peers.find((p) => p.id === m.peerId)?.displayName ?? "peer";
+  const conversation = peers.find((p) => p.id === m.peerId);
+  const peerName = conversation?.displayName ?? "peer";
+  const inGroup = !!conversation?.isGroup;
+  const nameOf = (who: string) =>
+    who === "me" ? "You" : inGroup ? (peers.find((p) => p.peerId === who)?.displayName ?? "member") : peerName;
   const sendAsEmail = async () => {
     setMenu(false);
     await openCompose();
     const body = m.kind === "file" ? "" : m.body;
-    updateComposer({ subject: `Chat with ${peerName}`, body, files: m.kind === "file" && m.filePath ? [m.filePath] : [] });
+    updateComposer({ subject: `Chat with ${peerName}`, body, bodyHtml: textToHtml(body), files: m.kind === "file" && m.filePath ? [m.filePath] : [] });
     navigateTo("mail");
   };
   const ref = useRef<HTMLDivElement>(null);
@@ -1005,6 +1207,9 @@ function Bubble({
         </button>
       )}
       <div className={`flex flex-col ${mine ? "items-end" : "items-start"} ${m.body.includes("```") || m.kind === "file" ? "max-w-[85%]" : "max-w-[60%]"}`}>
+      {inGroup && !mine && !grouped && (
+        <div className="mb-0.5 px-1 text-[11px] font-medium text-blue-700">{m.senderName ?? "Unknown member"}</div>
+      )}
       <div
         className={`${frameless ? "p-0" : "px-3 py-1.5"} text-sm ${
           frameless
@@ -1025,13 +1230,6 @@ function Bubble({
             {m.preview.image && <img src={m.preview.image} alt="" className="max-h-32 w-full object-cover" />}
             <div className="px-2 py-1 font-medium">{m.preview.title}</div>
             {m.preview.description && <div className="px-2 pb-1 text-gray-500 line-clamp-2">{m.preview.description}</div>}
-          </a>
-        )}
-        {m.preview?.title && (
-          <a href={m.preview.url} className="mt-1 block overflow-hidden rounded-md border border-gray-200 bg-white text-left text-xs text-gray-800" onClick={(e) => { e.preventDefault(); void openUrl(m.preview!.url); }}>
-            {m.preview.image && <img src={m.preview.image} alt="" className="max-h-32 w-full object-cover" />}
-            <div className="px-2 py-1 font-medium">{m.preview.title}</div>
-            {m.preview.description && <div className="px-2 pb-1 text-gray-500">{m.preview.description}</div>}
           </a>
         )}
         {!frameless && (
@@ -1056,7 +1254,7 @@ function Bubble({
               key={emoji}
               className={`rounded-full border px-1.5 py-0.5 text-xs ${who.includes("me") ? "border-blue-400 bg-blue-50 text-blue-900" : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"}`}
               onClick={() => void react(m.msgId, emoji)}
-              title={who.map((w) => (w === "me" ? "You" : peerName)).join(", ")}
+              title={who.map(nameOf).join(", ")}
             >
               {emoji} {who.length > 1 ? who.length : ""}
             </button>
@@ -1116,7 +1314,10 @@ function MarkdownBody({ body, mine }: { body: string; mine: boolean }) {
 }
 
 function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: boolean; progress?: TransferProgress; frameless?: boolean }) {
-  void mine;
+  const peers = useChat((st) => st.peers);
+  const conversation = peers.find((p) => p.id === m.peerId);
+  const peerName = conversation?.displayName ?? "the peer";
+  const senderName = conversation?.isGroup ? (m.senderName ?? "this member") : peerName;
   const [preview, setPreview] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const done = m.status === "unread" || m.status === "received" || m.status === "delivered" || m.status === "read" || (mine && m.status !== "failed");
@@ -1165,7 +1366,27 @@ function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: bool
           </>
         )}
         {done && !m.filePath && <span>(file removed)</span>}
+        {mine && m.status === "offered" && <span>· waiting for {peerName} to accept</span>}
+        {!mine && m.status === "accepted" && <span>· accepted, waiting for the sender</span>}
+        {m.status === "declined" && <span>· {mine ? "declined" : "you declined"}</span>}
+        {m.status === "expired" && <span>· offer expired</span>}
+        {!mine && m.status === "interrupted" && <span>· waiting for the sender to reconnect</span>}
+        {!mine && m.status === "receiving" && !progress && <span>· receiving…</span>}
+        {mine && m.status === "queued" && <span>· queued</span>}
       </div>
+      {!mine && m.status === "offered" && (
+        <div className="mt-1 flex flex-wrap gap-1">
+          <button className="btn btn-primary text-xs" onClick={() => void chatIpc.answerFile(m.msgId, true).catch((e) => setErr(errorMessage(e)))}>
+            Accept
+          </button>
+          <button className="btn text-xs" onClick={() => void chatIpc.answerFile(m.msgId, false).catch((e) => setErr(errorMessage(e)))}>
+            Decline
+          </button>
+          <button className="btn text-xs" title="Accept this and every future file from them without asking" onClick={() => void chatIpc.answerFile(m.msgId, true, true).catch((e) => setErr(errorMessage(e)))}>
+            Always accept from {senderName}
+          </button>
+        </div>
+      )}
       {err && <div className="text-xs text-red-700">{err}</div>}
       {pct !== null && (
         <div className="mt-1 h-1 overflow-hidden rounded bg-gray-300">

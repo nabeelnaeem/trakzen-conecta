@@ -154,6 +154,9 @@ pub struct DraftContent {
     pub bcc: Vec<String>,
     pub subject: String,
     pub body_text: String,
+    /// The user-written part of a draft saved by this app, when present.
+    #[serde(default)]
+    pub body_html: Option<String>,
     pub thread_id: Option<String>,
     pub in_reply_to: Option<String>,
     pub references: Option<String>,
@@ -220,6 +223,10 @@ pub struct AttachmentInfo {
     pub filename: String,
     pub mime_type: String,
     pub size: i64,
+    /// `Content-ID` without the angle brackets, for parts the HTML body
+    /// embeds as `cid:` images.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,6 +273,7 @@ pub struct RemoteAttachment {
     pub filename: String,
     pub mime_type: String,
     pub size: i64,
+    pub content_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -413,6 +421,10 @@ pub struct OutgoingMessage {
     pub bcc: Vec<String>,
     pub subject: String,
     pub body_text: String,
+    /// What the user wrote, as HTML from the rich editor. `body_text` is
+    /// the plain-text rendering of the same content.
+    #[serde(default)]
+    pub body_html: Option<String>,
     /// Extra HTML appended below the user's text (quoted original when
     /// replying/forwarding). Already sanitised.
     #[serde(default)]

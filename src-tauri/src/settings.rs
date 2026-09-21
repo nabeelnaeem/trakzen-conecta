@@ -10,6 +10,7 @@ pub const CHAT_DISPLAY_NAME: &str = "chat_display_name";
 pub const CHAT_PEER_ID: &str = "chat_peer_id";
 pub const CHAT_PORT: &str = "chat_port";
 pub const CHAT_DOWNLOAD_DIR: &str = "chat_download_dir";
+pub const CHAT_ASK_FILES: &str = "chat_ask_files";
 pub const MAIL_SHOW_IMAGES: &str = "mail_show_images";
 pub const MAIL_SIGNATURE: &str = "mail_signature";
 
@@ -94,6 +95,8 @@ pub struct SettingsView {
     pub chat_display_name: String,
     pub chat_port: u16,
     pub chat_download_dir: String,
+    /// Ask before an incoming file is written to disk.
+    pub chat_ask_files: bool,
     pub mail_show_images: bool,
     pub mail_signature: String,
     /// account id → signature override (absent = use the global one).
@@ -121,6 +124,7 @@ pub fn view(db: &Db) -> Result<SettingsView> {
             .and_then(|p| p.parse().ok())
             .unwrap_or(DEFAULT_CHAT_PORT),
         chat_download_dir: get(db, CHAT_DOWNLOAD_DIR)?.unwrap_or_default(),
+        chat_ask_files: flag(db, CHAT_ASK_FILES, true)?,
         // Off by default: loading remote images tells senders you opened the mail.
         mail_show_images: get(db, MAIL_SHOW_IMAGES)?.map_or(false, |v| v == "true"),
         mail_signature: get(db, MAIL_SIGNATURE)?.unwrap_or_default(),
@@ -146,7 +150,7 @@ pub fn view(db: &Db) -> Result<SettingsView> {
     })
 }
 
-fn flag(db: &Db, key: &str, default: bool) -> Result<bool> {
+pub fn flag(db: &Db, key: &str, default: bool) -> Result<bool> {
     Ok(get(db, key)?.map_or(default, |v| v == "true"))
 }
 

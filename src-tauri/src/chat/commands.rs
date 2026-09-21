@@ -206,8 +206,8 @@ pub async fn chat_delete_message(state: State<'_, AppState>, msg_id: String, for
 }
 
 #[tauri::command]
-pub async fn chat_clear_chat(state: State<'_, AppState>, peer_id: i64, for_everyone: bool) -> Result<()> {
-    state.chat.clear_chat(peer_id, for_everyone).await
+pub async fn chat_clear_chat(state: State<'_, AppState>, peer_id: i64) -> Result<()> {
+    state.chat.clear_chat(peer_id).await
 }
 
 #[derive(serde::Serialize)]
@@ -331,6 +331,21 @@ pub async fn chat_pause_transfer(state: State<'_, AppState>, transfer_id: String
     Ok(())
 }
 
+/// Accept or decline a file a peer is offering (message status `offered`).
+/// `always` also switches the sender to auto-accept from now on.
+#[tauri::command]
+pub async fn chat_answer_file(state: State<'_, AppState>, msg_id: String, accept: bool, always: Option<bool>) -> Result<()> {
+    state.chat.answer_offer(&msg_id, accept, always.unwrap_or(false)).await
+}
+
+#[tauri::command]
+pub async fn chat_set_auto_accept(state: State<'_, AppState>, peer_id: i64, on: bool) -> Result<Peer> {
+    state.chat.store.set_auto_accept(peer_id, on)?;
+    let mut p = state.chat.store.get_peer(peer_id)?;
+    p.online = state.chat.is_online(peer_id);
+    Ok(p)
+}
+
 #[tauri::command]
 pub async fn chat_pin(state: State<'_, AppState>, msg_id: String, pinned: bool) -> Result<Option<ChatMessage>> {
     state.chat.pin_message(&msg_id, pinned).await
@@ -338,10 +353,32 @@ pub async fn chat_pin(state: State<'_, AppState>, msg_id: String, pinned: bool) 
 
 #[tauri::command]
 pub async fn chat_create_group(state: State<'_, AppState>, name: String, member_ids: Vec<i64>) -> Result<Peer> {
-    if name.trim().is_empty() {
-        return Err(AppError::Other("group name is required".into()));
-    }
     state.chat.create_group(&name, member_ids).await
+}
+
+#[tauri::command]
+pub async fn chat_group_members(state: State<'_, AppState>, group_id: i64) -> Result<Vec<Peer>> {
+    state.chat.group_members(group_id)
+}
+
+#[tauri::command]
+pub async fn chat_group_add_members(state: State<'_, AppState>, group_id: i64, member_ids: Vec<i64>) -> Result<Peer> {
+    state.chat.add_members(group_id, member_ids).await
+}
+
+#[tauri::command]
+pub async fn chat_group_remove_member(state: State<'_, AppState>, group_id: i64, member_id: i64) -> Result<Peer> {
+    state.chat.remove_member(group_id, member_id).await
+}
+
+#[tauri::command]
+pub async fn chat_group_rename(state: State<'_, AppState>, group_id: i64, name: String) -> Result<Peer> {
+    state.chat.rename_group(group_id, &name).await
+}
+
+#[tauri::command]
+pub async fn chat_group_leave(state: State<'_, AppState>, group_id: i64) -> Result<Peer> {
+    state.chat.leave_group(group_id).await
 }
 
 fn urlencoding_decode(s: &str) -> String {
