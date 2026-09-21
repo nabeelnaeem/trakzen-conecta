@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { confirmDialog } from "../../lib/confirm";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useMail } from "./store";
 import { buildFrameDoc } from "./frame";
@@ -166,7 +167,10 @@ export function Composer() {
           <button
             className="btn btn-ghost text-red-700"
             onClick={() => {
-              if (!c.draftId || confirm("Discard this draft?")) void discardDraft();
+              if (!c.draftId) void discardDraft();
+              else void confirmDialog({ title: "Discard this draft?", confirmLabel: "Discard", danger: true }).then((ok) => {
+                  if (ok) void discardDraft();
+                });
             }}
             title="Delete draft"
           >

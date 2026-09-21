@@ -206,8 +206,8 @@ pub async fn chat_delete_message(state: State<'_, AppState>, msg_id: String, for
 }
 
 #[tauri::command]
-pub async fn chat_clear_chat(state: State<'_, AppState>, peer_id: i64, for_everyone: bool) -> Result<()> {
-    state.chat.clear_chat(peer_id, for_everyone).await
+pub async fn chat_clear_chat(state: State<'_, AppState>, peer_id: i64) -> Result<()> {
+    state.chat.clear_chat(peer_id).await
 }
 
 #[derive(serde::Serialize)]

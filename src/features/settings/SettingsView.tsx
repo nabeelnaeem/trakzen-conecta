@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { confirmDialog } from "../../lib/confirm";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { disable as autostartDisable, enable as autostartEnable, isEnabled as autostartEnabled } from "@tauri-apps/plugin-autostart";
@@ -777,7 +778,13 @@ function ChatTab({ s, save }: { s: Settings; save: Save }) {
     void load();
   }, []);
   const clear = async (which: "received" | "outgoing", label: string) => {
-    if (!confirm(`Delete all ${label}? Messages stay, but their files will be gone.`)) return;
+    const ok = await confirmDialog({
+      title: `Delete all ${label}?`,
+      message: "Messages stay, but their files will be gone.",
+      confirmLabel: "Delete files",
+      danger: true,
+    });
+    if (!ok) return;
     const n = await chatIpc.clearStorage(which);
     setMsg(`${n} file${n === 1 ? "" : "s"} deleted.`);
     void load();

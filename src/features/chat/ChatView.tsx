@@ -11,6 +11,7 @@ import { navigateTo } from "../../lib/navigate";
 import { useMail } from "../mail/store";
 import { Spinner } from "../../lib/Spinner";
 import type { ChatMessage, TransferProgress } from "../../lib/types";
+import { confirmDialog } from "../../lib/confirm";
 import { Check, CheckCheck, Clock, MoreHorizontal, Paperclip, Pencil, QrCode, Search, Send, SmilePlus, X } from "lucide-react";
 
 const QUICK_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🙏", "✅", "👀"];
@@ -609,25 +610,31 @@ function Conversation({ peerId, name, seed, host, online, typing }: { peerId: nu
               <MenuItem
                 onClick={() => {
                   setMenu(false);
-                  if (confirm("Clear this chat on this machine only?")) void clearChat(false);
+                  void confirmDialog({
+                    title: "Clear this chat?",
+                    message: `Messages and received files from ${name} are removed from this machine only. ${name} keeps their copy.`,
+                    confirmLabel: "Clear chat",
+                    danger: true,
+                  }).then((ok) => {
+                    if (ok) void clearChat();
+                  });
                 }}
               >
                 Clear chat for me
-              </MenuItem>
-              <MenuItem
-                onClick={() => {
-                  setMenu(false);
-                  if (confirm(`Clear this chat for you and ${name}?`)) void clearChat(true);
-                }}
-              >
-                Clear chat for everyone
               </MenuItem>
               <div className="my-1 border-t border-gray-100" />
               <MenuItem
                 danger
                 onClick={() => {
                   setMenu(false);
-                  if (confirm(`Remove ${name} and the chat history?`)) void removePeer(peerId);
+                  void confirmDialog({
+                    title: `Remove ${name}?`,
+                    message: "The peer and the whole chat history are deleted from this machine.",
+                    confirmLabel: "Remove peer",
+                    danger: true,
+                  }).then((ok) => {
+                    if (ok) void removePeer(peerId);
+                  });
                 }}
               >
                 Remove peer

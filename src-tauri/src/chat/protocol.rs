@@ -119,7 +119,8 @@ pub enum ControlMsg {
     Delete {
         msg_id: String,
     },
-    /// Sender cleared the whole conversation on both sides.
+    /// Retired: builds up to 0.3.0 sent this to wipe the other side too.
+    /// Kept so their frames still decode; it is ignored on receipt.
     ClearChat,
     Ping,
     Pong,

@@ -574,12 +574,9 @@ impl ChatEngine {
                 }
             }
             ControlMsg::ClearChat => {
-                let paths = self.store.clear_messages(row_id)?;
-                for p in paths {
-                    self.remove_file_if_ours(Some(&p)).await;
-                }
-                let _ = self.app.emit(EVENT_DELETED, DeletedEvent { peer_id: row_id, msg_ids: vec![] });
-                self.emit_peer(row_id);
+                // Older builds could ask us to wipe a conversation; history
+                // on this machine is only ever cleared by its owner.
+                tracing::debug!(row_id, "ignoring clear-chat request from peer");
             }
             ControlMsg::Ping => {
                 let _ = out.send(Frame::Control(ControlMsg::Pong)).await;
@@ -649,15 +646,10 @@ impl ChatEngine {
         Ok(())
     }
 
-    pub async fn clear_chat(self: &Arc<Self>, row_id: i64, for_everyone: bool) -> Result<()> {
+    pub async fn clear_chat(self: &Arc<Self>, row_id: i64) -> Result<()> {
         let paths = self.store.clear_messages(row_id)?;
         for p in paths {
             self.remove_file_if_ours(Some(&p)).await;
-        }
-        if for_everyone {
-            if let Ok(tx) = self.connect_peer(row_id).await {
-                let _ = tx.send(Frame::Control(ControlMsg::ClearChat)).await;
-            }
         }
         let _ = self.app.emit(EVENT_DELETED, DeletedEvent { peer_id: row_id, msg_ids: vec![] });
         self.emit_peer(row_id);

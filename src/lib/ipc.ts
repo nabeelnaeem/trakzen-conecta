@@ -140,7 +140,7 @@ export const chat = {
   createGroup: (name: string, memberIds: number[]) => invoke<Peer>("chat_create_group", { name, memberIds }),
   deleteMessage: (msgId: string, forEveryone: boolean) =>
     invoke<void>("chat_delete_message", { msgId, forEveryone }),
-  clearChat: (peerId: number, forEveryone: boolean) => invoke<void>("chat_clear_chat", { peerId, forEveryone }),
+  clearChat: (peerId: number) => invoke<void>("chat_clear_chat", { peerId }),
   storageStats: () => invoke<StorageStats>("chat_storage_stats"),
   clearStorage: (which: "received" | "outgoing") => invoke<number>("chat_clear_storage", { which }),
   onDeleted: (cb: (d: DeletedEvent) => void) =>
