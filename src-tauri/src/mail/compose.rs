@@ -1,6 +1,7 @@
 //! Builds outgoing RFC 5322 messages and pre-fills reply / forward drafts.
 //! Provider-independent: the result is raw bytes any provider can submit.
 
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use chrono::{Local, TimeZone};
 use lettre::message::{header::ContentType, Attachment, Mailbox, Message, MultiPart};
 
@@ -45,14 +46,30 @@ pub fn build_raw_lenient(
     let clean = |v: &Vec<String>| -> Vec<String> {
         v.iter().filter(|a| mailbox(a).is_ok()).cloned().collect()
     };
-    let lenient = OutgoingMessage {
+    let mut lenient = OutgoingMessage {
         to: clean(&msg.to),
         cc: clean(&msg.cc),
         bcc: clean(&msg.bcc),
         ..msg.clone()
     };
-    build_raw(account, &lenient, attachments)
+    // lettre refuses to build a message with an empty envelope, but a draft
+    // often has no recipient yet. Give it a sentinel and cut the header back
+    // out of the bytes; the provider stores the draft without a To.
+    let no_recipients = lenient.to.is_empty() && lenient.cc.is_empty() && lenient.bcc.is_empty();
+    if no_recipients {
+        lenient.to.push(DRAFT_SENTINEL.into());
+    }
+    let raw = build_raw(account, &lenient, attachments)?;
+    if !no_recipients {
+        return Ok(raw);
+    }
+    let text = String::from_utf8(raw).map_err(|e| AppError::Other(format!("mime is not utf-8: {e}")))?;
+    let line = format!("To: {DRAFT_SENTINEL}\r\n");
+    Ok(text.replacen(&line, "", 1).into_bytes())
 }
+
+/// Placeholder recipient used only while building a recipient-less draft.
+const DRAFT_SENTINEL: &str = "draft@invalid";
 
 pub fn build_raw(
     account: &Account,
@@ -95,11 +112,24 @@ pub fn build_raw(
         text.push_str(&sanitize::html_to_text(q));
     }
 
+    // Images pasted into the editor or a signature arrive as data: URLs,
+    // which most mail clients refuse to show; ship them as inline parts.
+    let (html, inline) = extract_inline_images(&html);
     let alternative = MultiPart::alternative_plain_html(text, html);
-    let built = if attachments.is_empty() {
-        b.multipart(alternative)?
+    let body: MultiPart = if inline.is_empty() {
+        alternative
     } else {
-        let mut mixed = MultiPart::mixed().multipart(alternative);
+        let mut related = MultiPart::related().multipart(alternative);
+        for (i, (mime, bytes)) in inline.into_iter().enumerate() {
+            let ct = ContentType::parse(&mime).unwrap_or_else(|_| ContentType::parse("image/png").unwrap());
+            related = related.singlepart(Attachment::new_inline(format!("img{i}@trakzen")).body(bytes, ct));
+        }
+        related
+    };
+    let built = if attachments.is_empty() {
+        b.multipart(body)?
+    } else {
+        let mut mixed = MultiPart::mixed().multipart(body);
         for a in attachments {
             let ct = ContentType::parse(&a.mime_type)
                 .unwrap_or_else(|_| ContentType::parse("application/octet-stream").unwrap());
@@ -108,6 +138,46 @@ pub fn build_raw(
         b.multipart(mixed)?
     };
     Ok(built.formatted())
+}
+
+/// Replaces `src="data:<mime>;base64,<data>"` with `cid:imgN@trakzen` and
+/// returns the decoded images in order. Anything that does not decode is
+/// left alone.
+fn extract_inline_images(html: &str) -> (String, Vec<(String, Vec<u8>)>) {
+    let mut out = String::with_capacity(html.len());
+    let mut images = Vec::new();
+    let mut rest = html;
+    while let Some(start) = rest.find("src=\"data:") {
+        let after = &rest[start + 5..]; // after `src="`
+        let Some(end) = after.find('"') else { break };
+        let url = &after[..end];
+        let decoded = url
+            .strip_prefix("data:")
+            .and_then(|u| u.split_once(";base64,"))
+            .and_then(|(mime, data)| B64.decode(data.trim()).ok().map(|b| (mime.to_string(), b)));
+        match decoded {
+            Some(img) => {
+                out.push_str(&rest[..start]);
+                out.push_str(&format!("src=\"cid:img{}@trakzen\"", images.len()));
+                images.push(img);
+            }
+            None => out.push_str(&rest[..start + 5 + end + 1]),
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    (out, images)
+}
+
+/// A stored signature may be plain text (older builds) or HTML from the
+/// rich editor; normalise to HTML.
+pub fn signature_html(sig: &str) -> String {
+    let t = sig.trim();
+    if t.contains('<') && t.contains('>') {
+        sanitize::html(t)
+    } else {
+        sanitize::text_to_html(t)
+    }
 }
 
 /// Splits a header address list on commas, honouring quoted display names.
@@ -441,5 +511,76 @@ mod tests {
         let html = "<div style=\"font-family:sans-serif;font-size:14px\"><b>Looks</b> good.</div><!--tc-quote--><br><blockquote>numbers</blockquote>";
         assert_eq!(own_html_part(html).as_deref(), Some("<b>Looks</b> good."));
         assert_eq!(own_html_part("<p>someone else's html</p>"), None);
+    }
+
+    #[test]
+    fn drafts_without_recipients_still_build() {
+        let msg = OutgoingMessage {
+            account_id: 1,
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Half-written".into(),
+            body_text: "Dear".into(),
+            body_html: None,
+            quoted_html: None,
+            in_reply_to: None,
+            references: None,
+            thread_id: None,
+            attachments: vec![],
+            draft_id: None,
+        };
+        let account = Account {
+            id: 1,
+            provider: "gmail".into(),
+            email: "me@example.com".into(),
+            display_name: None,
+            sync_cursor: None,
+        };
+        let raw = String::from_utf8(build_raw_lenient(&account, &msg, vec![]).unwrap()).unwrap();
+        let head = raw.split("\r\n\r\n").next().unwrap_or("");
+        assert!(!raw.contains("draft@invalid"), "{head}");
+        assert!(!head.contains("To:"), "{head}");
+        assert!(raw.contains("Subject: Half-written"));
+        assert!(raw.contains("Dear"));
+    }
+
+    #[test]
+    fn data_images_become_inline_parts() {
+        let png = B64.encode(b"\x89PNG fake");
+        let html = format!("<p>Hi</p><img src=\"data:image/png;base64,{png}\" alt=\"logo\"><img src=\"https://x/y.png\">");
+        let (out, images) = extract_inline_images(&html);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].0, "image/png");
+        assert_eq!(images[0].1, b"\x89PNG fake");
+        assert!(out.contains("src=\"cid:img0@trakzen\""));
+        assert!(out.contains("src=\"https://x/y.png\""));
+
+        let msg = OutgoingMessage {
+            account_id: 1,
+            to: vec!["alice@example.com".into()],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Logo".into(),
+            body_text: "Hi".into(),
+            body_html: Some(html),
+            quoted_html: None,
+            in_reply_to: None,
+            references: None,
+            thread_id: None,
+            attachments: vec![],
+            draft_id: None,
+        };
+        let account = Account {
+            id: 1,
+            provider: "gmail".into(),
+            email: "me@example.com".into(),
+            display_name: None,
+            sync_cursor: None,
+        };
+        let raw = String::from_utf8(build_raw(&account, &msg, vec![]).unwrap()).unwrap();
+        assert!(raw.contains("multipart/related"));
+        assert!(raw.contains("Content-ID: <img0@trakzen>"));
+        assert!(!raw.contains("base64,"));
     }
 }

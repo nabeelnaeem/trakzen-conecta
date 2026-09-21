@@ -16,6 +16,11 @@
   --color-bubble-peer-fg: var(--bubble-peer-fg);
   /* Text on accent-coloured surfaces; stays white in every theme. */
   --color-on-accent: #ffffff;
+  /* Floating toasts sit on top of whatever is behind them, so they get
+     their own pair instead of the greys, which invert per theme. */
+  --color-toast: var(--toast-bg);
+  --color-toast-fg: var(--toast-fg);
+  --color-toast-accent: var(--toast-accent);
 }
 
 :root {
@@ -24,6 +29,9 @@
   --bubble-own-fg: #ffffff;
   --bubble-peer: var(--color-gray-100);
   --bubble-peer-fg: var(--color-gray-900);
+  --toast-bg: #1f2937;
+  --toast-fg: #ffffff;
+  --toast-accent: #93c5fd;
 }
 
 [data-theme="dark"] {
@@ -52,6 +60,9 @@
   --color-amber-900: #ffe2a6;
   --bubble-peer: #232c3b;
   --bubble-peer-fg: #f1f4f8;
+  --toast-bg: #f1f4f8;
+  --toast-fg: #111827;
+  --toast-accent: #1d4ed8;
 }
 
 [data-theme="contrast"] {
@@ -74,6 +85,9 @@
   --color-blue-900: #000055;
   --bubble-peer: #e8e8e8;
   --bubble-peer-fg: #000000;
+  --toast-bg: #000000;
+  --toast-fg: #ffffff;
+  --toast-accent: #9ec5ff;
 }
 
 /* Accent: the three shades every button, badge, tab and bubble uses. */

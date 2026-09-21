@@ -378,20 +378,23 @@ function Toasts() {
   return (
     <div className="pointer-events-none fixed bottom-4 left-1/2 z-40 flex -translate-x-1/2 flex-col items-center gap-2">
       {working && (
-        <div className="flex items-center gap-2 rounded-full bg-gray-900 px-4 py-2 text-sm text-on-accent shadow-lg">
-          <Spinner size={14} className="text-blue-300" /> {working}
+        <div className="flex items-center gap-2 rounded-full bg-toast px-4 py-2 text-sm font-medium text-toast-fg shadow-lg">
+          <Spinner size={14} className="text-toast-accent" /> {working}
         </div>
       )}
       {pendingSend && (
-        <div className="pointer-events-auto flex items-center gap-3 rounded-full bg-gray-900 px-4 py-2 text-sm text-on-accent shadow-lg">
+        <div className="pointer-events-auto flex items-center gap-3 rounded-full bg-toast py-1.5 pr-1.5 pl-4 text-sm font-medium text-toast-fg shadow-lg">
           Sending in {left}s…
-          <button className="font-semibold text-blue-300 hover:text-blue-200" onClick={undoSend}>
+          <button
+            className="rounded-full border border-current px-3 py-1 font-semibold text-toast-accent hover:bg-toast-fg/10"
+            onClick={undoSend}
+          >
             Undo
           </button>
         </div>
       )}
       {!pendingSend && notice && !working && (
-        <div className="rounded-full bg-gray-900 px-4 py-2 text-sm text-on-accent shadow-lg">{notice}</div>
+        <div className="rounded-full bg-toast px-4 py-2 text-sm font-medium text-toast-fg shadow-lg">{notice}</div>
       )}
     </div>
   );

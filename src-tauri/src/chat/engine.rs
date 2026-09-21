@@ -1702,7 +1702,7 @@ impl ChatEngine {
         }
         self.check_addable(&member_ids)?;
         let peer = self.store.create_group(name, &member_ids)?;
-        self.sync_group(peer.id, &[]).await;
+        self.sync_group_later(peer.id, vec![]);
         self.emit_peer(peer.id);
         Ok(peer)
     }
@@ -1718,7 +1718,7 @@ impl ChatEngine {
         }
         self.store.set_group_members(group_row, &all)?;
         self.store.touch_group(group_row, None)?;
-        self.sync_group(group_row, &[]).await;
+        self.sync_group_later(group_row, vec![]);
         self.emit_peer(group_row);
         self.store.get_peer(group_row)
     }
@@ -1730,7 +1730,7 @@ impl ChatEngine {
         self.store.set_group_members(group_row, &all)?;
         self.store.touch_group(group_row, None)?;
         // The removed member gets the roster too, so it sees it is out.
-        self.sync_group(group_row, &[member_id]).await;
+        self.sync_group_later(group_row, vec![member_id]);
         self.emit_peer(group_row);
         self.store.get_peer(group_row)
     }
@@ -1742,7 +1742,7 @@ impl ChatEngine {
             return Err(AppError::Other("group name is required".into()));
         }
         self.store.touch_group(group_row, Some(name))?;
-        self.sync_group(group_row, &[]).await;
+        self.sync_group_later(group_row, vec![]);
         self.emit_peer(group_row);
         self.store.get_peer(group_row)
     }
@@ -1751,7 +1751,7 @@ impl ChatEngine {
         self.active_group(group_row)?;
         self.store.set_group_left(group_row, true)?;
         self.store.touch_group(group_row, None)?;
-        self.sync_group(group_row, &[]).await;
+        self.sync_group_later(group_row, vec![]);
         self.emit_peer(group_row);
         self.store.get_peer(group_row)
     }
@@ -1825,6 +1825,13 @@ impl ChatEngine {
             rev,
             members,
         })
+    }
+
+    /// Pushes the roster in the background: dialling offline members can
+    /// take several seconds each, and the caller's UI is waiting.
+    fn sync_group_later(self: &Arc<Self>, group_row: i64, also: Vec<i64>) {
+        let engine = self.clone();
+        tauri::async_runtime::spawn(async move { engine.sync_group(group_row, &also).await });
     }
 
     /// Pushes the roster to every member plus `also` (a member just removed).

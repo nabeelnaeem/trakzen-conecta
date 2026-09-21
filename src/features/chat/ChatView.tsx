@@ -90,7 +90,11 @@ export function ChatView() {
                 </div>
                 <div className="flex items-center justify-between gap-2">
                   <span className={`truncate text-xs ${p.unread ? "text-gray-800" : "text-gray-500"}`}>
-                    {s.typing[p.id] ? <em className="text-blue-700">typing…</em> : (p.lastMessage ?? `${p.host}:${p.port}`)}
+                    {s.typing[p.id] ? (
+                      <em className="text-blue-700">typing…</em>
+                    ) : (
+                      (p.lastMessage ?? (p.isGroup ? "No messages yet" : `${p.host}:${p.port}`))
+                    )}
                   </span>
                   {p.unread > 0 && <span className="rounded-full bg-blue-600 px-1.5 text-[11px] text-on-accent">{p.unread}</span>}
                 </div>

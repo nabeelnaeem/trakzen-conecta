@@ -1,5 +1,8 @@
 import { useEffect, useRef } from "react";
-import { Bold, Italic, Link as LinkIcon, List, ListOrdered, Quote, RemoveFormatting, Underline } from "lucide-react";
+import { Bold, Image as ImageIcon, Italic, Link as LinkIcon, List, ListOrdered, Quote, RemoveFormatting, Underline } from "lucide-react";
+
+/** Images are embedded as data URLs and turned into inline MIME parts on send. */
+const MAX_IMAGE_BYTES = 1024 * 1024;
 
 /**
  * A small contentEditable editor for the composer. Formatting goes through
@@ -11,13 +14,19 @@ export function RichEditor({
   onChange,
   placeholder,
   autoFocus,
+  compact,
+  className,
 }: {
   html: string;
   onChange: (html: string, text: string) => void;
   placeholder?: string;
   autoFocus?: boolean;
+  /** Smaller box for settings forms. */
+  compact?: boolean;
+  className?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   // Only push external content in when it differs from what is on screen,
   // otherwise every keystroke would reset the caret.
@@ -44,6 +53,19 @@ export function RichEditor({
     const url = window.prompt("Link address", "https://");
     if (url && url !== "https://") cmd("createLink", url);
   };
+  const insertImage = (file: File) => {
+    if (file.size > MAX_IMAGE_BYTES) {
+      window.alert("Please use an image under 1 MB.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const src = String(reader.result);
+      const alt = file.name.replace(/"/g, "");
+      cmd("insertHTML", `<img src="${src}" alt="${alt}" style="max-width:100%;height:auto">`);
+    };
+    reader.readAsDataURL(file);
+  };
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (!(e.ctrlKey || e.metaKey)) return;
     const k = e.key.toLowerCase();
@@ -55,14 +77,19 @@ export function RichEditor({
   // Pasted rich content from other apps drags along fonts, colours and
   // tracking pixels; keep plain text and let the user format it here.
   const onPaste = (e: React.ClipboardEvent) => {
+    const image = Array.from(e.clipboardData.items).find((i) => i.type.startsWith("image/"))?.getAsFile();
     e.preventDefault();
+    if (image) {
+      insertImage(image);
+      return;
+    }
     const text = e.clipboardData.getData("text/plain");
     document.execCommand("insertText", false, text);
     emit();
   };
 
   return (
-    <div className="flex min-h-[160px] flex-1 flex-col">
+    <div className={`flex flex-col ${compact ? "min-h-[96px] rounded-md border border-gray-300 bg-white" : "min-h-[160px] flex-1"} ${className ?? ""}`}>
       <div className="flex items-center gap-0.5 border-b border-gray-100 px-2 py-1 text-gray-600">
         <Tool title="Bold (Ctrl+B)" onClick={() => cmd("bold")}>
           <Bold size={14} />
@@ -86,6 +113,20 @@ export function RichEditor({
         <Tool title="Link (Ctrl+K)" onClick={link}>
           <LinkIcon size={14} />
         </Tool>
+        <Tool title="Insert image (or paste one)" onClick={() => fileRef.current?.click()}>
+          <ImageIcon size={14} />
+        </Tool>
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) insertImage(f);
+            e.target.value = "";
+          }}
+        />
         <span className="mx-1 h-4 w-px bg-gray-200" />
         <Tool title="Clear formatting" onClick={() => (cmd("removeFormat"), cmd("formatBlock", "div"))}>
           <RemoveFormatting size={14} />
@@ -99,7 +140,7 @@ export function RichEditor({
         aria-multiline="true"
         aria-label="Message body"
         data-placeholder={placeholder}
-        className="rich-editor flex-1 overflow-y-auto px-3 py-2 text-sm outline-none"
+        className={`rich-editor flex-1 overflow-y-auto px-3 py-2 text-sm outline-none ${compact ? "max-h-64" : ""}`}
         onInput={emit}
         onBlur={emit}
         onKeyDown={onKeyDown}

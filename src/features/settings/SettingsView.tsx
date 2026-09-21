@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { confirmDialog } from "../../lib/confirm";
+import { RichEditor } from "../mail/RichEditor";
+import { textToHtml } from "../mail/store";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { disable as autostartDisable, enable as autostartEnable, isEnabled as autostartEnabled } from "@tauri-apps/plugin-autostart";
@@ -438,7 +440,7 @@ function MailTab({ s, save }: { s: Settings; save: Save }) {
         <TextField label="Undo send window (seconds)" value={String(s.undoSendSeconds)} numeric width="w-28" onCommit={(v) => void save({ undoSendSeconds: Math.max(0, Number(v) || 0) })} hint="0 sends immediately. Max 60." />
         <TextField label="Check for new mail every (seconds)" value={String(s.mailPollSeconds)} numeric width="w-28" onCommit={(v) => void save({ mailPollSeconds: Math.max(0, Number(v) || 0) })} hint="Minimum 15; 0 turns background checks off." />
       </div>
-      <TextField label="Signature (all accounts unless overridden under Accounts)" value={s.mailSignature} multiline onCommit={(v) => void save({ mailSignature: v })} />
+      <SignatureEditor label="Signature (all accounts unless overridden under Accounts)" value={s.mailSignature} onCommit={(v) => void save({ mailSignature: v })} />
       <TemplatesEditor value={s.mailTemplates} onCommit={(v) => void save({ mailTemplates: v })} />
       <details className="text-xs text-gray-600">
         <summary className="cursor-pointer">Keyboard shortcuts</summary>
@@ -581,6 +583,30 @@ function AccountsTab({ s, save }: { s: Settings; save: Save }) {
   );
 }
 
+/// Signatures are stored as HTML so they can carry a logo; older plain-text
+/// values are shown as-is and become HTML once edited.
+function SignatureEditor({ label, value, placeholder, onCommit }: { label: string; value: string; placeholder?: string; onCommit: (v: string) => void }) {
+  const initial = value.includes("<") && value.includes(">") ? value : textToHtml(value);
+  const [html, setHtml] = useState(initial);
+  useEffect(() => setHtml(initial), [initial]);
+  return (
+    <div>
+      {label && <label className="label">{label}</label>}
+      <RichEditor compact html={html} placeholder={placeholder ?? "Name, title, phone… use the image button for a logo"} onChange={(h) => setHtml(h)} />
+      {html !== initial && (
+        <div className="mt-1 flex gap-2">
+          <button className="btn btn-primary text-xs" onClick={() => onCommit(html)}>
+            Save signature
+          </button>
+          <button className="btn text-xs" onClick={() => setHtml(initial)}>
+            Cancel
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AccountSignature({ account, value, save }: { account: Account; value: string | undefined; save: Save }) {
   const overridden = value !== undefined;
   return (
@@ -594,7 +620,7 @@ function AccountSignature({ account, value, save }: { account: Account; value: s
         Use a signature specific to this account
       </label>
       {overridden && (
-        <TextField label="" value={value ?? ""} multiline placeholder="Leave empty for no signature on this account" onCommit={(v) => void save({ accountSignatures: { [account.id]: v } })} />
+        <SignatureEditor label="" value={value ?? ""} placeholder="Leave empty for no signature on this account" onCommit={(v) => void save({ accountSignatures: { [account.id]: v } })} />
       )}
     </div>
   );
