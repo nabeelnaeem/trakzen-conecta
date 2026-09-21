@@ -442,19 +442,30 @@ impl ChatStore {
         Ok(())
     }
 
-    /// Records one member's ack; returns how many members still lack it.
-    pub fn mark_delivered(&self, msg_id: &str, member_id: i64) -> Result<usize> {
-        let conn = self.db.conn();
-        conn.execute(
+    /// Records one member's ack and rolls the message status up from the
+    /// recipients table in the same statement, so acks landing at the same
+    /// time from several members cannot overwrite each other's result.
+    /// Returns the message if its status changed.
+    pub fn mark_delivered(&self, msg_id: &str, member_id: i64) -> Result<Option<ChatMessage>> {
+        let mut conn = self.db.conn();
+        let tx = conn.transaction()?;
+        tx.execute(
             "UPDATE chat_message_recipients SET delivered = 1 WHERE msg_id = ?1 AND member_id = ?2",
             params![msg_id, member_id],
         )?;
-        let left: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM chat_message_recipients WHERE msg_id = ?1 AND delivered = 0",
+        let changed = tx.execute(
+            "UPDATE chat_messages SET status = CASE
+                 WHEN (SELECT COUNT(*) FROM chat_message_recipients r WHERE r.msg_id = ?1 AND r.delivered = 0) = 0
+                 THEN 'delivered' ELSE 'sending' END
+             WHERE msg_id = ?1 AND direction = 'out' AND status IN ('queued', 'sending')",
             params![msg_id],
-            |r| r.get(0),
         )?;
-        Ok(left as usize)
+        tx.commit()?;
+        drop(conn);
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.get_message(msg_id)
     }
 
     pub fn delivered_count(&self, msg_id: &str) -> Result<usize> {
@@ -862,9 +873,11 @@ mod tests {
             .unwrap();
         store.add_recipients("g1", &[a.id, b.id]).unwrap();
         assert_eq!(store.pending_for_member(a.id, MessageKind::Text).unwrap().len(), 1);
-        assert_eq!(store.mark_delivered("g1", a.id).unwrap(), 1);
+        assert_eq!(store.mark_delivered("g1", a.id).unwrap().unwrap().status, "sending");
         assert!(store.pending_for_member(a.id, MessageKind::Text).unwrap().is_empty());
         assert_eq!(store.pending_for_member(b.id, MessageKind::Text).unwrap().len(), 1);
+        assert_eq!(store.mark_delivered("g1", b.id).unwrap().unwrap().status, "delivered");
+        store.add_recipients("g1", &[b.id]).unwrap();
 
         // Removing B drops what was owed to B.
         store.set_group_members(group.id, &[a.id]).unwrap();

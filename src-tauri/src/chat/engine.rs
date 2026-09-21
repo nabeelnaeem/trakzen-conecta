@@ -526,14 +526,13 @@ impl ChatEngine {
                 if current.direction != Direction::Out {
                     return Ok(());
                 }
-                // A group message is delivered once every member has it.
-                let complete = if self.store.is_group(current.peer_id)? {
-                    self.store.mark_delivered(&msg_id, row_id)? == 0
-                } else {
-                    true
-                };
-                // Don't regress a message the peer already reported as read.
-                if complete && current.status != "read" {
+                if self.store.is_group(current.peer_id)? {
+                    // Delivered once every member has it.
+                    if let Some(m) = self.store.mark_delivered(&msg_id, row_id)? {
+                        self.emit_message(&m);
+                    }
+                } else if current.status != "read" {
+                    // Don't regress a message the peer already reported as read.
                     if let Some(m) = self.store.set_status(&msg_id, "delivered")? {
                         self.emit_message(&m);
                     }
@@ -978,22 +977,26 @@ impl ChatEngine {
                 .await;
             let (status, state) = match &outcome {
                 Ok(()) if is_group => {
-                    let remaining = self.store.mark_delivered(&m.msg_id, row_id).unwrap_or(0);
-                    (if remaining == 0 { "delivered" } else { "sending" }, "done")
+                    if let Ok(Some(m)) = self.store.mark_delivered(&m.msg_id, row_id) {
+                        self.emit_message(&m);
+                    }
+                    (None, "done")
                 }
-                Ok(()) => ("delivered", "done"),
+                Ok(()) => (Some("delivered"), "done"),
                 Err(TransferError::Transient(e)) => {
                     tracing::debug!(row_id, %e, "file send interrupted, will retry");
                     let some_delivered = is_group && self.store.delivered_count(&m.msg_id).unwrap_or(0) > 0;
-                    (if some_delivered { "sending" } else { "queued" }, "failed")
+                    (Some(if some_delivered { "sending" } else { "queued" }), "failed")
                 }
                 Err(TransferError::Fatal(e)) => {
                     tracing::warn!(row_id, %e, "file send failed");
-                    ("failed", "failed")
+                    (Some("failed"), "failed")
                 }
             };
-            if let Ok(Some(m)) = self.store.set_status(&m.msg_id, status) {
-                self.emit_message(&m);
+            if let Some(status) = status {
+                if let Ok(Some(m)) = self.store.set_status(&m.msg_id, status) {
+                    self.emit_message(&m);
+                }
             }
             self.emit_progress(TransferProgress {
                 transfer_id,

@@ -138,6 +138,11 @@ export const chat = {
   pauseTransfer: (transferId: string, pause: boolean) => invoke<void>("chat_pause_transfer", { transferId, pause }),
   pin: (msgId: string, pinned: boolean) => invoke<ChatMessage | null>("chat_pin", { msgId, pinned }),
   createGroup: (name: string, memberIds: number[]) => invoke<Peer>("chat_create_group", { name, memberIds }),
+  groupMembers: (groupId: number) => invoke<Peer[]>("chat_group_members", { groupId }),
+  groupAddMembers: (groupId: number, memberIds: number[]) => invoke<Peer>("chat_group_add_members", { groupId, memberIds }),
+  groupRemoveMember: (groupId: number, memberId: number) => invoke<Peer>("chat_group_remove_member", { groupId, memberId }),
+  groupRename: (groupId: number, name: string) => invoke<Peer>("chat_group_rename", { groupId, name }),
+  groupLeave: (groupId: number) => invoke<Peer>("chat_group_leave", { groupId }),
   deleteMessage: (msgId: string, forEveryone: boolean) =>
     invoke<void>("chat_delete_message", { msgId, forEveryone }),
   clearChat: (peerId: number) => invoke<void>("chat_clear_chat", { peerId }),

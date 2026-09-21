@@ -48,6 +48,12 @@ function upsertMessage(list: ChatMessage[], m: ChatMessage): ChatMessage[] {
   return next;
 }
 
+// A command's return value is a snapshot from before the peer answered. If
+// the event stream already put a newer copy in the list, keep that one.
+function addMessage(list: ChatMessage[], m: ChatMessage): ChatMessage[] {
+  return list.some((x) => x.msgId === m.msgId) ? list : [...list, m];
+}
+
 export const useChat = create<ChatState>((set, get) => ({
   identity: null,
   status: null,
@@ -107,7 +113,9 @@ export const useChat = create<ChatState>((set, get) => ({
       if (m.direction === "in" && (m.status === "unread") && !viewing) {
         const peer = peers.find((p) => p.id === m.peerId);
         const who = peer?.displayName ?? "New message";
-        void notify(who, m.kind === "file" ? `Sent a file: ${m.fileName ?? ""}` : m.body, "chat", `conecta://chat/${peer?.peerId ?? m.peerId}`);
+        const what = m.kind === "file" ? `Sent a file: ${m.fileName ?? ""}` : m.body;
+        const body = peer?.isGroup && m.senderName ? `${m.senderName}: ${what}` : what;
+        void notify(who, body, "chat", `conecta://chat/${peer?.peerId ?? m.peerId}`);
       }
       void get().loadPeers();
     });
@@ -202,7 +210,7 @@ export const useChat = create<ChatState>((set, get) => ({
     if (id === null || !body.trim()) return;
     try {
       const m = await chat.sendText(id, body, replyTo);
-      set({ messages: upsertMessage(get().messages, m) });
+      set({ messages: addMessage(get().messages, m) });
     } catch (e) {
       // The failed message is already in the DB with status=failed and an
       // event has updated the list; just surface the reason.
@@ -216,7 +224,7 @@ export const useChat = create<ChatState>((set, get) => ({
     if (id === null) return;
     try {
       const m = await chat.sendFile(id, path);
-      set({ messages: upsertMessage(get().messages, m) });
+      set({ messages: addMessage(get().messages, m) });
     } catch (e) {
       set({ error: errorMessage(e) });
     }
@@ -264,7 +272,7 @@ export const useChat = create<ChatState>((set, get) => ({
   sendTo: async (peerId, body) => {
     try {
       const m = await chat.sendText(peerId, body, null);
-      if (get().activePeerId === peerId) set({ messages: upsertMessage(get().messages, m) });
+      if (get().activePeerId === peerId) set({ messages: addMessage(get().messages, m) });
       void get().loadPeers();
     } catch (e) {
       set({ error: errorMessage(e) });

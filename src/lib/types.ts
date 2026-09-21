@@ -230,6 +230,8 @@ export interface Peer {
   lastMessage: string | null;
   lastMessageAt: number | null;
   isGroup?: boolean;
+  /** True once this machine left (or was removed from) the group. */
+  groupLeft?: boolean;
 }
 
 export interface ChatMessage {
@@ -245,7 +247,10 @@ export interface ChatMessage {
   status: string;
   createdAt: number;
   replyTo: string | null;
-  /** emoji → who reacted ("me" / "peer") */
+  /** Author's peer id for incoming group messages. */
+  senderId: string | null;
+  senderName: string | null;
+  /** emoji → who reacted: "me", "peer" in a direct chat, or a member's peer id in a group */
   reactions: Record<string, string[]>;
   editedAt: number | null;
   pinned?: boolean;
