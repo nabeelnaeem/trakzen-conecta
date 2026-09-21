@@ -51,6 +51,11 @@ pub enum ControlMsg {
     },
     /// The peer is composing; UI shows "typing…" briefly.
     Typing,
+    /// Sender changed their display name; peers otherwise only learn it from
+    /// `Hello`, which chat connections send once and then stay open for hours.
+    Rename {
+        display_name: String,
+    },
     /// Receiver has displayed these messages.
     Read {
         msg_ids: Vec<String>,
@@ -105,6 +110,11 @@ pub enum ControlMsg {
     ClearChat,
     Ping,
     Pong,
+    /// Any `type` this build does not know. Newer peers may send frames we
+    /// have not learned yet; dropping the connection over one would be worse
+    /// than skipping it.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug)]
@@ -217,6 +227,30 @@ mod tests {
             Some(Frame::Control(ControlMsg::Ping))
         ));
         assert!(read_frame(&mut cursor).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn unknown_control_type_is_tolerated() {
+        let payload = br#"{"type":"from_the_future","x":1}"#;
+        let mut buf = vec![KIND_CONTROL];
+        buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        buf.extend_from_slice(payload);
+        write_frame(
+            &mut buf,
+            &Frame::Control(ControlMsg::Rename { display_name: "Benji".into() }),
+        )
+        .await
+        .unwrap();
+
+        let mut cursor = std::io::Cursor::new(buf);
+        assert!(matches!(
+            read_frame(&mut cursor).await.unwrap(),
+            Some(Frame::Control(ControlMsg::Unknown))
+        ));
+        match read_frame(&mut cursor).await.unwrap().unwrap() {
+            Frame::Control(ControlMsg::Rename { display_name }) => assert_eq!(display_name, "Benji"),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[tokio::test]

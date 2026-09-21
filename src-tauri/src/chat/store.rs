@@ -128,6 +128,14 @@ impl ChatStore {
         Ok(())
     }
 
+    pub fn set_peer_name(&self, id: i64, display_name: &str) -> Result<()> {
+        self.db.conn().execute(
+            "UPDATE chat_peers SET display_name = ?2 WHERE id = ?1 AND is_group = 0",
+            params![id, display_name],
+        )?;
+        Ok(())
+    }
+
     pub fn remove_peer(&self, id: i64) -> Result<()> {
         self.db
             .conn()

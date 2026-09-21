@@ -186,6 +186,18 @@ impl ChatEngine {
         if let Some(d) = self.discovery.lock().unwrap().as_ref() {
             d.rename(&id, name, port);
         }
+        let live: Vec<mpsc::Sender<Frame>> =
+            self.conns.lock().unwrap().values().map(|c| c.tx.clone()).collect();
+        let name = name.to_string();
+        tauri::async_runtime::spawn(async move {
+            for tx in live {
+                let _ = tx
+                    .send(Frame::Control(ControlMsg::Rename {
+                        display_name: name.clone(),
+                    }))
+                    .await;
+            }
+        });
         Ok(self.identity())
     }
 
@@ -473,6 +485,13 @@ impl ChatEngine {
             ControlMsg::Typing => {
                 let _ = self.app.emit(EVENT_TYPING, row_id);
             }
+            ControlMsg::Rename { display_name } => {
+                let display_name = display_name.trim();
+                if !display_name.is_empty() {
+                    self.store.set_peer_name(row_id, display_name)?;
+                    self.emit_peer(row_id);
+                }
+            }
             ControlMsg::Read { msg_ids } => {
                 for m in self.store.set_status_many(&msg_ids, "read")? {
                     self.emit_message(&m);
@@ -532,7 +551,7 @@ impl ChatEngine {
             ControlMsg::Ping => {
                 let _ = out.send(Frame::Control(ControlMsg::Pong)).await;
             }
-            ControlMsg::Pong | ControlMsg::Hello { .. } => {}
+            ControlMsg::Pong | ControlMsg::Hello { .. } | ControlMsg::Unknown => {}
             ControlMsg::FilePause { transfer_id } => {
                 self.paused.lock().unwrap().insert(transfer_id);
             }
