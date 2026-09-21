@@ -3,7 +3,7 @@
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use chrono::{Local, TimeZone};
-use lettre::message::{header::ContentType, Attachment, Mailbox, Message, MultiPart, SinglePart};
+use lettre::message::{header::ContentType, Attachment, Mailbox, Message, MultiPart};
 
 use crate::error::{AppError, Result};
 
