@@ -4,6 +4,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useMail } from "./store";
 import { buildFrameDoc } from "./frame";
 import { RecipientInput } from "./RecipientInput";
+import { RichEditor } from "./RichEditor";
+import { textToHtml } from "./store";
 import { settings } from "../../lib/ipc";
 
 type Template = { name: string; subject: string; body: string };
@@ -81,12 +83,7 @@ export function Composer() {
           </Row>
         </div>
 
-        <textarea
-          className="min-h-[160px] flex-1 resize-none px-3 py-2 text-sm outline-none"
-          placeholder="Write your message…"
-          value={c.body}
-          onChange={(e) => updateComposer({ body: e.target.value })}
-        />
+        <RichEditor html={c.bodyHtml} placeholder="Write your message…" onChange={(bodyHtml, body) => updateComposer({ bodyHtml, body })} />
 
         {c.draft?.quotedHtml && (
           <details className="border-t border-gray-200">
@@ -135,7 +132,7 @@ export function Composer() {
               defaultValue=""
               onChange={(e) => {
                 const t = templates.find((x) => x.name === e.target.value);
-                if (t) updateComposer({ subject: t.subject || c.subject, body: t.body });
+                if (t) updateComposer({ subject: t.subject || c.subject, body: t.body, bodyHtml: textToHtml(t.body) });
                 e.target.value = "";
               }}
             >

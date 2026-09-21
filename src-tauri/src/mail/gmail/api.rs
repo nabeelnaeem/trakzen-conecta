@@ -411,6 +411,7 @@ impl GmailApi {
             .clone()
             .or_else(|| body.html.as_deref().map(crate::mail::sanitize::html_to_text))
             .unwrap_or_default();
+        let body_html = body.html.as_deref().and_then(crate::mail::compose::own_html_part);
         Ok(DraftContent {
             draft_id: draft_id.to_string(),
             to: list("To"),
@@ -418,6 +419,7 @@ impl GmailApi {
             bcc: list("Bcc"),
             subject: header(payload, "Subject").unwrap_or_default().to_string(),
             body_text,
+            body_html,
             thread_id: msg["threadId"].as_str().map(str::to_string),
             in_reply_to: header(payload, "In-Reply-To").map(str::to_string),
             references: header(payload, "References").map(str::to_string),
@@ -572,6 +574,10 @@ fn provider_error(status: u16, body: &str) -> AppError {
 
 // ---- JSON mapping ---------------------------------------------------------
 
+fn strip_angle_brackets(s: &str) -> String {
+    s.trim().trim_start_matches('<').trim_end_matches('>').to_string()
+}
+
 fn header<'a>(payload: &'a Value, name: &str) -> Option<&'a str> {
     payload["headers"]
         .as_array()?
@@ -640,17 +646,21 @@ fn walk_part(part: &Value, out: &mut RemoteBody) {
     let filename = part["filename"].as_str().unwrap_or_default();
     let body = &part["body"];
 
-    if !filename.is_empty() {
+    // Inline images sometimes come without a filename; the Content-ID is
+    // what the HTML refers to them by.
+    let content_id = header(part, "Content-ID").map(strip_angle_brackets);
+    if !filename.is_empty() || content_id.is_some() {
         if let Some(att_id) = body["attachmentId"].as_str() {
             out.attachments.push(RemoteAttachment {
                 remote_id: att_id.to_string(),
-                filename: filename.to_string(),
+                filename: if filename.is_empty() { "inline".into() } else { filename.to_string() },
                 mime_type: if mime.is_empty() {
                     "application/octet-stream".into()
                 } else {
                     mime.to_string()
                 },
                 size: body["size"].as_i64().unwrap_or(0),
+                content_id,
             });
         }
     } else if let Some(data) = body["data"].as_str() {

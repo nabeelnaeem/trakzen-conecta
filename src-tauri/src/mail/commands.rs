@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
@@ -446,6 +447,7 @@ pub async fn mail_unsubscribe(
             bcc: vec![],
             subject,
             body_text: "unsubscribe".into(),
+            body_html: None,
             quoted_html: None,
             in_reply_to: None,
             references: None,
@@ -703,6 +705,8 @@ async fn load_message(state: &AppState, message_id: i64) -> Result<MessageDetail
         });
     }
 
+    inline_images(state, &account, &provider, &mut detail).await;
+
     if let Some(text) = detail.body_text.as_deref() {
         if let Some(inv) = super::ics::parse(text) {
             detail.invite = Some(inv);
@@ -728,6 +732,60 @@ async fn load_message(state: &AppState, message_id: i64) -> Result<MessageDetail
         }
     }
     Ok(detail)
+}
+
+/// Swaps `cid:` image references for the embedded parts they point at, as
+/// data: URLs, and drops those parts from the attachment list. Bytes are
+/// cached on disk so reopening a message does not hit the server again.
+async fn inline_images(
+    state: &AppState,
+    account: &Account,
+    provider: &std::sync::Arc<dyn super::MailProvider>,
+    detail: &mut MessageDetail,
+) {
+    let Some(html) = detail.body_html.clone() else { return };
+    if !html.contains("cid:") {
+        return;
+    }
+    let cache = state
+        .app
+        .path()
+        .app_cache_dir()
+        .ok()
+        .map(|d| d.join("mail-inline").join(detail.summary.id.to_string()));
+    let mut out = html;
+    let mut used = Vec::new();
+    for att in &detail.attachments {
+        let Some(cid) = att.content_id.as_deref() else { continue };
+        let needle = format!("cid:{cid}");
+        if !out.contains(&needle) {
+            continue;
+        }
+        let file = cache.as_ref().map(|d| d.join(att.id.to_string()));
+        let bytes = match file.as_ref().and_then(|f| std::fs::read(f).ok()) {
+            Some(b) => b,
+            None => match provider.fetch_attachment(account, &detail.summary.remote_id, &att.remote_id).await {
+                Ok(b) => {
+                    if let Some(f) = &file {
+                        if let Some(dir) = f.parent() {
+                            let _ = std::fs::create_dir_all(dir);
+                        }
+                        let _ = std::fs::write(f, &b);
+                    }
+                    b
+                }
+                Err(e) => {
+                    tracing::debug!(%e, "inline image fetch failed");
+                    continue;
+                }
+            },
+        };
+        let url = format!("data:{};base64,{}", att.mime_type, B64.encode(&bytes));
+        out = out.replace(&needle, &url);
+        used.push(att.id);
+    }
+    detail.body_html = Some(out);
+    detail.attachments.retain(|a| !used.contains(&a.id));
 }
 
 #[tauri::command]
@@ -822,6 +880,10 @@ pub async fn mail_send(state: State<'_, AppState>, mut message: OutgoingMessage)
     let sig = crate::settings::signature_for(&state.db, message.account_id)?;
     if !sig.trim().is_empty() {
         message.body_text = format!("{}\n\n-- \n{}", message.body_text.trim_end(), sig.trim());
+        if let Some(h) = message.body_html.as_mut() {
+            h.push_str("<br><br>-- <br>");
+            h.push_str(&sanitize::text_to_html(sig.trim()));
+        }
     }
     let account = state.mail.get_account(message.account_id)?;
     let provider = state.providers.provider_for(&account.provider)?;
@@ -950,6 +1012,7 @@ pub async fn mail_rsvp(state: State<'_, AppState>, message_id: i64, accept: bool
         bcc: vec![],
         subject: format!("{verb}: {}", inv.summary),
         body_text: format!("{verb} the invitation \"{}\".", inv.summary),
+            body_html: None,
         quoted_html: None,
         in_reply_to: detail.message_id_hdr.clone(),
         references: detail.references_hdr.clone(),

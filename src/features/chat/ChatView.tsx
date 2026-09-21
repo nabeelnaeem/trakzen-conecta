@@ -8,7 +8,7 @@ import { bytes, shortDate, timeOnly } from "../../lib/format";
 import { chat as chatIpc, errorMessage } from "../../lib/ipc";
 import { codeFromCopyButton, isOnlyCodeBlock, renderMarkdown } from "../../lib/markdown";
 import { navigateTo } from "../../lib/navigate";
-import { useMail } from "../mail/store";
+import { textToHtml, useMail } from "../mail/store";
 import { Spinner } from "../../lib/Spinner";
 import type { ChatMessage, Peer, TransferProgress } from "../../lib/types";
 import { confirmDialog } from "../../lib/confirm";
@@ -1081,7 +1081,7 @@ function Bubble({
     setMenu(false);
     await openCompose();
     const body = m.kind === "file" ? "" : m.body;
-    updateComposer({ subject: `Chat with ${peerName}`, body, files: m.kind === "file" && m.filePath ? [m.filePath] : [] });
+    updateComposer({ subject: `Chat with ${peerName}`, body, bodyHtml: textToHtml(body), files: m.kind === "file" && m.filePath ? [m.filePath] : [] });
     navigateTo("mail");
   };
   const ref = useRef<HTMLDivElement>(null);

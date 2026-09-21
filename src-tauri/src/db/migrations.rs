@@ -198,6 +198,10 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE chat_peers ADD COLUMN auto_accept INTEGER NOT NULL DEFAULT 0;
     ",
+    // 12: inline images referenced by Content-ID
+    "
+    ALTER TABLE mail_attachments ADD COLUMN content_id TEXT;
+    ",
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

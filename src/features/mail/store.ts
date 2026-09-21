@@ -23,7 +23,9 @@ export interface ComposerState {
   cc: string;
   bcc: string;
   subject: string;
+  /** Plain-text rendering of bodyHtml, kept for previews and validation. */
   body: string;
+  bodyHtml: string;
   draft: ComposeDraft | null;
   files: string[];
   draftId: string | null;
@@ -152,6 +154,7 @@ const emptyComposer = (accountId: number): ComposerState => ({
   bcc: "",
   subject: "",
   body: "",
+  bodyHtml: "",
   draft: null,
   files: [],
   draftId: null,
@@ -159,6 +162,11 @@ const emptyComposer = (accountId: number): ComposerState => ({
   saving: false,
   savedAt: null,
 });
+
+export function textToHtml(text: string): string {
+  const esc = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return esc.split("\n").join("<br>");
+}
 
 function toOutgoing(c: ComposerState): OutgoingMessage {
   return {
@@ -168,6 +176,7 @@ function toOutgoing(c: ComposerState): OutgoingMessage {
     bcc: splitList(c.bcc),
     subject: c.subject,
     bodyText: c.body,
+    bodyHtml: c.bodyHtml || null,
     quotedHtml: c.draft?.quotedHtml ?? null,
     inReplyTo: c.draft?.inReplyTo ?? null,
     references: c.draft?.references ?? null,
@@ -474,6 +483,7 @@ export const useMail = create<MailState>((set, get) => ({
             bcc: d.bcc.join(", "),
             subject: d.subject,
             body: d.bodyText,
+            bodyHtml: d.bodyHtml ?? textToHtml(d.bodyText),
             draftId: d.draftId,
             draft: d.threadId || d.inReplyTo
               ? {

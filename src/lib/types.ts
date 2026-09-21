@@ -172,6 +172,8 @@ export interface OutgoingMessage {
   bcc: string[];
   subject: string;
   bodyText: string;
+  /** HTML from the rich editor; bodyText is its plain rendering. */
+  bodyHtml?: string | null;
   quotedHtml?: string | null;
   inReplyTo?: string | null;
   references?: string | null;
@@ -187,6 +189,7 @@ export interface DraftContent {
   bcc: string[];
   subject: string;
   bodyText: string;
+  bodyHtml?: string | null;
   threadId: string | null;
   inReplyTo: string | null;
   references: string | null;

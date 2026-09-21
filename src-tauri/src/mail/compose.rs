@@ -9,6 +9,20 @@ use crate::error::{AppError, Result};
 use super::sanitize;
 use super::types::*;
 
+/// Separates what the user wrote from the quoted original in HTML we
+/// generate, so a draft can be reopened with just the user's part editable.
+const QUOTE_MARKER: &str = "<!--tc-quote-->";
+
+/// The user-written part of a message body this app produced, unwrapped
+/// from its outer div; `None` if the HTML did not come from us.
+pub fn own_html_part(html: &str) -> Option<String> {
+    let own = html.split(QUOTE_MARKER).next().unwrap_or(html).trim();
+    const OPEN: &str = "<div style=\"font-family:sans-serif;font-size:14px\">";
+    let inner = own.strip_prefix(OPEN)?;
+    let inner = inner.strip_suffix("</div>").unwrap_or(inner);
+    Some(inner.to_string())
+}
+
 pub struct ResolvedAttachment {
     pub filename: String,
     pub mime_type: String,
@@ -67,12 +81,14 @@ pub fn build_raw(
         b = b.references(refs.clone());
     }
 
-    let mut html = format!(
-        "<div style=\"font-family:sans-serif;font-size:14px\">{}</div>",
-        sanitize::text_to_html(&msg.body_text)
-    );
+    let own = match msg.body_html.as_deref().filter(|h| !h.trim().is_empty()) {
+        Some(h) => sanitize::html(h),
+        None => sanitize::text_to_html(&msg.body_text),
+    };
+    let mut html = format!("<div style=\"font-family:sans-serif;font-size:14px\">{own}</div>");
     let mut text = msg.body_text.clone();
     if let Some(q) = &msg.quoted_html {
+        html.push_str(QUOTE_MARKER);
         html.push_str("<br>");
         html.push_str(q);
         text.push_str("\n\n");
@@ -319,6 +335,7 @@ mod tests {
                 filename: "q3.xlsx".into(),
                 mime_type: "application/vnd.ms-excel".into(),
                 size: 10,
+                content_id: None,
             }],
             can_unsubscribe: false,
             invite: None,
@@ -378,6 +395,7 @@ mod tests {
             bcc: vec![],
             subject: "Re: Budget".into(),
             body_text: "Looks good.".into(),
+            body_html: Some("<b>Looks</b> good.".into()),
             quoted_html: Some("<blockquote>numbers</blockquote>".into()),
             in_reply_to: Some("<m1@example.com>".into()),
             references: None,
@@ -391,5 +409,37 @@ mod tests {
         assert!(text.contains("In-Reply-To: <m1@example.com>"));
         assert!(text.contains("multipart/alternative"));
         assert!(text.contains("Looks good."));
+    }
+
+    #[test]
+    fn own_html_part_round_trips_through_build_raw() {
+        let msg = OutgoingMessage {
+            account_id: 1,
+            to: vec!["alice@example.com".into()],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Hi".into(),
+            body_text: "Looks good.".into(),
+            body_html: Some("<b>Looks</b> good.".into()),
+            quoted_html: Some("<blockquote>numbers</blockquote>".into()),
+            in_reply_to: None,
+            references: None,
+            thread_id: None,
+            attachments: vec![],
+            draft_id: None,
+        };
+        let account = Account {
+            id: 1,
+            provider: "gmail".into(),
+            email: "me@example.com".into(),
+            display_name: None,
+            sync_cursor: None,
+        };
+        let raw = String::from_utf8(build_raw(&account, &msg, vec![]).unwrap()).unwrap();
+        // The HTML part is quoted-printable; the marker survives verbatim.
+        assert!(raw.contains("tc-quote"));
+        let html = "<div style=\"font-family:sans-serif;font-size:14px\"><b>Looks</b> good.</div><!--tc-quote--><br><blockquote>numbers</blockquote>";
+        assert_eq!(own_html_part(html).as_deref(), Some("<b>Looks</b> good."));
+        assert_eq!(own_html_part("<p>someone else's html</p>"), None);
     }
 }
