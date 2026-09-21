@@ -181,6 +181,19 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (group_id, member_id)
     );
     ",
+    // 10: group sender attribution, per-member delivery, roster versioning
+    "
+    ALTER TABLE chat_messages ADD COLUMN sender_id TEXT;
+    ALTER TABLE chat_peers ADD COLUMN group_left INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE chat_peers ADD COLUMN group_rev INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE chat_message_recipients (
+        msg_id    TEXT    NOT NULL REFERENCES chat_messages(msg_id) ON DELETE CASCADE,
+        member_id INTEGER NOT NULL REFERENCES chat_peers(id) ON DELETE CASCADE,
+        delivered INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (msg_id, member_id)
+    );
+    CREATE INDEX chat_message_recipients_pending ON chat_message_recipients(member_id) WHERE delivered = 0;
+    ",
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

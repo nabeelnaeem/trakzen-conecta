@@ -338,10 +338,32 @@ pub async fn chat_pin(state: State<'_, AppState>, msg_id: String, pinned: bool) 
 
 #[tauri::command]
 pub async fn chat_create_group(state: State<'_, AppState>, name: String, member_ids: Vec<i64>) -> Result<Peer> {
-    if name.trim().is_empty() {
-        return Err(AppError::Other("group name is required".into()));
-    }
     state.chat.create_group(&name, member_ids).await
+}
+
+#[tauri::command]
+pub async fn chat_group_members(state: State<'_, AppState>, group_id: i64) -> Result<Vec<Peer>> {
+    state.chat.group_members(group_id)
+}
+
+#[tauri::command]
+pub async fn chat_group_add_members(state: State<'_, AppState>, group_id: i64, member_ids: Vec<i64>) -> Result<Peer> {
+    state.chat.add_members(group_id, member_ids).await
+}
+
+#[tauri::command]
+pub async fn chat_group_remove_member(state: State<'_, AppState>, group_id: i64, member_id: i64) -> Result<Peer> {
+    state.chat.remove_member(group_id, member_id).await
+}
+
+#[tauri::command]
+pub async fn chat_group_rename(state: State<'_, AppState>, group_id: i64, name: String) -> Result<Peer> {
+    state.chat.rename_group(group_id, &name).await
+}
+
+#[tauri::command]
+pub async fn chat_group_leave(state: State<'_, AppState>, group_id: i64) -> Result<Peer> {
+    state.chat.leave_group(group_id).await
 }
 
 fn urlencoding_decode(s: &str) -> String {

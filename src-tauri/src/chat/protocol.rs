@@ -54,7 +54,10 @@ pub enum ControlMsg {
         group_id: Option<String>,
     },
     /// The peer is composing; UI shows "typing…" briefly.
-    Typing,
+    Typing {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_id: Option<String>,
+    },
     /// Sender changed their display name; peers otherwise only learn it from
     /// `Hello`, which chat connections send once and then stay open for hours.
     Rename {
@@ -87,6 +90,8 @@ pub enum ControlMsg {
         /// names. Absent from older builds, which always stream from zero.
         #[serde(default)]
         resumable: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_id: Option<String>,
     },
     /// Receiver already holds `offset` bytes of this message's file.
     FileAccept {
@@ -110,10 +115,15 @@ pub enum ControlMsg {
         msg_id: String,
         pinned: bool,
     },
-    GroupInvite {
+    /// Full roster of a group as the sender sees it. Sent to every member
+    /// (and to anyone just removed) after a change, and again whenever a
+    /// chat connection to a member comes up. `rev` is the change time;
+    /// receivers ignore anything older than what they hold.
+    GroupUpdate {
         group_id: String,
         name: String,
-        members: Vec<String>,
+        rev: i64,
+        members: Vec<crate::chat::types::GroupMember>,
     },
     /// Sender retracted a message ("delete for everyone").
     Delete {
