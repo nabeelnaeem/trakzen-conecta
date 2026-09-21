@@ -31,6 +31,11 @@ const RECONNECT_TICK: Duration = Duration::from_secs(5);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 /// How long a sender waits for `FileAccept` before assuming an older peer.
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a transfer connection is held open waiting for the receiving
+/// user to answer an offer before the sender is told to come back later.
+const OFFER_GRACE: Duration = Duration::from_secs(60);
+/// An unanswered offer is dropped after this long, on both sides.
+const OFFER_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 struct Conn {
     generation: u64,
@@ -60,17 +65,41 @@ pub struct ChatEngine {
     transfers: Mutex<HashMap<String, TransferProgress>>,
     /// Peers whose file queue is being drained right now.
     sending_files: Mutex<HashSet<i64>>,
+    /// The accept loop, so the listener can be moved to another port.
+    listener: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    /// Incoming file offers waiting for the user, by message id.
+    offers: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
 }
 
 /// Why a transfer stopped. `Transient` keeps the file queued (outgoing) or
-/// partial on disk (incoming) so the next attempt resumes it.
+/// partial on disk (incoming) so the next attempt resumes it; `Declined`
+/// is the receiver's answer and is not retried.
 enum TransferError {
     Transient(AppError),
     Fatal(AppError),
+    Declined,
+    /// The receiving user has not answered yet; they will send `FileAnswer`.
+    Pending,
+}
+
+fn from_file_error(reason: String) -> TransferError {
+    match reason.as_str() {
+        "declined" => TransferError::Declined,
+        "pending" => TransferError::Pending,
+        _ => TransferError::Fatal(AppError::Other(format!("receiver rejected file: {reason}"))),
+    }
 }
 
 fn fatal(e: std::io::Error) -> TransferError {
     TransferError::Fatal(e.into())
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypingEvent {
+    pub peer_id: i64,
+    /// Who is typing, for groups; a direct chat has only one candidate.
+    pub who: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -124,6 +153,8 @@ impl ChatEngine {
             paused: Mutex::new(HashSet::new()),
             transfers: Mutex::new(HashMap::new()),
             sending_files: Mutex::new(HashSet::new()),
+            listener: Mutex::new(None),
+            offers: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -161,7 +192,13 @@ impl ChatEngine {
 
             let reconnect = engine.clone();
             tauri::async_runtime::spawn(async move { reconnect.reconnect_loop().await });
+            engine.spawn_accept(listener);
+        });
+    }
 
+    fn spawn_accept(self: &Arc<Self>, listener: TcpListener) {
+        let engine = self.clone();
+        let task = tauri::async_runtime::spawn(async move {
             loop {
                 match listener.accept().await {
                     Ok((stream, addr)) => {
@@ -179,6 +216,41 @@ impl ChatEngine {
                 }
             }
         });
+        if let Some(old) = self.listener.lock().unwrap().replace(task) {
+            old.abort();
+        }
+    }
+
+    /// Moves the listener to another port without a restart. Open chat
+    /// connections carry on; peers are told the new port so they can dial
+    /// back after their next drop.
+    pub async fn rebind(self: &Arc<Self>, port: u16) -> Result<()> {
+        {
+            let me = self.me.read().unwrap();
+            if me.port == port && me.listening {
+                return Ok(());
+            }
+        }
+        let listener = TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port)))
+            .await
+            .map_err(|e| AppError::Other(format!("cannot listen on port {port}: {e}")))?;
+        {
+            let mut me = self.me.write().unwrap();
+            me.port = port;
+            me.listening = true;
+        }
+        self.spawn_accept(listener);
+        let (id, name) = {
+            let me = self.me.read().unwrap();
+            (me.peer_id.clone(), me.display_name.clone())
+        };
+        if let Some(d) = self.discovery.lock().unwrap().as_ref() {
+            d.rename(&id, &name, port);
+        }
+        let _ = self.app.emit(EVENT_STATUS, serde_json::json!({ "listening": true }));
+        self.announce();
+        tracing::info!(port, "chat listener moved");
+        Ok(())
     }
 
     // ---- identity ---------------------------------------------------------
@@ -208,19 +280,28 @@ impl ChatEngine {
         if let Some(d) = self.discovery.lock().unwrap().as_ref() {
             d.rename(&id, name, port);
         }
+        self.announce();
+        Ok(self.identity())
+    }
+
+    /// Tells every connected peer our current name and port.
+    fn announce(&self) {
+        let (name, port) = {
+            let me = self.me.read().unwrap();
+            (me.display_name.clone(), me.port)
+        };
         let live: Vec<mpsc::Sender<Frame>> =
             self.conns.lock().unwrap().values().map(|c| c.tx.clone()).collect();
-        let name = name.to_string();
         tauri::async_runtime::spawn(async move {
             for tx in live {
                 let _ = tx
                     .send(Frame::Control(ControlMsg::Rename {
                         display_name: name.clone(),
+                        port: Some(port),
                     }))
                     .await;
             }
         });
-        Ok(self.identity())
     }
 
     fn hello(&self, purpose: Purpose) -> ControlMsg {
@@ -292,6 +373,11 @@ impl ChatEngine {
                             b.insert(p.id, (n + 1, std::time::Instant::now() + wait));
                         }
                     });
+                }
+            }
+            if let Ok(expired) = self.store.expire_offers(OFFER_TTL_MS) {
+                for m in expired {
+                    self.emit_message(&m);
                 }
             }
             // A transfer that broke while the chat link stayed up is retried
@@ -438,6 +524,7 @@ impl ChatEngine {
         let flush_tx = tx.clone();
         tauri::async_runtime::spawn(async move {
             flush.send_rosters(row_id, &flush_tx).await;
+            flush.send_file_answers(row_id, &flush_tx).await;
             flush.flush_queue(row_id, &flush_tx).await;
             flush.flush_files(row_id).await;
         });
@@ -483,7 +570,7 @@ impl ChatEngine {
         tx
     }
 
-    async fn on_control(&self, row_id: i64, msg: ControlMsg, out: &mpsc::Sender<Frame>) -> Result<()> {
+    async fn on_control(self: &Arc<Self>, row_id: i64, msg: ControlMsg, out: &mpsc::Sender<Frame>) -> Result<()> {
         match msg {
             ControlMsg::Text { msg_id, body, reply_to, group_id, .. } => {
                 let (dest, sender_id) = match group_id.as_deref() {
@@ -539,20 +626,26 @@ impl ChatEngine {
                 }
             }
             ControlMsg::Typing { group_id } => {
-                let target = match group_id.as_deref() {
-                    Some(g) => self.group_for_sender(g, row_id)?,
-                    None => Some(row_id),
+                let (target, who) = match group_id.as_deref() {
+                    Some(g) => (
+                        self.group_for_sender(g, row_id)?,
+                        self.store.get_peer(row_id).ok().map(|p| p.display_name),
+                    ),
+                    None => (Some(row_id), None),
                 };
-                if let Some(t) = target {
-                    let _ = self.app.emit(EVENT_TYPING, t);
+                if let Some(peer_id) = target {
+                    let _ = self.app.emit(EVENT_TYPING, TypingEvent { peer_id, who });
                 }
             }
-            ControlMsg::Rename { display_name } => {
+            ControlMsg::Rename { display_name, port } => {
                 let display_name = display_name.trim();
                 if !display_name.is_empty() {
                     self.store.set_peer_name(row_id, display_name)?;
-                    self.emit_peer(row_id);
                 }
+                if let Some(port) = port {
+                    self.store.set_peer_port(row_id, port)?;
+                }
+                self.emit_peer(row_id);
             }
             ControlMsg::Read { msg_ids } => {
                 for m in self.store.set_status_many(&msg_ids, "read")? {
@@ -616,7 +709,11 @@ impl ChatEngine {
             ControlMsg::GroupUpdate { group_id, name, rev, members } => {
                 self.apply_group_update(&group_id, &name, rev, &members)?;
             }
+            ControlMsg::FileAnswer { msg_id, accept } => {
+                self.on_file_answer(row_id, &msg_id, accept).await?;
+            }
             ControlMsg::FileOffer { .. }
+            | ControlMsg::FilePending { .. }
             | ControlMsg::FileAccept { .. }
             | ControlMsg::FileDone { .. }
             | ControlMsg::FileError { .. } => {
@@ -992,6 +1089,19 @@ impl ChatEngine {
                     tracing::warn!(row_id, %e, "file send failed");
                     (Some("failed"), "failed")
                 }
+                Err(TransferError::Declined) if is_group => {
+                    // One member said no; the others may still want it.
+                    if let Ok(Some(m)) = self.store.mark_delivered(&m.msg_id, row_id) {
+                        self.emit_message(&m);
+                    }
+                    (None, "failed")
+                }
+                Err(TransferError::Declined) => (Some("declined"), "failed"),
+                Err(TransferError::Pending) if is_group => {
+                    let _ = self.store.set_recipient_deferred(&m.msg_id, row_id, true);
+                    (None, "failed")
+                }
+                Err(TransferError::Pending) => (Some("offered"), "failed"),
             };
             if let Some(status) = status {
                 if let Ok(Some(m)) = self.store.set_status(&m.msg_id, status) {
@@ -1008,7 +1118,7 @@ impl ChatEngine {
                 bytes_total: size as u64,
                 state: state.into(),
             });
-            if outcome.is_err() {
+            if matches!(outcome, Err(TransferError::Transient(_))) {
                 break;
             }
         }
@@ -1060,11 +1170,18 @@ impl ChatEngine {
 
         // A receiver from before resume support never answers the offer and
         // just waits for chunks, so a silent peer means "start from zero".
-        let offset = match tokio::time::timeout(ACCEPT_TIMEOUT, protocol::read_frame(&mut stream)).await {
-            Ok(Ok(Some(Frame::Control(ControlMsg::FileAccept { offset, .. })))) => offset,
-            Ok(Ok(Some(Frame::Control(ControlMsg::FileError { reason, .. })))) => {
-                return Err(TransferError::Fatal(AppError::Other(format!("receiver rejected file: {reason}"))));
+        let mut reply = tokio::time::timeout(ACCEPT_TIMEOUT, protocol::read_frame(&mut stream)).await;
+        if let Ok(Ok(Some(Frame::Control(ControlMsg::FilePending { .. })))) = reply {
+            // The receiver is asking its user; it holds the line for
+            // OFFER_GRACE and then tells us to wait for a `FileAnswer`.
+            reply = tokio::time::timeout(OFFER_GRACE + Duration::from_secs(30), protocol::read_frame(&mut stream)).await;
+            if reply.is_err() {
+                return Err(TransferError::Transient(AppError::Other("receiver never answered the offer".into())));
             }
+        }
+        let offset = match reply {
+            Ok(Ok(Some(Frame::Control(ControlMsg::FileAccept { offset, .. })))) => offset,
+            Ok(Ok(Some(Frame::Control(ControlMsg::FileError { reason, .. })))) => return Err(from_file_error(reason)),
             Ok(Ok(_)) => return Err(TransferError::Transient(AppError::Other("unexpected reply to file offer".into()))),
             Ok(Err(e)) => return Err(TransferError::Transient(e)),
             Err(_) => 0,
@@ -1133,9 +1250,7 @@ impl ChatEngine {
             .map_err(TransferError::Transient)?;
         match ack {
             Some(Frame::Control(ControlMsg::Ack { msg_id: id })) if id == msg_id => Ok(()),
-            Some(Frame::Control(ControlMsg::FileError { reason, .. })) => {
-                Err(TransferError::Fatal(AppError::Other(format!("receiver rejected file: {reason}"))))
-            }
+            Some(Frame::Control(ControlMsg::FileError { reason, .. })) => Err(from_file_error(reason)),
             _ => Err(TransferError::Transient(AppError::Other("unexpected reply after file".into()))),
         }
     }
@@ -1208,7 +1323,16 @@ impl ChatEngine {
         }
 
         let already_complete = offset == size && part_path.as_os_str().is_empty();
+        // Only a sender that waits for `FileAccept` can be asked to hold;
+        // resumed transfers were already agreed to.
+        let ask = resumable
+            && !already_complete
+            && offset == 0
+            && existing.as_ref().map_or(true, |m| m.status == "offered" || m.status == "expired")
+            && settings::flag(&self.db, settings::CHAT_ASK_FILES, true).unwrap_or(true)
+            && !self.store.get_peer(row_id).map(|p| p.auto_accept_files).unwrap_or(false);
         if !already_complete {
+            let status = if ask { "offered" } else { "receiving" };
             let msg = self.store.insert_message(&NewMessage {
                 msg_id: &msg_id,
                 peer_id: dest,
@@ -1218,17 +1342,58 @@ impl ChatEngine {
                 file_name: Some(&name),
                 file_path: Some(&part_path.to_string_lossy()),
                 file_size: Some(size as i64),
-                status: "receiving",
+                status,
                 created_at: now_ms(),
                 reply_to: None,
                 sender_id: sender_id.as_deref(),
             })?;
             let msg = self
                 .store
-                .set_file_result(&msg.msg_id, "receiving", Some(&part_path.to_string_lossy()))?
+                .set_file_result(&msg.msg_id, status, Some(&part_path.to_string_lossy()))?
                 .unwrap_or(msg);
             self.emit_message(&msg);
             self.emit_peer(dest);
+        }
+
+        if ask {
+            protocol::write_frame(
+                &mut stream,
+                &Frame::Control(ControlMsg::FilePending {
+                    transfer_id: transfer_id.clone(),
+                }),
+            )
+            .await?;
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.offers.lock().unwrap().insert(msg_id.clone(), tx);
+            let answer = tokio::time::timeout(OFFER_GRACE, rx).await;
+            if matches!(answer, Ok(Err(_))) {
+                // The sender re-offered and a newer prompt owns this message.
+                return Ok(());
+            }
+            self.offers.lock().unwrap().remove(&msg_id);
+            let accepted = matches!(answer, Ok(Ok(true)));
+            if !accepted {
+                // No answer yet: the offer stays on screen and the user's
+                // eventual click reaches the sender as a `FileAnswer`.
+                let (status, reason) = if answer.is_err() { (None, "pending") } else { (Some("declined"), "declined") };
+                if let Some(status) = status {
+                    if let Some(m) = self.store.set_status(&msg_id, status)? {
+                        self.emit_message(&m);
+                    }
+                }
+                let _ = protocol::write_frame(
+                    &mut stream,
+                    &Frame::Control(ControlMsg::FileError {
+                        transfer_id,
+                        reason: reason.into(),
+                    }),
+                )
+                .await;
+                return Ok(());
+            }
+            if let Some(m) = self.store.set_status(&msg_id, "receiving")? {
+                self.emit_message(&m);
+            }
         }
 
         if resumable {
@@ -1287,6 +1452,8 @@ impl ChatEngine {
                         let _ = tokio::fs::remove_file(&part_path).await;
                         ("failed", e)
                     }
+                    TransferError::Declined => ("declined", AppError::Other("declined".into())),
+                    TransferError::Pending => ("offered", AppError::Other("pending".into())),
                 };
                 if !already_complete {
                     if let Some(m) = self.store.set_status(&msg_id, status)? {
@@ -1389,6 +1556,101 @@ impl ChatEngine {
         }
         drop(live);
         let _ = self.app.emit(EVENT_TRANSFER, p);
+    }
+
+    /// Resolves an incoming file offer. While the sender is still holding
+    /// the transfer connection the answer goes straight back on it;
+    /// otherwise it travels over the chat connection (now, or when the
+    /// sender next connects) and the sender offers the file again.
+    pub async fn answer_offer(self: &Arc<Self>, msg_id: &str, accept: bool, always: bool) -> Result<()> {
+        let Some(m) = self.store.get_message(msg_id)? else {
+            return Err(AppError::Other("that offer is gone".into()));
+        };
+        if m.direction != Direction::In || m.status != "offered" {
+            return Err(AppError::Other("this offer is no longer open".into()));
+        }
+        let sender_row = self.sender_row(&m)?;
+        if always && accept {
+            self.store.set_auto_accept(sender_row, true)?;
+            self.emit_peer(sender_row);
+        }
+        let tx = self.offers.lock().unwrap().remove(msg_id);
+        if let Some(tx) = tx {
+            let _ = tx.send(accept);
+            return Ok(());
+        }
+        let status = if accept { "accepted" } else { "declined" };
+        if let Some(m) = self.store.set_status(msg_id, status)? {
+            self.emit_message(&m);
+        }
+        if let Ok(tx) = self.connect_peer(sender_row).await {
+            let _ = tx
+                .send(Frame::Control(ControlMsg::FileAnswer {
+                    msg_id: msg_id.to_string(),
+                    accept,
+                }))
+                .await;
+        }
+        Ok(())
+    }
+
+    /// The peer that offered an incoming message: the chat partner, or the
+    /// group member named as its author.
+    fn sender_row(&self, m: &ChatMessage) -> Result<i64> {
+        if self.store.is_group(m.peer_id)? {
+            m.sender_id
+                .as_deref()
+                .and_then(|id| self.store.find_by_uuid(id).ok().flatten())
+                .ok_or_else(|| AppError::Other("the member who sent this is no longer known".into()))
+        } else {
+            Ok(m.peer_id)
+        }
+    }
+
+    /// The other side answered an offer that had gone pending.
+    async fn on_file_answer(self: &Arc<Self>, row_id: i64, msg_id: &str, accept: bool) -> Result<()> {
+        let Some(m) = self.store.get_message(msg_id)? else { return Ok(()) };
+        if m.direction != Direction::Out || m.kind != MessageKind::File {
+            return Ok(());
+        }
+        let is_group = self.store.is_group(m.peer_id)?;
+        let allowed = if is_group { self.store.is_member(m.peer_id, row_id)? } else { m.peer_id == row_id };
+        if !allowed {
+            return Ok(());
+        }
+        if is_group {
+            if accept {
+                self.store.set_recipient_deferred(msg_id, row_id, false)?;
+                if m.status == "offered" {
+                    let _ = self.store.set_status(msg_id, "sending");
+                }
+                let engine = self.clone();
+                tauri::async_runtime::spawn(async move { engine.flush_files(row_id).await });
+            } else if let Some(m) = self.store.mark_delivered(msg_id, row_id)? {
+                self.emit_message(&m);
+            }
+        } else if m.status == "offered" || m.status == "declined" {
+            let status = if accept { "queued" } else { "declined" };
+            if let Some(m) = self.store.set_status(msg_id, status)? {
+                self.emit_message(&m);
+            }
+            if accept {
+                let engine = self.clone();
+                tauri::async_runtime::spawn(async move { engine.flush_files(row_id).await });
+            }
+        }
+        Ok(())
+    }
+
+    /// On (re)connect, repeat any acceptance the sender has not acted on.
+    async fn send_file_answers(&self, row_id: i64, tx: &mpsc::Sender<Frame>) {
+        let Ok(accepted) = self.store.accepted_offers_from(row_id) else { return };
+        for m in accepted {
+            let frame = Frame::Control(ControlMsg::FileAnswer { msg_id: m.msg_id, accept: true });
+            if tx.send(frame).await.is_err() {
+                return;
+            }
+        }
     }
 
     /// Pauses on both ends: the peer's loop must stop too, or its stall

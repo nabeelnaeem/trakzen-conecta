@@ -17,7 +17,7 @@ const PEER_COLS: &str = "p.id, p.peer_id, p.display_name, p.host, p.port, p.last
     (SELECT CASE m.kind WHEN 'file' THEN m.file_name ELSE m.body END FROM chat_messages m
         WHERE m.peer_id = p.id ORDER BY m.created_at DESC, m.id DESC LIMIT 1),
     (SELECT m.created_at FROM chat_messages m WHERE m.peer_id = p.id ORDER BY m.created_at DESC, m.id DESC LIMIT 1),
-    p.is_group, p.group_left";
+    p.is_group, p.group_left, p.auto_accept";
 
 fn row_to_peer(r: &Row) -> rusqlite::Result<Peer> {
     Ok(Peer {
@@ -33,6 +33,7 @@ fn row_to_peer(r: &Row) -> rusqlite::Result<Peer> {
         last_message_at: r.get(8)?,
         is_group: r.get::<_, i64>(9).unwrap_or(0) != 0,
         group_left: r.get::<_, i64>(10).unwrap_or(0) != 0,
+        auto_accept_files: r.get::<_, i64>(11).unwrap_or(0) != 0,
     })
 }
 
@@ -137,6 +138,22 @@ impl ChatStore {
         self.db.conn().execute(
             "UPDATE chat_peers SET display_name = ?2 WHERE id = ?1 AND is_group = 0",
             params![id, display_name],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_auto_accept(&self, id: i64, on: bool) -> Result<()> {
+        self.db.conn().execute(
+            "UPDATE chat_peers SET auto_accept = ?2 WHERE id = ?1",
+            params![id, on as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_peer_port(&self, id: i64, port: u16) -> Result<()> {
+        self.db.conn().execute(
+            "UPDATE chat_peers SET port = ?2 WHERE id = ?1 AND is_group = 0",
+            params![id, port as i64],
         )?;
         Ok(())
     }
@@ -503,6 +520,49 @@ impl ChatStore {
         conn.execute(
             "UPDATE chat_messages SET status = 'interrupted' WHERE direction = 'in' AND status = 'receiving'",
             [],
+        )?;
+        Ok(())
+    }
+
+    /// Offers nobody answered within `max_age_ms`, on either side.
+    pub fn expire_offers(&self, max_age_ms: i64) -> Result<Vec<ChatMessage>> {
+        let cutoff = now_ms() - max_age_ms;
+        let conn = self.db.conn();
+        let ids: Vec<String> = conn
+            .prepare("SELECT msg_id FROM chat_messages WHERE status = 'offered' AND created_at < ?1")?
+            .query_map(params![cutoff], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(conn);
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(m) = self.set_status(&id, "expired")? {
+                out.push(m);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Incoming files from this peer the user accepted after the offer had
+    /// gone pending; the sender must be asked to send them again.
+    pub fn accepted_offers_from(&self, row_id: i64) -> Result<Vec<ChatMessage>> {
+        let conn = self.db.conn();
+        let sql = format!(
+            "SELECT {MSG_COLS} FROM chat_messages
+             WHERE direction = 'in' AND kind = 'file' AND status = 'accepted'
+               AND (peer_id = ?1 OR sender_id = (SELECT peer_id FROM chat_peers WHERE id = ?1))
+             ORDER BY id ASC"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params![row_id], row_to_message)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// A member whose answer is outstanding is parked (`delivered = 2`) so
+    /// retries leave them alone until they say yes.
+    pub fn set_recipient_deferred(&self, msg_id: &str, member_id: i64, deferred: bool) -> Result<()> {
+        self.db.conn().execute(
+            "UPDATE chat_message_recipients SET delivered = ?3 WHERE msg_id = ?1 AND member_id = ?2 AND delivered <> 1",
+            params![msg_id, member_id, if deferred { 2 } else { 0 }],
         )?;
         Ok(())
     }

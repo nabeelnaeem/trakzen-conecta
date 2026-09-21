@@ -125,7 +125,7 @@ export function ChatView() {
             seed={active.peerId ?? active.host}
             host={`${active.host}:${active.port}`}
             online={active.online}
-            typing={!!s.typing[active.id]}
+            typing={s.typing[active.id] ?? null}
           />
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 text-sm text-gray-400">
@@ -364,7 +364,7 @@ interface Pending {
 const MAX_ROWS = 8;
 const CODE_LANGS = ["", "typescript", "javascript", "python", "rust", "go", "java", "csharp", "sql", "bash", "json", "yaml", "html", "css"];
 
-function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer: Peer; peerId: number; name: string; seed: string; host: string; online: boolean; typing: boolean }) {
+function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer: Peer; peerId: number; name: string; seed: string; host: string; online: boolean; typing: { who: string | null } | null }) {
   const { messages, transfers, sendText, sendFile, removePeer, clearChat, edit } = useChat();
   const isGroup = !!peer.isGroup;
   const left = !!peer.groupLeft;
@@ -603,7 +603,7 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
           <div className="truncate font-medium">{name}</div>
           <div className="text-xs text-gray-500">
             {typing ? (
-              <em className="text-blue-700">typing…</em>
+              <em className="text-blue-700">{typing.who ? `${typing.who} is typing…` : "typing…"}</em>
             ) : isGroup ? (
               <button className="hover:underline" onClick={() => setShowMembers(true)}>
                 {left ? "you left this group" : members ? `${members.length + 1} members · ${members.filter((m) => m.online).length} online` : "group"}
@@ -638,6 +638,16 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
                   }}
                 >
                   Members…
+                </MenuItem>
+              )}
+              {!isGroup && (
+                <MenuItem
+                  onClick={() => {
+                    setMenu(false);
+                    void chatIpc.setAutoAccept(peerId, !peer.autoAcceptFiles).then((p) => useChat.getState().loadPeers().then(() => p));
+                  }}
+                >
+                  {peer.autoAcceptFiles ? "Ask before accepting files" : "Always accept files"}
                 </MenuItem>
               )}
               <MenuItem
@@ -1031,8 +1041,10 @@ function FmtButton({ children, title, onClick }: { children: React.ReactNode; ti
 function Ticks({ status, mine }: { status: string; mine: boolean }) {
   if (!mine) return null;
   if (status === "queued") return <Clock size={11} aria-label="Queued until the peer is online" />;
+  if (status === "offered") return <Clock size={11} aria-label="Waiting for the peer to accept" />;
   if (status === "sending") return <Check size={12} aria-label="Sending" />;
   if (status === "failed") return <X size={12} aria-label="Failed" />;
+  if (status === "declined") return <X size={12} aria-label="Declined by the peer" />;
   if (status === "read") return <CheckCheck size={13} className="text-emerald-300" aria-label="Read" />;
   return <CheckCheck size={13} className="text-sky-300" aria-label="Delivered" />;
 }
@@ -1302,7 +1314,10 @@ function MarkdownBody({ body, mine }: { body: string; mine: boolean }) {
 }
 
 function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: boolean; progress?: TransferProgress; frameless?: boolean }) {
-  void mine;
+  const peers = useChat((st) => st.peers);
+  const conversation = peers.find((p) => p.id === m.peerId);
+  const peerName = conversation?.displayName ?? "the peer";
+  const senderName = conversation?.isGroup ? (m.senderName ?? "this member") : peerName;
   const [preview, setPreview] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const done = m.status === "unread" || m.status === "received" || m.status === "delivered" || m.status === "read" || (mine && m.status !== "failed");
@@ -1351,10 +1366,27 @@ function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: bool
           </>
         )}
         {done && !m.filePath && <span>(file removed)</span>}
+        {mine && m.status === "offered" && <span>· waiting for {peerName} to accept</span>}
+        {!mine && m.status === "accepted" && <span>· accepted, waiting for the sender</span>}
+        {m.status === "declined" && <span>· {mine ? "declined" : "you declined"}</span>}
+        {m.status === "expired" && <span>· offer expired</span>}
         {!mine && m.status === "interrupted" && <span>· waiting for the sender to reconnect</span>}
         {!mine && m.status === "receiving" && !progress && <span>· receiving…</span>}
         {mine && m.status === "queued" && <span>· queued</span>}
       </div>
+      {!mine && m.status === "offered" && (
+        <div className="mt-1 flex flex-wrap gap-1">
+          <button className="btn btn-primary text-xs" onClick={() => void chatIpc.answerFile(m.msgId, true).catch((e) => setErr(errorMessage(e)))}>
+            Accept
+          </button>
+          <button className="btn text-xs" onClick={() => void chatIpc.answerFile(m.msgId, false).catch((e) => setErr(errorMessage(e)))}>
+            Decline
+          </button>
+          <button className="btn text-xs" title="Accept this and every future file from them without asking" onClick={() => void chatIpc.answerFile(m.msgId, true, true).catch((e) => setErr(errorMessage(e)))}>
+            Always accept from {senderName}
+          </button>
+        </div>
+      )}
       {err && <div className="text-xs text-red-700">{err}</div>}
       {pct !== null && (
         <div className="mt-1 h-1 overflow-hidden rounded bg-gray-300">

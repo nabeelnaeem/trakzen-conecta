@@ -58,10 +58,13 @@ pub enum ControlMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         group_id: Option<String>,
     },
-    /// Sender changed their display name; peers otherwise only learn it from
-    /// `Hello`, which chat connections send once and then stay open for hours.
+    /// Sender changed their display name or listen port; peers otherwise
+    /// only learn these from `Hello`, which chat connections send once and
+    /// then stay open for hours.
     Rename {
         display_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        port: Option<u16>,
     },
     /// Receiver has displayed these messages.
     Read {
@@ -92,6 +95,18 @@ pub enum ControlMsg {
         resumable: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         group_id: Option<String>,
+    },
+    /// Receiver is asking its user whether to take the file; `FileAccept`
+    /// or `FileError` follows once they decide, or `FileError("pending")`
+    /// if that takes too long to keep the connection open for.
+    FilePending {
+        transfer_id: String,
+    },
+    /// Receiver's late answer to an offer that went pending, sent over the
+    /// chat connection. `accept` asks the sender to offer the file again.
+    FileAnswer {
+        msg_id: String,
+        accept: bool,
     },
     /// Receiver already holds `offset` bytes of this message's file.
     FileAccept {
@@ -261,7 +276,7 @@ mod tests {
         buf.extend_from_slice(payload);
         write_frame(
             &mut buf,
-            &Frame::Control(ControlMsg::Rename { display_name: "Benji".into() }),
+            &Frame::Control(ControlMsg::Rename { display_name: "Benji".into(), port: None }),
         )
         .await
         .unwrap();
@@ -272,7 +287,10 @@ mod tests {
             Some(Frame::Control(ControlMsg::Unknown))
         ));
         match read_frame(&mut cursor).await.unwrap().unwrap() {
-            Frame::Control(ControlMsg::Rename { display_name }) => assert_eq!(display_name, "Benji"),
+            Frame::Control(ControlMsg::Rename { display_name, port }) => {
+                assert_eq!(display_name, "Benji");
+                assert_eq!(port, None);
+            }
             other => panic!("unexpected {other:?}"),
         }
     }

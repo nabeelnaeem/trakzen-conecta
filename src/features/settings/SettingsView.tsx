@@ -792,7 +792,8 @@ function ChatTab({ s, save }: { s: Settings; save: Save }) {
   return (
     <div className="space-y-5 text-sm">
       <TextField label="Display name (what peers see)" value={s.chatDisplayName} onCommit={(v) => void save({ chatDisplayName: v })} />
-      <TextField label="Listen port" value={String(s.chatPort)} numeric width="w-32" onCommit={(v) => void save({ chatPort: Number(v) || undefined }, "Port changes apply after a restart.")} hint="Peers connect to this port; allow it through your firewall." />
+      <TextField label="Listen port" value={String(s.chatPort)} numeric width="w-32" onCommit={(v) => void save({ chatPort: Number(v) || undefined })} hint="Peers connect to this port; allow it through your firewall. Changes apply immediately." />
+      <Toggle v={s.chatAskFiles} on={(v) => void save({ chatAskFiles: v })} label="Ask before accepting incoming files" hint="Off: files from peers are saved to the folder below straight away." />
       <div>
         <label className="label">Received files folder</label>
         <div className="flex gap-2">

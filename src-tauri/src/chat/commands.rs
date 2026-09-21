@@ -331,6 +331,21 @@ pub async fn chat_pause_transfer(state: State<'_, AppState>, transfer_id: String
     Ok(())
 }
 
+/// Accept or decline a file a peer is offering (message status `offered`).
+/// `always` also switches the sender to auto-accept from now on.
+#[tauri::command]
+pub async fn chat_answer_file(state: State<'_, AppState>, msg_id: String, accept: bool, always: Option<bool>) -> Result<()> {
+    state.chat.answer_offer(&msg_id, accept, always.unwrap_or(false)).await
+}
+
+#[tauri::command]
+pub async fn chat_set_auto_accept(state: State<'_, AppState>, peer_id: i64, on: bool) -> Result<Peer> {
+    state.chat.store.set_auto_accept(peer_id, on)?;
+    let mut p = state.chat.store.get_peer(peer_id)?;
+    p.online = state.chat.is_online(peer_id);
+    Ok(p)
+}
+
 #[tauri::command]
 pub async fn chat_pin(state: State<'_, AppState>, msg_id: String, pinned: bool) -> Result<Option<ChatMessage>> {
     state.chat.pin_message(&msg_id, pinned).await

@@ -38,6 +38,7 @@ pub struct SettingsPatch {
     chat_display_name: Option<String>,
     chat_port: Option<u16>,
     chat_download_dir: Option<String>,
+    chat_ask_files: Option<bool>,
     mail_show_images: Option<bool>,
     mail_signature: Option<String>,
     /// account id → signature; `None` value removes the override.
@@ -77,12 +78,16 @@ async fn settings_update(
         state.chat.set_display_name(&v)?;
     }
     if let Some(v) = patch.chat_port {
-        // Takes effect on next launch; rebinding a live listener is not
-        // worth the complexity yet.
+        // Bind first so a port that cannot be opened leaves the old one in
+        // place and the setting untouched.
+        state.chat.rebind(v).await?;
         settings::set(&state.db, settings::CHAT_PORT, &v.to_string())?;
     }
     if let Some(v) = patch.chat_download_dir {
         settings::set(&state.db, settings::CHAT_DOWNLOAD_DIR, v.trim())?;
+    }
+    if let Some(v) = patch.chat_ask_files {
+        settings::set(&state.db, settings::CHAT_ASK_FILES, if v { "true" } else { "false" })?;
     }
     if let Some(v) = patch.mail_show_images {
         settings::set(&state.db, settings::MAIL_SHOW_IMAGES, if v { "true" } else { "false" })?;
@@ -412,6 +417,8 @@ pub fn run() {
             chat::commands::chat_stash_blob,
             chat::commands::chat_file_preview,
             chat::commands::chat_pause_transfer,
+            chat::commands::chat_answer_file,
+            chat::commands::chat_set_auto_accept,
             chat::commands::chat_pin,
             chat::commands::chat_create_group,
             chat::commands::chat_group_members,

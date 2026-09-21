@@ -11,8 +11,8 @@ interface ChatState {
   messages: ChatMessage[];
   transfers: Record<string, TransferProgress>;
   nearby: Nearby[];
-  /** peer row id → time the last "typing" arrived */
-  typing: Record<number, number>;
+  /** peer row id → when the last "typing" arrived and, in a group, from whom */
+  typing: Record<number, { at: number; who: string | null }>;
   /** conecta://pair link handed in by a deep link, consumed by the Add form. */
   pendingPair: string | null;
   error: string | null;
@@ -110,10 +110,10 @@ export const useChat = create<ChatState>((set, get) => ({
         set({ messages: upsertMessage(messages, m) });
         if (viewing && m.direction === "in" && m.status === "unread") void chat.markRead(m.peerId);
       }
-      if (m.direction === "in" && (m.status === "unread") && !viewing) {
+      if (m.direction === "in" && (m.status === "unread" || m.status === "offered") && !viewing) {
         const peer = peers.find((p) => p.id === m.peerId);
         const who = peer?.displayName ?? "New message";
-        const what = m.kind === "file" ? `Sent a file: ${m.fileName ?? ""}` : m.body;
+        const what = m.status === "offered" ? `Wants to send you ${m.fileName ?? "a file"}` : m.kind === "file" ? `Sent a file: ${m.fileName ?? ""}` : m.body;
         const body = peer?.isGroup && m.senderName ? `${m.senderName}: ${what}` : what;
         void notify(who, body, "chat", `conecta://chat/${peer?.peerId ?? m.peerId}`);
       }
@@ -121,11 +121,11 @@ export const useChat = create<ChatState>((set, get) => ({
     });
     chat.nearby().then((nearby) => set({ nearby })).catch(() => undefined);
     await chat.onNearby((nearby) => set({ nearby }));
-    await chat.onTyping((peerId) => {
-      set({ typing: { ...get().typing, [peerId]: Date.now() } });
+    await chat.onTyping(({ peerId, who }) => {
+      set({ typing: { ...get().typing, [peerId]: { at: Date.now(), who } } });
       window.setTimeout(() => {
         const t = get().typing;
-        if (Date.now() - (t[peerId] ?? 0) >= 3900) {
+        if (Date.now() - (t[peerId]?.at ?? 0) >= 3900) {
           const next = { ...t };
           delete next[peerId];
           set({ typing: next });

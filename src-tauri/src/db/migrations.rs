@@ -194,6 +194,10 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX chat_message_recipients_pending ON chat_message_recipients(member_id) WHERE delivered = 0;
     ",
+    // 11: per-peer "always accept files"
+    "
+    ALTER TABLE chat_peers ADD COLUMN auto_accept INTEGER NOT NULL DEFAULT 0;
+    ",
 ];
 
 pub fn run(conn: &Connection) -> Result<()> {

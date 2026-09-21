@@ -30,6 +30,9 @@ pub struct Peer {
     /// history stays but nothing more can be sent.
     #[serde(default)]
     pub group_left: bool,
+    /// Files from this peer are taken without asking.
+    #[serde(default)]
+    pub auto_accept_files: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

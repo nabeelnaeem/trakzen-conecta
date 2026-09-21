@@ -232,6 +232,8 @@ export interface Peer {
   isGroup?: boolean;
   /** True once this machine left (or was removed from) the group. */
   groupLeft?: boolean;
+  /** Files from this peer are accepted without asking. */
+  autoAcceptFiles?: boolean;
 }
 
 export interface ChatMessage {
@@ -276,6 +278,12 @@ export interface TransferProgress {
   state: "active" | "paused" | "done" | "failed";
 }
 
+export interface TypingEvent {
+  peerId: number;
+  /** Who is typing, in a group. */
+  who: string | null;
+}
+
 export interface DeletedEvent {
   peerId: number;
   /** Empty means the whole conversation was cleared. */
@@ -304,6 +312,7 @@ export interface SettingsView {
   chatDisplayName: string;
   chatPort: number;
   chatDownloadDir: string;
+  chatAskFiles: boolean;
   mailShowImages: boolean;
   mailSignature: string;
   accountSignatures: Record<number, string>;
@@ -329,6 +338,7 @@ export interface SettingsPatch {
   chatDisplayName?: string;
   chatPort?: number;
   chatDownloadDir?: string;
+  chatAskFiles?: boolean;
   mailShowImages?: boolean;
   mailSignature?: string;
   /** account id → signature; null removes the override */
