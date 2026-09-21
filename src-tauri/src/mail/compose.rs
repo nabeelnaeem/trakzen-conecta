@@ -45,14 +45,30 @@ pub fn build_raw_lenient(
     let clean = |v: &Vec<String>| -> Vec<String> {
         v.iter().filter(|a| mailbox(a).is_ok()).cloned().collect()
     };
-    let lenient = OutgoingMessage {
+    let mut lenient = OutgoingMessage {
         to: clean(&msg.to),
         cc: clean(&msg.cc),
         bcc: clean(&msg.bcc),
         ..msg.clone()
     };
-    build_raw(account, &lenient, attachments)
+    // lettre refuses to build a message with an empty envelope, but a draft
+    // often has no recipient yet. Give it a sentinel and cut the header back
+    // out of the bytes; the provider stores the draft without a To.
+    let no_recipients = lenient.to.is_empty() && lenient.cc.is_empty() && lenient.bcc.is_empty();
+    if no_recipients {
+        lenient.to.push(DRAFT_SENTINEL.into());
+    }
+    let raw = build_raw(account, &lenient, attachments)?;
+    if !no_recipients {
+        return Ok(raw);
+    }
+    let text = String::from_utf8(raw).map_err(|e| AppError::Other(format!("mime is not utf-8: {e}")))?;
+    let line = format!("To: {DRAFT_SENTINEL}\r\n");
+    Ok(text.replacen(&line, "", 1).into_bytes())
 }
+
+/// Placeholder recipient used only while building a recipient-less draft.
+const DRAFT_SENTINEL: &str = "draft@invalid";
 
 pub fn build_raw(
     account: &Account,
@@ -441,5 +457,37 @@ mod tests {
         let html = "<div style=\"font-family:sans-serif;font-size:14px\"><b>Looks</b> good.</div><!--tc-quote--><br><blockquote>numbers</blockquote>";
         assert_eq!(own_html_part(html).as_deref(), Some("<b>Looks</b> good."));
         assert_eq!(own_html_part("<p>someone else's html</p>"), None);
+    }
+
+    #[test]
+    fn drafts_without_recipients_still_build() {
+        let msg = OutgoingMessage {
+            account_id: 1,
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Half-written".into(),
+            body_text: "Dear".into(),
+            body_html: None,
+            quoted_html: None,
+            in_reply_to: None,
+            references: None,
+            thread_id: None,
+            attachments: vec![],
+            draft_id: None,
+        };
+        let account = Account {
+            id: 1,
+            provider: "gmail".into(),
+            email: "me@example.com".into(),
+            display_name: None,
+            sync_cursor: None,
+        };
+        let raw = String::from_utf8(build_raw_lenient(&account, &msg, vec![]).unwrap()).unwrap();
+        let head = raw.split("\r\n\r\n").next().unwrap_or("");
+        assert!(!raw.contains("draft@invalid"), "{head}");
+        assert!(!head.contains("To:"), "{head}");
+        assert!(raw.contains("Subject: Half-written"));
+        assert!(raw.contains("Dear"));
     }
 }
