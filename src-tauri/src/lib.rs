@@ -1,6 +1,7 @@
 mod chat;
 mod db;
 mod error;
+mod loopback;
 mod mail;
 mod notify;
 mod secrets;

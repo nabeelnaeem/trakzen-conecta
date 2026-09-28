@@ -5,16 +5,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use base64::Engine;
-use rand::RngCore;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use tauri_plugin_opener::OpenerExt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use crate::db::Db;
 use crate::error::{AppError, Result};
+use crate::loopback::{pkce_challenge, random_urlsafe, wait_for_code};
 use crate::{secrets, settings};
 
 const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -87,8 +84,7 @@ impl GmailAuth {
         let (client_id, client_secret) = self.client_credentials()?;
 
         let verifier = random_urlsafe(64);
-        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(Sha256::digest(verifier.as_bytes()));
+        let challenge = pkce_challenge(&verifier);
         let state = random_urlsafe(24);
 
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -110,7 +106,7 @@ impl GmailAuth {
             .open_url(auth.as_str(), None::<&str>)
             .map_err(|e| AppError::Other(format!("could not open browser: {e}")))?;
 
-        let code = tokio::time::timeout(Duration::from_secs(300), wait_for_code(listener, &state))
+        let code = tokio::time::timeout(Duration::from_secs(300), wait_for_code(listener, &state, "Google"))
             .await
             .map_err(|_| AppError::Auth("timed out waiting for browser sign-in".into()))??;
 
@@ -211,54 +207,4 @@ impl GmailAuth {
     }
 }
 
-fn random_urlsafe(bytes: usize) -> String {
-    let mut buf = vec![0u8; bytes];
-    rand::thread_rng().fill_bytes(&mut buf);
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
-}
 
-/// Accepts the single redirect from the browser, validates `state`, and
-/// returns the authorisation code.
-async fn wait_for_code(listener: TcpListener, expected_state: &str) -> Result<String> {
-    loop {
-        let (mut stream, _) = listener.accept().await?;
-        let mut buf = vec![0u8; 8192];
-        let n = stream.read(&mut buf).await?;
-        let req = String::from_utf8_lossy(&buf[..n]);
-        let Some(path) = req.lines().next().and_then(|l| l.split_whitespace().nth(1)) else {
-            continue;
-        };
-        // Browsers also ask for /favicon.ico; ignore anything without a query.
-        let Some(query) = path.split_once('?').map(|(_, q)| q) else {
-            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await;
-            continue;
-        };
-        let params: HashMap<String, String> =
-            url::form_urlencoded::parse(query.as_bytes()).into_owned().collect();
-
-        let outcome = match (params.get("code"), params.get("state"), params.get("error")) {
-            (_, _, Some(err)) => Err(AppError::Auth(format!("Google returned '{err}'"))),
-            (Some(code), Some(state), _) if state == expected_state => Ok(code.clone()),
-            (Some(_), _, _) => Err(AppError::Auth("state mismatch in OAuth redirect".into())),
-            _ => Err(AppError::Auth("redirect did not include a code".into())),
-        };
-
-        let (title, detail) = match &outcome {
-            Ok(_) => ("Signed in", "You can close this tab and return to Trakzen Conecta."),
-            Err(_) => ("Sign-in failed", "Return to Trakzen Conecta and try again."),
-        };
-        let body = format!(
-            "<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title></head>\
-             <body style=\"font-family:sans-serif;padding:3rem;text-align:center\">\
-             <h2>{title}</h2><p>{detail}</p></body></html>"
-        );
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        let _ = stream.write_all(resp.as_bytes()).await;
-        let _ = stream.shutdown().await;
-        return outcome;
-    }
-}
