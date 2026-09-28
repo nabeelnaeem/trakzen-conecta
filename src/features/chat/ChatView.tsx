@@ -1,3 +1,4 @@
+import { saveToFiles, useFiles } from "../files/store";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -1081,6 +1082,7 @@ function Bubble({
   const inGroup = !!conversation?.isGroup;
   const nameOf = (who: string) =>
     who === "me" ? "You" : inGroup ? (peers.find((p) => p.peerId === who)?.displayName ?? "member") : peerName;
+  const filesConnected = useFiles((f) => f.status?.connected ?? false);
   const sendAsEmail = async () => {
     setMenu(false);
     await openCompose();
@@ -1136,6 +1138,16 @@ function Bubble({
             </MenuItem>
           )}
           <MenuItem onClick={() => void sendAsEmail()}>Send as email…</MenuItem>
+          {filesConnected && m.kind === "file" && m.filePath && (
+            <MenuItem
+              onClick={() => {
+                setMenu(false);
+                saveToFiles({ source: { kind: "localFile", path: m.filePath! }, name: m.fileName ?? "file" });
+              }}
+            >
+              Save to Trakzen Files…
+            </MenuItem>
+          )}
           <MenuItem
             onClick={() => {
               setMenu(false);
@@ -1318,6 +1330,7 @@ function MarkdownBody({ body, mine }: { body: string; mine: boolean }) {
 }
 
 function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: boolean; progress?: TransferProgress; frameless?: boolean }) {
+  const filesConnected = useFiles((f) => f.status?.connected ?? false);
   const peers = useChat((st) => st.peers);
   const conversation = peers.find((p) => p.id === m.peerId);
   const peerName = conversation?.displayName ?? "the peer";
@@ -1367,6 +1380,14 @@ function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: bool
             <button className="underline" onClick={() => void openIt(true)}>
               Show in folder
             </button>
+            {filesConnected && (
+              <button
+                className="underline"
+                onClick={() => saveToFiles({ source: { kind: "localFile", path: m.filePath! }, name: m.fileName ?? "file" })}
+              >
+                Save to Files
+              </button>
+            )}
           </>
         )}
         {done && !m.filePath && <span>(file removed)</span>}

@@ -28,8 +28,9 @@ import type { Account, MailFilter, NewFilter, SettingsPatch, SettingsView as Set
 import { useChat } from "../chat/store";
 import { useMail } from "../mail/store";
 import { Spinner } from "../../lib/Spinner";
+import { FilesTab } from "../files/FilesTab";
 
-type Tab = "general" | "appearance" | "mail" | "accounts" | "filters" | "chat" | "about";
+type Tab = "general" | "appearance" | "mail" | "accounts" | "filters" | "chat" | "files" | "about";
 
 const TABS: { key: Tab; label: string }[] = [
   { key: "general", label: "General" },
@@ -38,6 +39,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "accounts", label: "Accounts" },
   { key: "filters", label: "Filters" },
   { key: "chat", label: "Chat" },
+  { key: "files", label: "Trakzen Files" },
   { key: "about", label: "About" },
 ];
 
@@ -112,6 +114,7 @@ export function SettingsView() {
           {tab === "accounts" && <AccountsTab s={s} save={save} />}
           {tab === "filters" && <FiltersTab />}
           {tab === "chat" && <ChatTab s={s} save={save} />}
+          {tab === "files" && <FilesTab />}
           {tab === "about" && <AboutTab />}
         </div>
       </div>

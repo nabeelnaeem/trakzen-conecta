@@ -356,3 +356,34 @@ export interface SettingsPatch {
   undoSendSeconds?: number;
   mailTemplates?: string;
 }
+
+// Trakzen Files (the household file server)
+export interface FilesStatus {
+  connected: boolean;
+  url: string | null;
+  username: string | null;
+}
+
+export interface FilesServer {
+  name: string;
+  url: string;
+}
+
+export interface FilesEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+  kind: string;
+}
+
+export type FilesUploadSource = { kind: "localFile"; path: string } | { kind: "mailAttachment"; attachmentId: number };
+
+export type FilesUploadOutcome =
+  | { kind: "done"; path: string }
+  | { kind: "nameTaken"; name: string; suggested: string; uploadId: string | null };
+
+export interface FilesUploadProgress {
+  key: string;
+  sent: number;
+  total: number;
+}
