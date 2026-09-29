@@ -1154,14 +1154,6 @@ function Bubble({
           <MenuItem
             onClick={() => {
               setMenu(false);
-              void chatIpc.pin(m.msgId, !m.pinned).then((next) => next && useChat.setState((s) => ({ messages: s.messages.map((x) => (x.msgId === next.msgId ? next : x)) })));
-            }}
-          >
-            {m.pinned ? "Unpin" : "Pin"}
-          </MenuItem>
-          <MenuItem
-            onClick={() => {
-              setMenu(false);
               void navigator.clipboard.writeText(m.kind === "file" ? (m.filePath ?? m.fileName ?? "") : m.body);
             }}
           >

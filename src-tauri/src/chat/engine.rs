@@ -34,6 +34,11 @@ const ACCEPT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a transfer connection is held open waiting for the receiving
 /// user to answer an offer before the sender is told to come back later.
 const OFFER_GRACE: Duration = Duration::from_secs(60);
+/// How often group messages a connected member hasn't acknowledged are sent
+/// again. Covers a message that overtook the member's copy of the roster
+/// (and was dropped) and acks lost with a connection, which otherwise wait
+/// for the next reconnect.
+const GROUP_RETRY: Duration = Duration::from_secs(30);
 /// An unanswered offer is dropped after this long, on both sides.
 const OFFER_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
@@ -69,6 +74,8 @@ pub struct ChatEngine {
     listener: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     /// Incoming file offers waiting for the user, by message id.
     offers: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
+    /// When unacknowledged group messages were last re-sent, per member.
+    group_retry: Mutex<HashMap<i64, std::time::Instant>>,
 }
 
 /// Why a transfer stopped. `Transient` keeps the file queued (outgoing) or
@@ -86,6 +93,9 @@ fn from_file_error(reason: String) -> TransferError {
     match reason.as_str() {
         "declined" => TransferError::Declined,
         "pending" => TransferError::Pending,
+        // The member hasn't got the group's roster yet (e.g. just added); it
+        // is sent before each group offer, so the next attempt succeeds.
+        "not a member of that group" => TransferError::Transient(AppError::Other(reason)),
         _ => TransferError::Fatal(AppError::Other(format!("receiver rejected file: {reason}"))),
     }
 }
@@ -149,6 +159,7 @@ impl ChatEngine {
             connecting: Mutex::new(HashSet::new()),
             generation: AtomicU64::new(1),
             backoff: Mutex::new(HashMap::new()),
+            group_retry: Mutex::new(HashMap::new()),
             discovery: Mutex::new(None),
             paused: Mutex::new(HashSet::new()),
             transfers: Mutex::new(HashMap::new()),
@@ -380,6 +391,7 @@ impl ChatEngine {
                     self.emit_message(&m);
                 }
             }
+            self.retry_group_messages().await;
             // A transfer that broke while the chat link stayed up is retried
             // here, since nothing else would kick its queue again.
             if let Ok(ids) = self.store.peers_with_queued_files() {
@@ -588,6 +600,12 @@ impl ChatEngine {
                     },
                     None => (row_id, None),
                 };
+                if self.store.get_message(&msg_id)?.is_some() {
+                    // Already have it (a retry, or our ack was lost): ack again
+                    // without notifying twice.
+                    let _ = out.send(Frame::Control(ControlMsg::Ack { msg_id })).await;
+                    return Ok(());
+                }
                 let m = self.store.insert_message(&NewMessage {
                     msg_id: &msg_id,
                     peer_id: dest,
@@ -779,16 +797,44 @@ impl ChatEngine {
 
     /// Sends to every member of a group, or to the one peer of a direct
     /// chat, dialling as needed. Returns how many connections took it.
+    ///
+    /// Members are dialled in parallel so one offline machine (several
+    /// seconds of connect timeouts per address) doesn't hold up the rest. For
+    /// a group, the roster goes first on each connection: a member added a
+    /// moment ago may not have it yet and would drop a message for a group it
+    /// doesn't know.
     async fn fan_out(self: &Arc<Self>, row_id: i64, msg: ControlMsg) -> usize {
-        let mut n = 0;
-        for id in self.targets(row_id) {
-            if let Ok(tx) = self.connect_peer(id).await {
-                if tx.send(Frame::Control(msg.clone())).await.is_ok() {
-                    n += 1;
+        let roster = if self.store.is_group(row_id).unwrap_or(false) { self.group_update(row_id) } else { None };
+        let sends = self.targets(row_id).into_iter().map(|id| {
+            let (msg, roster) = (msg.clone(), roster.clone());
+            async move {
+                let Ok(tx) = self.connect_peer(id).await else { return false };
+                if let Some(r) = roster {
+                    if tx.send(Frame::Control(r)).await.is_err() {
+                        return false;
+                    }
                 }
+                tx.send(Frame::Control(msg)).await.is_ok()
             }
+        });
+        futures::future::join_all(sends).await.into_iter().filter(|ok| *ok).count()
+    }
+
+    /// Re-sends unacknowledged group messages to members that are connected,
+    /// at most every `GROUP_RETRY` per member.
+    async fn retry_group_messages(&self) {
+        let online: Vec<(i64, mpsc::Sender<Frame>)> =
+            self.conns.lock().unwrap().iter().map(|(id, c)| (*id, c.tx.clone())).collect();
+        let now = std::time::Instant::now();
+        for (id, tx) in online {
+            let due = self.group_retry.lock().unwrap().get(&id).map_or(true, |t| now.duration_since(*t) >= GROUP_RETRY);
+            if !due || self.store.pending_for_member(id, MessageKind::Text).map_or(true, |p| p.is_empty()) {
+                continue;
+            }
+            self.group_retry.lock().unwrap().insert(id, now);
+            self.send_rosters(id, &tx).await;
+            self.flush_queue(id, &tx).await;
         }
-        n
     }
 
     /// Like `fan_out`, but only over connections that are already up; for
@@ -884,27 +930,28 @@ impl ChatEngine {
         if peer.is_group {
             self.store.add_recipients(&msg_id, &self.store.group_members(row_id)?)?;
         }
-
-        let sent = self
-            .fan_out(
-                row_id,
-                ControlMsg::Text {
-                    msg_id: msg_id.clone(),
-                    body: body.to_string(),
-                    sent_at: now,
-                    reply_to: reply_to.map(str::to_string),
-                    group_id: gid,
-                },
-            )
-            .await;
+        self.emit_message(&msg);
         self.spawn_preview(msg_id.clone(), body.to_string());
-        if sent > 0 {
-            Ok(msg)
-        } else {
-            let queued = self.store.set_status(&msg_id, "queued")?.unwrap_or(msg);
-            self.emit_message(&queued);
-            Ok(queued)
-        }
+
+        // Delivery runs in the background: dialling offline members can take
+        // many seconds, and the message should appear in the chat right away.
+        // Acks update its status as they arrive.
+        let engine = self.clone();
+        let frame = ControlMsg::Text {
+            msg_id: msg_id.clone(),
+            body: body.to_string(),
+            sent_at: now,
+            reply_to: reply_to.map(str::to_string),
+            group_id: gid,
+        };
+        tauri::async_runtime::spawn(async move {
+            if engine.fan_out(row_id, frame).await == 0 {
+                if let Ok(Some(queued)) = engine.store.set_status(&msg_id, "queued") {
+                    engine.emit_message(&queued);
+                }
+            }
+        });
+        Ok(msg)
     }
 
     /// Sends what was written while the peer was offline: direct messages
@@ -1067,6 +1114,16 @@ impl ChatEngine {
             };
             if let Ok(Some(m)) = self.store.set_status(&m.msg_id, "sending") {
                 self.emit_message(&m);
+            }
+            if is_group {
+                // The offer goes over its own connection; send the roster on
+                // the chat connection first so a newly added member knows the
+                // group by the time the offer arrives.
+                if let Some(roster) = self.group_update(m.peer_id) {
+                    if let Ok(tx) = self.connect_peer(row_id).await {
+                        let _ = tx.send(Frame::Control(roster)).await;
+                    }
+                }
             }
             let transfer_id = uuid::Uuid::new_v4().to_string();
             let outcome = self
