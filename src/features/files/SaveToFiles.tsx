@@ -192,7 +192,7 @@ function SaveDialog({ req, onClose }: { req: SaveRequest; onClose: () => void })
                     ) : (
                       <Folder className="size-4 text-blue-600" />
                     )}
-                    <span className="flex-1 truncate">{e.name}</span>
+                    <span className="flex-1 truncate">{e.kind === "space" ? displayPath(e.path) : e.name}</span>
                     <ChevronRight className="size-4 text-gray-400" />
                   </button>
                 ))
