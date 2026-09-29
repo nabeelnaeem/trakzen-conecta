@@ -423,6 +423,7 @@ impl GmailApi {
             thread_id: msg["threadId"].as_str().map(str::to_string),
             in_reply_to: header(payload, "In-Reply-To").map(str::to_string),
             references: header(payload, "References").map(str::to_string),
+            files: Vec::new(),
         })
     }
 

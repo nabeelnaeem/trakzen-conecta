@@ -44,6 +44,8 @@ export interface PendingSend {
   composer: ComposerState;
   sendAt: number;
   timer: number;
+  /** Sends right away, skipping the rest of the undo delay. */
+  fire: () => void;
 }
 
 const threadKey = (m: MessageSummary) => m.threadId ?? m.remoteId;
@@ -131,6 +133,8 @@ interface MailState {
   send: () => Promise<void>;
   scheduleSend: (when: number) => Promise<void>;
   undoSend: () => void;
+  /** Sends the email in the undo countdown immediately. */
+  sendNow: () => void;
   openFilterEditor: (prefill?: Partial<NewFilter>, editing?: { accountId: number; filterId: string }) => void;
   closeFilterEditor: () => void;
   createFilter: (f: NewFilter) => Promise<boolean>;
@@ -484,6 +488,7 @@ export const useMail = create<MailState>((set, get) => ({
             subject: d.subject,
             body: d.bodyText,
             bodyHtml: d.bodyHtml ?? textToHtml(d.bodyText),
+            files: d.files ?? [],
             draftId: d.draftId,
             draft: d.threadId || d.inReplyTo
               ? {
@@ -887,7 +892,10 @@ export const useMail = create<MailState>((set, get) => ({
       return;
     }
     const doSend = async () => {
-      set({ pendingSend: null, busy: true, error: null });
+      // Only clear the undo toast if it belongs to this message; another
+      // email may have been sent (and be counting down) since.
+      const pending = get().pendingSend;
+      set({ pendingSend: pending?.message === message ? null : pending, busy: true, error: null });
       try {
         await mail.send(message);
         set({ notice: "Sent." });
@@ -905,9 +913,15 @@ export const useMail = create<MailState>((set, get) => ({
       await doSend();
       return;
     }
-    if (get().pendingSend) window.clearTimeout(get().pendingSend!.timer);
+    // A second send during the countdown used to cancel the first one's
+    // timer, so that email was never sent. Send it now instead.
+    get().sendNow();
     const timer = window.setTimeout(() => void doSend(), delay * 1000);
-    set({ composer: null, pendingSend: { message, composer: c, sendAt: Date.now() + delay * 1000, timer } });
+    const fire = () => {
+      window.clearTimeout(timer);
+      void doSend();
+    };
+    set({ composer: null, pendingSend: { message, composer: c, sendAt: Date.now() + delay * 1000, timer, fire } });
   },
 
   scheduleSend: async (when) => {
@@ -926,6 +940,8 @@ export const useMail = create<MailState>((set, get) => ({
       set({ error: errorMessage(e) });
     }
   },
+
+  sendNow: () => get().pendingSend?.fire(),
 
   undoSend: () => {
     const p = get().pendingSend;

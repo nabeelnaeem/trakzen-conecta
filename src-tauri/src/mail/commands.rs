@@ -927,11 +927,39 @@ pub async fn mail_discard_draft(state: State<'_, AppState>, account_id: i64, dra
 }
 
 #[tauri::command]
-pub async fn mail_open_draft(state: State<'_, AppState>, message_id: i64) -> Result<DraftContent> {
-    let detail = state.mail.get_message(message_id)?;
+pub async fn mail_open_draft(app: AppHandle, state: State<'_, AppState>, message_id: i64) -> Result<DraftContent> {
+    let mut detail = state.mail.get_message(message_id)?;
     let account = state.mail.get_account(detail.summary.account_id)?;
     let provider = state.providers.provider_for(&account.provider)?;
-    provider.open_draft(&account, &detail.summary.remote_id).await
+    let mut draft = provider.open_draft(&account, &detail.summary.remote_id).await?;
+
+    // The attachment list comes with the body; a draft opened straight from
+    // the list may not have it yet.
+    if !state.mail.body_fetched(message_id)? {
+        let mut body = provider.fetch_body(&account, &detail.summary.remote_id).await?;
+        body.html = body.html.as_deref().map(sanitize::html);
+        state.mail.set_body(message_id, &body)?;
+        detail = state.mail.get_message(message_id)?;
+    }
+    // Attachments become local files. References to the draft message would
+    // not survive: every autosave replaces the draft on the server, and the
+    // old copy leaves the local cache on the next sync.
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| AppError::Other(format!("no cache dir: {e}")))?
+        .join("draft-attachments")
+        .join(sanitize_filename::sanitize(&draft.draft_id));
+    for att in detail.attachments.iter().filter(|a| a.content_id.is_none()) {
+        let data = provider
+            .fetch_attachment(&account, &detail.summary.remote_id, &att.remote_id)
+            .await?;
+        tokio::fs::create_dir_all(&dir).await?;
+        let path = crate::util::unique_path(&dir, &sanitize_filename::sanitize(&att.filename));
+        tokio::fs::write(&path, &data).await?;
+        draft.files.push(path.to_string_lossy().into_owned());
+    }
+    Ok(draft)
 }
 
 /// Downloads an attachment into the user's Downloads folder and returns the

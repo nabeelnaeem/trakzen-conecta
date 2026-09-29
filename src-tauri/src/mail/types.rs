@@ -160,6 +160,10 @@ pub struct DraftContent {
     pub thread_id: Option<String>,
     pub in_reply_to: Option<String>,
     pub references: Option<String>,
+    /// The draft's attachments, downloaded to local files so they go back
+    /// into the composer like freshly attached ones.
+    #[serde(default)]
+    pub files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

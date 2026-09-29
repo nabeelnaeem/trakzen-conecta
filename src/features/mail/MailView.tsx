@@ -365,7 +365,7 @@ function BulkLabelMenu() {
 }
 
 function Toasts() {
-  const { pendingSend, undoSend, notice, working } = useMail();
+  const { pendingSend, undoSend, sendNow, notice, working } = useMail();
   const [left, setLeft] = useState(0);
   useEffect(() => {
     if (!pendingSend) return;
@@ -390,6 +390,12 @@ function Toasts() {
             onClick={undoSend}
           >
             Undo
+          </button>
+          <button
+            className="rounded-full bg-toast-fg px-3 py-1 font-semibold text-toast hover:opacity-90"
+            onClick={sendNow}
+          >
+            Send now
           </button>
         </div>
       )}

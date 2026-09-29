@@ -193,6 +193,8 @@ export interface DraftContent {
   threadId: string | null;
   inReplyTo: string | null;
   references: string | null;
+  /** The draft's attachments as local files, ready to go back into the composer. */
+  files?: string[];
 }
 
 export type ReplyMode = "reply" | "reply-all" | "forward";
