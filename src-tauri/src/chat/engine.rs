@@ -93,6 +93,9 @@ fn from_file_error(reason: String) -> TransferError {
     match reason.as_str() {
         "declined" => TransferError::Declined,
         "pending" => TransferError::Pending,
+        // The member hasn't got the group's roster yet (e.g. just added); it
+        // is sent before each group offer, so the next attempt succeeds.
+        "not a member of that group" => TransferError::Transient(AppError::Other(reason)),
         _ => TransferError::Fatal(AppError::Other(format!("receiver rejected file: {reason}"))),
     }
 }
@@ -1111,6 +1114,16 @@ impl ChatEngine {
             };
             if let Ok(Some(m)) = self.store.set_status(&m.msg_id, "sending") {
                 self.emit_message(&m);
+            }
+            if is_group {
+                // The offer goes over its own connection; send the roster on
+                // the chat connection first so a newly added member knows the
+                // group by the time the offer arrives.
+                if let Some(roster) = self.group_update(m.peer_id) {
+                    if let Ok(tx) = self.connect_peer(row_id).await {
+                        let _ = tx.send(Frame::Control(roster)).await;
+                    }
+                }
             }
             let transfer_id = uuid::Uuid::new_v4().to_string();
             let outcome = self
