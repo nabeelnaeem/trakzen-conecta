@@ -60,6 +60,8 @@ pub struct FoundServer {
 pub struct FilesEntry {
     name: String,
     path: String,
+    /// The server's JSON is snake_case; the UI gets camelCase.
+    #[serde(alias = "is_dir")]
     is_dir: bool,
     kind: String,
 }
@@ -834,6 +836,19 @@ mod live_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_server_listing() {
+        // Shape of GET /api/fs/list?path=/ from Trakzen Files.
+        let body = json!({ "entries": [
+            { "name": "shared", "path": "/shared", "is_dir": true, "size": 0, "modified": 1, "kind": "space" },
+            { "name": "a.txt", "path": "/shared/a.txt", "is_dir": false, "size": 3, "modified": 1, "kind": "text" }
+        ]});
+        let entries: Vec<FilesEntry> = serde_json::from_value(body["entries"].clone()).unwrap();
+        assert!(entries[0].is_dir && !entries[1].is_dir);
+        let out = serde_json::to_value(&entries[0]).unwrap();
+        assert_eq!(out["isDir"], true);
+    }
 
     #[test]
     fn normalizes_server_addresses() {
