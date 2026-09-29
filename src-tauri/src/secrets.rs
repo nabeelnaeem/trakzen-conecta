@@ -8,6 +8,7 @@ use crate::error::Result;
 
 const SERVICE: &str = "trakzen-conecta";
 pub const GOOGLE_CLIENT_SECRET: &str = "google:client_secret";
+pub const TRAKZEN_FILES_TOKEN: &str = "trakzen-files:token";
 
 fn entry(key: &str) -> Result<Entry> {
     Ok(Entry::new(SERVICE, key)?)

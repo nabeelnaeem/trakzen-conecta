@@ -1,10 +1,12 @@
 mod chat;
 mod db;
 mod error;
+mod loopback;
 mod mail;
 mod notify;
 mod secrets;
 mod settings;
+mod trakzen_files;
 mod util;
 
 use std::sync::Arc;
@@ -439,6 +441,16 @@ pub fn run() {
             chat::commands::chat_pairing_qr,
             app_set_badge,
             app_notify,
+            trakzen_files::trakzen_files_status,
+            trakzen_files::trakzen_files_discover,
+            trakzen_files::trakzen_files_connect,
+            trakzen_files::trakzen_files_disconnect,
+            trakzen_files::trakzen_files_list,
+            trakzen_files::trakzen_files_mkdir,
+            trakzen_files::trakzen_files_upload,
+            trakzen_files::trakzen_files_rename_upload,
+            trakzen_files::trakzen_files_cancel_upload,
+            trakzen_files::trakzen_files_open,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

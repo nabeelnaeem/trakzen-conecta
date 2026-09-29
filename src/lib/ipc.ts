@@ -28,6 +28,12 @@ import type {
   SyncEvent,
   TransferProgress,
   TypingEvent,
+  FilesEntry,
+  FilesServer,
+  FilesStatus,
+  FilesUploadOutcome,
+  FilesUploadProgress,
+  FilesUploadSource,
 } from "./types";
 
 // Typed wrappers so components never touch raw command names.
@@ -160,6 +166,24 @@ export const chat = {
     listen<TransferProgress>("chat://transfer", (e) => cb(e.payload)),
   onStatus: (cb: (s: ChatStatus) => void) =>
     listen<ChatStatus>("chat://status", (e) => cb(e.payload)),
+};
+
+export const files = {
+  /** `check` asks the server whether the saved token still works. */
+  status: (check = false) => invoke<FilesStatus>("trakzen_files_status", { check }),
+  discover: () => invoke<FilesServer[]>("trakzen_files_discover"),
+  connect: (url: string) => invoke<FilesStatus>("trakzen_files_connect", { url }),
+  disconnect: () => invoke<void>("trakzen_files_disconnect"),
+  list: (path: string) => invoke<FilesEntry[]>("trakzen_files_list", { path }),
+  mkdir: (path: string, name: string) => invoke<string>("trakzen_files_mkdir", { path, name }),
+  upload: (key: string, source: FilesUploadSource, dir: string, name?: string) =>
+    invoke<FilesUploadOutcome>("trakzen_files_upload", { key, source, dir, name: name ?? null }),
+  renameUpload: (uploadId: string, name: string) =>
+    invoke<FilesUploadOutcome>("trakzen_files_rename_upload", { uploadId, name }),
+  cancelUpload: (uploadId: string) => invoke<void>("trakzen_files_cancel_upload", { uploadId }),
+  open: (path: string) => invoke<void>("trakzen_files_open", { path }),
+  onUpload: (cb: (p: FilesUploadProgress) => void) =>
+    listen<FilesUploadProgress>("files://upload", (e) => cb(e.payload)),
 };
 
 export type NavRoute =

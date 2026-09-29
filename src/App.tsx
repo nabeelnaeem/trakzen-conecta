@@ -11,6 +11,8 @@ import { Mail, MessageSquare, Moon, Settings, Sun, type LucideIcon } from "lucid
 import { getLastTab, getRailOrder, getStartIn, setLastTab, setRailOrder, type RailItem } from "./lib/prefs";
 import { onNavigate } from "./lib/navigate";
 import { ConfirmHost } from "./lib/confirm";
+import { SaveToFilesHost } from "./features/files/SaveToFiles";
+import { useFiles } from "./features/files/store";
 
 type Tab = "mail" | "chat" | "settings";
 
@@ -25,6 +27,8 @@ export default function App() {
     if (tab === "mail" || tab === "chat") setLastTab(tab);
   }, [tab]);
   useEffect(() => onNavigate((t) => setTab(t)), []);
+  // Save-to-Files buttons only show once connected; the check runs in the background.
+  useEffect(() => void useFiles.getState().refresh(true), []);
 
   // Deep links and notification clicks arrive here from the backend.
   useEffect(() => {
@@ -109,6 +113,7 @@ export default function App() {
   return (
     <div className="flex h-full">
       <ConfirmHost />
+      <SaveToFilesHost />
       <nav className="flex w-16 shrink-0 flex-col items-center gap-1 border-r border-gray-200 bg-gray-100 py-2">
         <div className="mb-2 flex h-9 w-9 items-center justify-center rounded-xl bg-blue-600 text-on-accent shadow-sm" title="Trakzen Conecta">
           <svg viewBox="0 0 512 512" width="22" height="22" aria-hidden>

@@ -65,6 +65,19 @@ React. Storage is a single SQLite file, `trakzen-conecta.db`. Licensed under
   app saved are removed with their messages; storage clean-up in Settings
 - Seven notification sounds, chosen separately for mail and chat
 
+### Trakzen Files
+- Connect to [Trakzen Files](https://github.com/nabeelnaeem/trakzen-fileserver),
+  the household file server, in **Settings → Trakzen Files**: the server is
+  found on the LAN automatically (or enter its address), and you approve the
+  connection in the browser. The token is kept in the OS credential store.
+- **Save to Trakzen Files** on received chat files (message menu, or the link
+  under the file) and on email attachments (**To Files**): choose Shared or My
+  files and a folder, or create one. Large files upload in resumable chunks
+  with progress; if the name is already taken you choose another or cancel,
+  nothing is overwritten.
+- Disconnect from either side; disconnecting here also revokes the token on
+  the server.
+
 ### App
 - System tray (close hides, tray menu quits), unread badge on tray tooltip,
   window title and taskbar; start at login; text zoom (Ctrl +/−/0)
@@ -163,6 +176,10 @@ the app stays far inside its quota.
 4. **+ New group** picks peers that have connected at least once. The
    group's member list is kept in sync between members, so someone who was
    offline during a change catches up when they reconnect.
+
+To use Trakzen Files, open **Settings → Trakzen Files** and press **Connect**
+next to the server (it appears under *On this network*), then choose **Allow**
+in the browser tab that opens.
 
 Traffic is plain TCP on your LAN. Do not expose the port to the internet;
 end-to-end encryption and a relay for remote use are on the roadmap.

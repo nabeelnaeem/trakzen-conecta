@@ -1,3 +1,4 @@
+import { saveToFiles, useFiles } from "../files/store";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMail } from "./store";
@@ -286,6 +287,7 @@ function ThreadMessage({
   showImages: boolean;
   onReply: () => void;
 }) {
+  const filesConnected = useFiles((f) => f.status?.connected ?? false);
   const [showImagesOnce, setShowImagesOnce] = useState(false);
   const [attError, setAttError] = useState<string | null>(null);
   const showImages = showImagesDefault || showImagesOnce;
@@ -377,6 +379,15 @@ function ThreadMessage({
                     <button className="text-blue-700 hover:underline" onClick={() => mail.saveAttachment(a.id, false).catch((e) => setAttError(errorMessage(e)))}>
                       Save
                     </button>
+                    {filesConnected && (
+                      <button
+                        className="text-blue-700 hover:underline"
+                        title="Save to Trakzen Files"
+                        onClick={() => saveToFiles({ source: { kind: "mailAttachment", attachmentId: a.id }, name: a.filename })}
+                      >
+                        To Files
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -531,6 +542,7 @@ function AttachmentsPanel({
   pending: number;
   onLoadAll: () => void;
 }) {
+  const filesConnected = useFiles((f) => f.status?.connected ?? false);
   const [open, setOpen] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   return (
@@ -548,6 +560,15 @@ function AttachmentsPanel({
               <span className="max-w-[120px] truncate text-gray-400">{a.from}</span>
               <button className="text-blue-700 hover:underline" onClick={() => mail.saveAttachment(a.id, true).catch((e) => setErr(errorMessage(e)))}>Open</button>
               <button className="text-blue-700 hover:underline" onClick={() => mail.saveAttachment(a.id, false).catch((e) => setErr(errorMessage(e)))}>Save</button>
+              {filesConnected && (
+                <button
+                  className="text-blue-700 hover:underline"
+                  title="Save to Trakzen Files"
+                  onClick={() => saveToFiles({ source: { kind: "mailAttachment", attachmentId: a.id }, name: a.filename })}
+                >
+                  To Files
+                </button>
+              )}
             </li>
           ))}
           {items.length === 0 && <li className="px-2 py-1 text-gray-500">Loading…</li>}
