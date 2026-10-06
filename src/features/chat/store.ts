@@ -54,6 +54,46 @@ function addMessage(list: ChatMessage[], m: ChatMessage): ChatMessage[] {
   return list.some((x) => x.msgId === m.msgId) ? list : [...list, m];
 }
 
+// Events for a conversation that arrive while it is being read from disk,
+// so the snapshot cannot wipe them out when it lands.
+interface Load {
+  peerId: number;
+  seen: Map<string, ChatMessage>;
+  deleted: Set<string>;
+  cleared: boolean;
+}
+const loads = new Set<Load>();
+
+// Statuses only a later event can produce. An event copy is normally the
+// fresher one, but one emitted just before a receipt must not undo it.
+const SETTLED: Record<string, number> = { unread: 1, delivered: 1, received: 2, read: 2 };
+
+function fresher(event: ChatMessage, snapshot: ChatMessage): ChatMessage {
+  return (SETTLED[snapshot.status] ?? 0) > (SETTLED[event.status] ?? 0) ? snapshot : event;
+}
+
+/** Reads the conversation and merges in what arrived meanwhile; false if the user moved on. */
+async function loadConversation(id: number): Promise<boolean> {
+  const load: Load = { peerId: id, seen: new Map(), deleted: new Set(), cleared: false };
+  loads.add(load);
+  try {
+    const snapshot = await chat.listMessages(id, 200);
+    if (useChat.getState().activePeerId !== id) return false;
+    const merged = new Map<string, ChatMessage>();
+    if (!load.cleared) {
+      for (const m of snapshot) if (!load.deleted.has(m.msgId)) merged.set(m.msgId, m);
+    }
+    for (const m of load.seen.values()) {
+      const s = merged.get(m.msgId);
+      merged.set(m.msgId, s ? fresher(m, s) : m);
+    }
+    useChat.setState({ messages: [...merged.values()].sort((a, b) => a.id - b.id) });
+    return true;
+  } finally {
+    loads.delete(load);
+  }
+}
+
 // Peer list replies can land out of order (a burst of messages fires many
 // reloads); only the newest request may write, and bursts share one request.
 let peerSeq = 0;
@@ -114,6 +154,7 @@ export const useChat = create<ChatState>((set, get) => ({
       chat.onMessage((m) => {
         const { activePeerId, messages, peers } = get();
         const viewing = m.peerId === activePeerId && document.hasFocus();
+        for (const l of loads) if (l.peerId === m.peerId) l.seen.set(m.msgId, m);
         if (m.peerId === activePeerId) {
           set({ messages: upsertMessage(messages, m) });
           if (viewing && m.direction === "in" && m.status === "unread") void chat.markRead(m.peerId);
@@ -140,6 +181,17 @@ export const useChat = create<ChatState>((set, get) => ({
         }, 4000);
       }),
       chat.onDeleted((d) => {
+        for (const l of loads) {
+          if (l.peerId !== d.peerId) continue;
+          if (d.msgIds.length === 0) {
+            l.cleared = true;
+            l.seen.clear();
+          }
+          for (const id of d.msgIds) {
+            l.deleted.add(id);
+            l.seen.delete(id);
+          }
+        }
         if (d.peerId === get().activePeerId) {
           set({
             messages: d.msgIds.length === 0 ? [] : get().messages.filter((m) => !d.msgIds.includes(m.msgId)),
@@ -190,9 +242,7 @@ export const useChat = create<ChatState>((set, get) => ({
     set({ activePeerId: id, messages: [] });
     if (id === null) return;
     try {
-      const messages = await chat.listMessages(id, 200);
-      if (get().activePeerId !== id) return;
-      set({ messages });
+      if (!(await loadConversation(id))) return;
       await chat.markRead(id);
       set({ peers: get().peers.map((p) => (p.id === id ? { ...p, unread: 0 } : p)) });
       void chat.connectPeer(id);
