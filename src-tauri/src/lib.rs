@@ -419,6 +419,7 @@ pub fn run() {
             chat::commands::chat_stash_blob,
             chat::commands::chat_file_preview,
             chat::commands::chat_pause_transfer,
+            chat::commands::chat_list_transfers,
             chat::commands::chat_answer_file,
             chat::commands::chat_set_auto_accept,
             chat::commands::chat_pin,

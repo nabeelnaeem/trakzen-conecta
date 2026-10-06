@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { useChat } from "./store";
+import { progressByMessage, senderName, useChat, type MessageProgress } from "./store";
 import { Avatar } from "../mail/Avatar";
 import { bytes, shortDate, timeOnly } from "../../lib/format";
 import { chat as chatIpc, errorMessage } from "../../lib/ipc";
@@ -11,7 +11,7 @@ import { codeFromCopyButton, isOnlyCodeBlock, renderMarkdown } from "../../lib/m
 import { navigateTo } from "../../lib/navigate";
 import { textToHtml, useMail } from "../mail/store";
 import { Spinner } from "../../lib/Spinner";
-import type { ChatMessage, Peer, TransferProgress } from "../../lib/types";
+import type { ChatMessage, Peer } from "../../lib/types";
 import { confirmDialog } from "../../lib/confirm";
 import { Check, CheckCheck, Clock, MoreHorizontal, Paperclip, Pencil, QrCode, Search, Send, SmilePlus, Users, X } from "lucide-react";
 
@@ -291,21 +291,27 @@ function AddPeer() {
     );
   }
   return (
-    <div className="space-y-2 border-b border-gray-200 p-2">
+    <form
+      className="space-y-2 border-b border-gray-200 p-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void submit();
+      }}
+    >
       <input className="input" placeholder="Name (optional)" value={name} onChange={(e) => setName(e.target.value)} />
       <div className="flex gap-2">
-        <input className="input" placeholder="192.168.1.20 or conecta://…" value={host} autoFocus onChange={(e) => setHost(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void submit()} />
+        <input className="input" placeholder="192.168.1.20 or conecta://…" value={host} autoFocus onChange={(e) => setHost(e.target.value)} />
         <input className="input w-24" placeholder={String(identity?.port ?? 47800)} value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} />
       </div>
       <div className="flex gap-2">
-        <button className="btn btn-primary flex-1 justify-center" onClick={() => void submit()} disabled={!host.trim()}>
+        <button type="submit" className="btn btn-primary flex-1 justify-center" disabled={!host.trim()}>
           Add
         </button>
-        <button className="btn" onClick={() => setOpenForm(false)}>
+        <button type="button" className="btn" onClick={() => setOpenForm(false)}>
           Cancel
         </button>
       </div>
-    </div>
+    </form>
   );
 }
 
@@ -406,6 +412,7 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
   const lastTyping = useRef(0);
 
   const byId = useMemo(() => new Map(messages.map((m) => [m.msgId, m])), [messages]);
+  const progress = useMemo(() => progressByMessage(transfers), [transfers]);
 
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
@@ -780,7 +787,7 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
                 <Bubble
                   m={m}
                   grouped={grouped}
-                  progress={transfers[m.msgId]}
+                  progress={progress[m.msgId]}
                   quoted={m.replyTo ? (byId.get(m.replyTo) ?? null) : null}
                   onReply={() => {
                     setReplyTo(m);
@@ -923,6 +930,11 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
 function GroupMembers({ groupId, name, left, members, onClose }: { groupId: number; name: string; left: boolean; members: Peer[]; onClose: () => void }) {
   const { peers, identity } = useChat();
   const [title, setTitle] = useState(name);
+  // Follows renames by other members until the user starts typing.
+  const [edited, setEdited] = useState(false);
+  useEffect(() => {
+    if (!edited) setTitle(name);
+  }, [name, edited]);
   const [adding, setAdding] = useState(false);
   const [picked, setPicked] = useState<number[]>([]);
   const [err, setErr] = useState<string | null>(null);
@@ -940,8 +952,14 @@ function GroupMembers({ groupId, name, left, members, onClose }: { groupId: numb
             <input
               className="input flex-1"
               value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              onBlur={() => title.trim() && title.trim() !== name && run(chatIpc.groupRename(groupId, title))}
+              onChange={(e) => {
+                setTitle(e.target.value);
+                setEdited(true);
+              }}
+              onBlur={() => {
+                if (edited && title.trim() && title.trim() !== name) void run(chatIpc.groupRename(groupId, title)).finally(() => setEdited(false));
+                else setEdited(false);
+              }}
               onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
               aria-label="Group name"
             />
@@ -1064,7 +1082,7 @@ function Bubble({
 }: {
   m: ChatMessage;
   grouped: boolean;
-  progress?: TransferProgress;
+  progress?: MessageProgress;
   quoted: ChatMessage | null;
   onReply: () => void;
   onEdit: () => void;
@@ -1216,7 +1234,7 @@ function Bubble({
       )}
       <div className={`flex flex-col ${mine ? "items-end" : "items-start"} ${m.body.includes("```") || m.kind === "file" ? "max-w-[85%]" : "max-w-[60%]"}`}>
       {inGroup && !mine && !grouped && (
-        <div className="mb-0.5 px-1 text-[11px] font-medium text-blue-700">{m.senderName ?? "Unknown member"}</div>
+        <div className="mb-0.5 px-1 text-[11px] font-medium text-blue-700">{senderName(m, peers) ?? "Unknown member"}</div>
       )}
       <div
         className={`${frameless ? "p-0" : "px-3 py-1.5"} text-sm ${
@@ -1321,12 +1339,12 @@ function MarkdownBody({ body, mine }: { body: string; mine: boolean }) {
   );
 }
 
-function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: boolean; progress?: TransferProgress; frameless?: boolean }) {
+function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: boolean; progress?: MessageProgress; frameless?: boolean }) {
   const filesConnected = useFiles((f) => f.status?.connected ?? false);
   const peers = useChat((st) => st.peers);
   const conversation = peers.find((p) => p.id === m.peerId);
   const peerName = conversation?.displayName ?? "the peer";
-  const senderName = conversation?.isGroup ? (m.senderName ?? "this member") : peerName;
+  const sender = conversation?.isGroup ? (senderName(m, peers) ?? "this member") : peerName;
   const [preview, setPreview] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const done = m.status === "unread" || m.status === "received" || m.status === "delivered" || m.status === "read" || (mine && m.status !== "failed");
@@ -1356,10 +1374,12 @@ function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: bool
         {preview && <span className="truncate">{m.fileName}</span>}
         <span>{m.fileSize !== null ? bytes(m.fileSize) : ""}</span>
         {pct !== null && <span>· {pct}%</span>}
-        {progress && (progress.state === "active" || progress.state === "paused") && (
+        {progress && (
           <button
             className="underline"
-            onClick={() => void chatIpc.pauseTransfer(progress.transferId, progress.state !== "paused")}
+            onClick={() => {
+              for (const id of progress.transferIds) void chatIpc.pauseTransfer(id, progress.state !== "paused");
+            }}
           >
             {progress.state === "paused" ? "Resume" : "Pause"}
           </button>
@@ -1400,7 +1420,7 @@ function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: bool
             Decline
           </button>
           <button className="btn text-xs" title="Accept this and every future file from them without asking" onClick={() => void chatIpc.answerFile(m.msgId, true, true).catch((e) => setErr(errorMessage(e)))}>
-            Always accept from {senderName}
+            Always accept from {sender}
           </button>
         </div>
       )}

@@ -270,7 +270,7 @@ pub async fn chat_clear_storage(state: State<'_, AppState>, which: String) -> Re
             }
         }
     }
-    state.chat.store.forget_missing_files()?;
+    state.chat.forget_missing_files()?;
     Ok(removed)
 }
 
@@ -329,6 +329,11 @@ pub async fn chat_file_preview(path: String) -> Result<Option<String>> {
 pub async fn chat_pause_transfer(state: State<'_, AppState>, transfer_id: String, pause: bool) -> Result<()> {
     state.chat.pause_transfer(&transfer_id, pause);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn chat_list_transfers(state: State<'_, AppState>) -> Result<Vec<TransferProgress>> {
+    Ok(state.chat.list_transfers())
 }
 
 /// Accept or decline a file a peer is offering (message status `offered`).

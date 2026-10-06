@@ -22,6 +22,7 @@ import type {
   OutgoingMessage,
   SnoozedMessage,
   Peer,
+  PeerRemovedEvent,
   ReplyMode,
   SettingsPatch,
   SettingsView,
@@ -143,6 +144,7 @@ export const chat = {
     invoke<string>("chat_stash_blob", bytes, { headers: { "x-file-name": encodeURIComponent(name) } }),
   filePreview: (path: string) => invoke<string | null>("chat_file_preview", { path }),
   pauseTransfer: (transferId: string, pause: boolean) => invoke<void>("chat_pause_transfer", { transferId, pause }),
+  listTransfers: () => invoke<TransferProgress[]>("chat_list_transfers"),
   answerFile: (msgId: string, accept: boolean, always = false) => invoke<void>("chat_answer_file", { msgId, accept, always }),
   setAutoAccept: (peerId: number, on: boolean) => invoke<Peer>("chat_set_auto_accept", { peerId, on }),
   pin: (msgId: string, pinned: boolean) => invoke<ChatMessage | null>("chat_pin", { msgId, pinned }),
@@ -162,6 +164,11 @@ export const chat = {
   onMessage: (cb: (m: ChatMessage) => void) =>
     listen<ChatMessage>("chat://message", (e) => cb(e.payload)),
   onPeer: (cb: (p: Peer) => void) => listen<Peer>("chat://peer", (e) => cb(e.payload)),
+  onPeerRemoved: (cb: (r: PeerRemovedEvent) => void) =>
+    listen<PeerRemovedEvent>("chat://peer-removed", (e) => cb(e.payload)),
+  /** Many messages in these conversations changed at once. */
+  onReload: (cb: (r: { peerIds: number[] }) => void) =>
+    listen<{ peerIds: number[] }>("chat://reload", (e) => cb(e.payload)),
   onTransfer: (cb: (t: TransferProgress) => void) =>
     listen<TransferProgress>("chat://transfer", (e) => cb(e.payload)),
   onStatus: (cb: (s: ChatStatus) => void) =>

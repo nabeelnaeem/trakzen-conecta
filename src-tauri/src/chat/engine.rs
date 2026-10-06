@@ -24,6 +24,9 @@ pub const EVENT_TRANSFER: &str = "chat://transfer";
 pub const EVENT_STATUS: &str = "chat://status";
 pub const EVENT_DELETED: &str = "chat://deleted";
 pub const EVENT_TYPING: &str = "chat://typing";
+pub const EVENT_PEER_REMOVED: &str = "chat://peer-removed";
+/// Many messages of these conversations changed at once; reload them.
+pub const EVENT_RELOAD: &str = "chat://reload";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -39,6 +42,12 @@ const OFFER_GRACE: Duration = Duration::from_secs(60);
 /// (and was dropped) and acks lost with a connection, which otherwise wait
 /// for the next reconnect.
 const GROUP_RETRY: Duration = Duration::from_secs(30);
+/// A chat connection pings this often so a link that died silently (sleep,
+/// Wi-Fi loss) is noticed; peers have always answered `Ping` with `Pong`.
+const KEEPALIVE: Duration = Duration::from_secs(20);
+/// With pings going both ways, a healthy link carries a frame well within
+/// this; a silent one is dropped and the peer shown offline.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 /// An unanswered offer is dropped after this long, on both sides.
 const OFFER_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
@@ -118,6 +127,14 @@ pub struct DeletedEvent {
     pub peer_id: i64,
     /// Empty means the whole conversation was cleared.
     pub msg_ids: Vec<String>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerRemovedEvent {
+    pub id: i64,
+    /// The row that now holds its history, when it was a merge.
+    pub merged_into: Option<i64>,
 }
 
 struct RemoteHello {
@@ -458,12 +475,12 @@ impl ChatEngine {
             &host,
             hello.port,
         )?;
-        let tx = self.clone().run_chat_connection(stream, bound);
         if bound != row_id {
-            // Merged into an existing row; tell the UI so it refreshes.
-            let _ = self.app.emit(EVENT_PEER, self.store.get_peer(bound)?);
+            // The row we dialled was merged into the one that already had
+            // this peer id and no longer exists.
+            let _ = self.app.emit(EVENT_PEER_REMOVED, PeerRemovedEvent { id: row_id, merged_into: Some(bound) });
         }
-        Ok(tx)
+        Ok(self.clone().run_chat_connection(stream, bound))
     }
 
     async fn handshake(&self, stream: &mut TcpStream, purpose: Purpose) -> Result<RemoteHello> {
@@ -551,11 +568,25 @@ impl ChatEngine {
             let _ = wr.shutdown().await;
         });
 
+        let ping_tx = tx.clone();
+        let pinger = tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(KEEPALIVE).await;
+                if ping_tx.send(Frame::Control(ControlMsg::Ping)).await.is_err() {
+                    break;
+                }
+            }
+        });
+
         let engine = self.clone();
         let out = tx.clone();
         tauri::async_runtime::spawn(async move {
             loop {
-                match protocol::read_frame(&mut rd).await {
+                let Ok(read) = tokio::time::timeout(IDLE_TIMEOUT, protocol::read_frame(&mut rd)).await else {
+                    tracing::debug!(row_id, "connection went silent, dropping it");
+                    break;
+                };
+                match read {
                     Ok(Some(Frame::Control(msg))) => {
                         if let Err(e) = engine.on_control(row_id, msg, &out).await {
                             tracing::warn!(row_id, %e, "failed handling message");
@@ -571,15 +602,40 @@ impl ChatEngine {
                     }
                 }
             }
-            let mut conns = engine.conns.lock().unwrap();
-            if conns.get(&row_id).map_or(false, |c| c.generation == generation) {
-                conns.remove(&row_id);
+            pinger.abort();
+            let current = {
+                let mut conns = engine.conns.lock().unwrap();
+                let current = conns.get(&row_id).is_some_and(|c| c.generation == generation);
+                if current {
+                    conns.remove(&row_id);
+                }
+                current
+            };
+            if current {
+                engine.requeue_unacked(row_id).await;
             }
-            drop(conns);
             engine.emit_peer(row_id);
         });
 
         tx
+    }
+
+    /// Text handed to a connection that then dropped may never have left
+    /// the machine; put it back on the queue so the UI does not claim it is
+    /// on its way. If a new connection came up meanwhile, flush it there.
+    async fn requeue_unacked(&self, row_id: i64) {
+        match self.store.requeue_sending_text(row_id) {
+            Ok(moved) => {
+                for m in &moved {
+                    self.emit_message(m);
+                }
+            }
+            Err(e) => tracing::warn!(row_id, %e, "could not requeue unacknowledged messages"),
+        }
+        let live = self.conns.lock().unwrap().get(&row_id).map(|c| c.tx.clone());
+        if let Some(tx) = live {
+            self.flush_queue(row_id, &tx).await;
+        }
     }
 
     async fn on_control(self: &Arc<Self>, row_id: i64, msg: ControlMsg, out: &mpsc::Sender<Frame>) -> Result<()> {
@@ -889,6 +945,16 @@ impl ChatEngine {
         Ok(())
     }
 
+    /// After the storage folders were emptied: drop the dead paths and have
+    /// open conversations re-read so they stop offering to open them.
+    pub fn forget_missing_files(&self) -> Result<()> {
+        let peer_ids = self.store.forget_missing_files()?;
+        if !peer_ids.is_empty() {
+            let _ = self.app.emit(EVENT_RELOAD, serde_json::json!({ "peerIds": peer_ids }));
+        }
+        Ok(())
+    }
+
     pub async fn clear_chat(self: &Arc<Self>, row_id: i64) -> Result<()> {
         let paths = self.store.clear_messages(row_id)?;
         for p in paths {
@@ -954,8 +1020,9 @@ impl ChatEngine {
         Ok(msg)
     }
 
-    /// Sends what was written while the peer was offline: direct messages
-    /// queued for it, then group messages it has not acknowledged.
+    /// Sends what the peer has not acknowledged: direct messages queued for
+    /// it or lost with an earlier connection, then group messages. The
+    /// receiver drops (and re-acks) a msg_id it already has.
     async fn flush_queue(&self, row_id: i64, tx: &mpsc::Sender<Frame>) {
         let Ok(queued) = self.store.queued_messages(row_id) else { return };
         for m in queued {
@@ -969,7 +1036,7 @@ impl ChatEngine {
             if tx.send(frame).await.is_err() {
                 return;
             }
-            if let Ok(Some(m)) = self.store.set_status(&m.msg_id, "sending") {
+            if let Ok(Some(m)) = self.store.mark_sending(&m.msg_id) {
                 self.emit_message(&m);
             }
         }
@@ -986,10 +1053,8 @@ impl ChatEngine {
             if tx.send(frame).await.is_err() {
                 return;
             }
-            if m.status == "queued" {
-                if let Ok(Some(m)) = self.store.set_status(&m.msg_id, "sending") {
-                    self.emit_message(&m);
-                }
+            if let Ok(Some(m)) = self.store.mark_sending(&m.msg_id) {
+                self.emit_message(&m);
             }
         }
     }
@@ -1081,6 +1146,9 @@ impl ChatEngine {
         if peer.is_group {
             self.store.add_recipients(&msg_id, &targets)?;
         }
+        // flush_files announces the message when it picks it up, which is
+        // later if another file to this peer is still going.
+        self.emit_message(&msg);
         for id in targets {
             let engine = self.clone();
             tauri::async_runtime::spawn(async move { engine.flush_files(id).await });
@@ -1169,6 +1237,7 @@ impl ChatEngine {
                 transfer_id,
                 msg_id: m.msg_id.clone(),
                 peer_id: m.peer_id,
+                member_id: row_id,
                 direction: Direction::Out,
                 file_name: name,
                 bytes_done: size as u64,
@@ -1253,6 +1322,7 @@ impl ChatEngine {
             transfer_id: transfer_id.to_string(),
             msg_id: msg_id.to_string(),
             peer_id: conversation,
+            member_id: row_id,
             direction: Direction::Out,
             file_name: name.to_string(),
             bytes_done: done,
@@ -1468,6 +1538,7 @@ impl ChatEngine {
             transfer_id: transfer_id.clone(),
             msg_id: msg_id.clone(),
             peer_id: dest,
+            member_id: row_id,
             direction: Direction::In,
             file_name: name.clone(),
             bytes_done: done,
@@ -1615,6 +1686,12 @@ impl ChatEngine {
         let _ = self.app.emit(EVENT_TRANSFER, p);
     }
 
+    /// Transfers running or paused right now, for a UI that (re)loads
+    /// while they are in progress.
+    pub fn list_transfers(&self) -> Vec<TransferProgress> {
+        self.transfers.lock().unwrap().values().cloned().collect()
+    }
+
     /// Resolves an incoming file offer. While the sender is still holding
     /// the transfer connection the answer goes straight back on it;
     /// otherwise it travels over the chat connection (now, or when the
@@ -1724,7 +1801,7 @@ impl ChatEngine {
         let current = self.transfers.lock().unwrap().get(transfer_id).cloned();
         let Some(mut p) = current else { return };
         p.state = if pause { "paused" } else { "active" }.into();
-        let tx = self.conns.lock().unwrap().get(&p.peer_id).map(|c| c.tx.clone());
+        let tx = self.conns.lock().unwrap().get(&p.member_id).map(|c| c.tx.clone());
         if let Some(tx) = tx {
             let msg = if pause {
                 ControlMsg::FilePause { transfer_id: transfer_id.to_string() }

@@ -275,12 +275,21 @@ export interface Nearby {
 export interface TransferProgress {
   transferId: string;
   msgId: string;
+  /** The conversation; a group row for group files. */
   peerId: number;
+  /** The machine on the other end: the member, for a group file. */
+  memberId: number;
   direction: "in" | "out";
   fileName: string;
   bytesDone: number;
   bytesTotal: number;
   state: "active" | "paused" | "done" | "failed";
+}
+
+export interface PeerRemovedEvent {
+  id: number;
+  /** The row that now holds its history, when it was a merge. */
+  mergedInto: number | null;
 }
 
 export interface TypingEvent {

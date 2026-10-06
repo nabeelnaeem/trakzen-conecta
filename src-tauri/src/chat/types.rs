@@ -112,7 +112,10 @@ pub struct LinkPreview {
 pub struct TransferProgress {
     pub transfer_id: String,
     pub msg_id: String,
+    /// The conversation: a group row for group files.
     pub peer_id: i64,
+    /// The machine on the other end: the member, for a group file.
+    pub member_id: i64,
     pub direction: Direction,
     pub file_name: String,
     pub bytes_done: u64,
