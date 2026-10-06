@@ -117,6 +117,12 @@ export function useMailShortcuts(searchRef: React.RefObject<HTMLInputElement | n
           stop();
           void s.open(null);
           break;
+        case "z":
+          if (s.undoable) {
+            stop();
+            void s.undoLast();
+          }
+          break;
         default:
           return;
       }

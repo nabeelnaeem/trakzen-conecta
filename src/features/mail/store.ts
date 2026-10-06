@@ -51,6 +51,14 @@ export interface PendingSend {
   fire: () => void;
 }
 
+export interface UndoableAction {
+  label: string;
+  expires: number;
+  revert: () => Promise<void>;
+}
+
+const UNDO_MS = 8000;
+
 const threadKey = (m: MessageSummary) => m.threadId ?? m.remoteId;
 
 const viewKey = (s: Pick<MailState, "activeAccountId" | "folder" | "category" | "label" | "search" | "conversations" | "serverSearch">) =>
@@ -83,6 +91,8 @@ interface MailState {
   showImages: boolean;
   undoSeconds: number;
   pendingSend: PendingSend | null;
+  /** The last label change that can still be reverted from the toast. */
+  undoable: UndoableAction | null;
   filterEditor: NewFilter | null;
   /** Set while editing an existing filter (replace on save). */
   filterEditing: { accountId: number; filterId: string } | null;
@@ -124,6 +134,10 @@ interface MailState {
   // Thread-level actions on the open thread (or a specific row).
   act: (action: "archive" | "trash" | "spam" | "notSpam" | "unread" | "read" | "inbox", ids?: number[]) => Promise<void>;
   modifyLabels: (ids: number[], add: string[], remove: string[]) => Promise<boolean>;
+  /** modifyLabels plus an Undo toast. */
+  relabel: (ids: number[], add: string[], remove: string[]) => Promise<void>;
+  offerUndo: (label: string, revert: () => Promise<void>) => void;
+  undoLast: () => Promise<void>;
   snooze: (ids: number[], until: number | null) => Promise<void>;
   toggleSelect: (id: number, range?: boolean) => void;
   selectAll: (on: boolean) => void;
@@ -165,6 +179,7 @@ let syncError: { accountId: number; message: string } | null = null;
 let draftTimer: number | null = null;
 /** The autosave in flight, resolving to the server draft id (null if it failed). */
 let draftSave: Promise<string | null> | null = null;
+let undoTimer: number | null = null;
 
 const emptyComposer = (accountId: number): ComposerState => ({
   accountId,
@@ -195,6 +210,54 @@ function refreshUnread() {
     })
     .catch(() => undefined);
 }
+
+interface LabelUnit {
+  accountId: number;
+  key: string;
+  id: number;
+  labels: Set<string>;
+}
+
+// What each row (whole thread in conversation mode) carried before a label
+// change, so undo puts back exactly what was there and nothing more.
+function labelUnits(ids: number[]): LabelUnit[] {
+  const { messages, thread, conversations } = useMail.getState();
+  const rows = [...messages, ...thread];
+  const units = new Map<string, LabelUnit>();
+  for (const m of rows) {
+    if (!ids.includes(m.id)) continue;
+    const key = conversations ? threadKey(m) : String(m.id);
+    if (!units.has(`${m.accountId}|${key}`)) units.set(`${m.accountId}|${key}`, { accountId: m.accountId, key, id: m.id, labels: new Set() });
+  }
+  for (const m of rows) {
+    const u = units.get(`${m.accountId}|${conversations ? threadKey(m) : String(m.id)}`);
+    if (u) for (const l of m.labels) u.labels.add(l);
+  }
+  return [...units.values()];
+}
+
+function labelReverter(units: LabelUnit[], add: string[], remove: string[], conversations: boolean) {
+  return async () => {
+    const groups = new Map<string, { accountId: number; add: string[]; remove: string[]; keys: string[]; ids: number[] }>();
+    for (const u of units) {
+      const reAdd = remove.filter((l) => u.labels.has(l));
+      const reRemove = add.filter((l) => !u.labels.has(l));
+      if (reAdd.length === 0 && reRemove.length === 0) continue;
+      const g = `${u.accountId}|${reAdd.join(",")}|${reRemove.join(",")}`;
+      const group = groups.get(g) ?? { accountId: u.accountId, add: reAdd, remove: reRemove, keys: [], ids: [] };
+      group.keys.push(u.key);
+      group.ids.push(u.id);
+      groups.set(g, group);
+    }
+    for (const g of groups.values()) {
+      if (conversations) await mail.threadsModify(g.accountId, g.keys, g.add, g.remove);
+      else await mail.bulkModify(g.ids, g.add, g.remove);
+    }
+  };
+}
+
+const countOf = (n: number, conversations: boolean) =>
+  `${n} ${conversations ? "conversation" : "message"}${n === 1 ? "" : "s"}`;
 
 // Picks up replies that a sync brought into the open conversation, and its
 // latest flags. What the user expanded stays expanded; new unread replies
@@ -271,6 +334,7 @@ export const useMail = create<MailState>((set, get) => ({
   showImages: false,
   undoSeconds: 10,
   pendingSend: null,
+  undoable: null,
   filterEditor: null,
   filterEditing: null,
   error: null,
@@ -774,7 +838,7 @@ export const useMail = create<MailState>((set, get) => ({
       const accountId = get().activeAccountId!;
       const n = await get().run(`${verb}…`, () => mail.modifyView(accountId, get().query(), add, remove));
       if (n === undefined) return;
-      set({ selected: [], allInView: false, viewCount: null, openId: null, thread: [], expanded: [], notice: `${n} message${n === 1 ? "" : "s"} updated.` });
+      set({ selected: [], allInView: false, viewCount: null, openId: null, thread: [], expanded: [], undoable: null, notice: `${n} message${n === 1 ? "" : "s"} updated.` });
       window.setTimeout(() => set({ notice: null }), 3000);
       await Promise.all([get().refresh(), get().loadLabels()]);
       return;
@@ -782,6 +846,8 @@ export const useMail = create<MailState>((set, get) => ({
 
     const targets = ids ?? (get().selected.length ? get().selected : get().openId !== null ? [get().openId!] : []);
     if (targets.length === 0) return;
+    const units = labelUnits(targets);
+    const conversations = get().conversations;
     const ok = await get().run(targets.length > 1 ? `${verb} ${targets.length}…` : `${verb}…`, () => get().modifyLabels(targets, add, remove));
     if (ok === undefined) return;
     const removesFromView =
@@ -815,6 +881,47 @@ export const useMail = create<MailState>((set, get) => ({
       await get().refresh();
     }
     void get().loadLabels();
+    const done = { archive: "Archived", trash: "Moved to Trash", spam: "Reported as spam", notSpam: "Moved out of Spam", inbox: "Moved to Inbox" } as Record<string, string>;
+    if (done[action] && units.length > 0) {
+      get().offerUndo(`${done[action]} ${countOf(units.length, conversations)}.`, labelReverter(units, add, remove, conversations));
+    }
+  },
+
+  relabel: async (ids, add, remove) => {
+    if (ids.length === 0) return;
+    const units = labelUnits(ids);
+    const conversations = get().conversations;
+    const ok = await get().run("Updating labels…", () => get().modifyLabels(ids, add, remove));
+    if (ok === undefined) return;
+    const name = (id: string) => get().labels.find((l) => l.remoteId === id)?.name ?? id;
+    const what = add.length ? `Added "${add.map(name).join(", ")}" to` : `Removed "${remove.map(name).join(", ")}" from`;
+    get().offerUndo(`${what} ${countOf(units.length, conversations)}.`, labelReverter(units, add, remove, conversations));
+  },
+
+  offerUndo: (label, revert) => {
+    if (undoTimer) window.clearTimeout(undoTimer);
+    set({ undoable: { label, revert, expires: Date.now() + UNDO_MS } });
+    undoTimer = window.setTimeout(() => {
+      undoTimer = null;
+      set({ undoable: null });
+    }, UNDO_MS);
+  },
+
+  undoLast: async () => {
+    const u = get().undoable;
+    if (!u) return;
+    if (undoTimer) window.clearTimeout(undoTimer);
+    undoTimer = null;
+    set({ undoable: null });
+    const ok = await get().run("Undoing…", async () => {
+      await u.revert();
+      return true;
+    });
+    if (!ok) return;
+    set({ notice: "Action undone." });
+    window.setTimeout(() => set({ notice: null }), 2500);
+    refreshUnread();
+    await Promise.all([get().refresh(), get().loadLabels()]);
   },
 
   modifyLabels: async (ids, add, remove) => {

@@ -328,7 +328,7 @@ function viewName(s: ReturnType<typeof useMail.getState>): string {
 }
 
 function BulkLabelMenu() {
-  const { labels, modifyLabels, selected } = useMail();
+  const { labels, relabel, selected } = useMail();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -350,10 +350,10 @@ function BulkLabelMenu() {
             <div key={l.id} className="flex items-center gap-1 px-2 py-1 text-sm">
               <span className="h-2.5 w-2.5 rounded-sm" style={{ background: l.bgColor ?? "#9ca3af" }} />
               <span className="min-w-0 flex-1 truncate">{l.name}</span>
-              <button className="text-xs text-green-700 hover:underline" onClick={() => void modifyLabels(selected, [l.remoteId], [])}>
+              <button className="text-xs text-green-700 hover:underline" onClick={() => void relabel(selected, [l.remoteId], [])}>
                 add
               </button>
-              <button className="text-xs text-red-700 hover:underline" onClick={() => void modifyLabels(selected, [], [l.remoteId])}>
+              <button className="text-xs text-red-700 hover:underline" onClick={() => void relabel(selected, [], [l.remoteId])}>
                 remove
               </button>
             </div>
@@ -365,7 +365,7 @@ function BulkLabelMenu() {
 }
 
 function Toasts() {
-  const { pendingSend, undoSend, sendNow, notice, working } = useMail();
+  const { pendingSend, undoSend, sendNow, notice, working, undoable, undoLast } = useMail();
   const [left, setLeft] = useState(0);
   useEffect(() => {
     if (!pendingSend) return;
@@ -374,7 +374,7 @@ function Toasts() {
     const t = window.setInterval(tick, 250);
     return () => window.clearInterval(t);
   }, [pendingSend]);
-  if (!pendingSend && !notice && !working) return null;
+  if (!pendingSend && !notice && !working && !undoable) return null;
   return (
     <div className="pointer-events-none fixed bottom-4 left-1/2 z-40 flex -translate-x-1/2 flex-col items-center gap-2">
       {working && (
@@ -399,7 +399,19 @@ function Toasts() {
           </button>
         </div>
       )}
-      {!pendingSend && notice && !working && (
+      {!pendingSend && undoable && !working && (
+        <div className="pointer-events-auto flex items-center gap-3 rounded-full bg-toast py-1.5 pr-1.5 pl-4 text-sm font-medium text-toast-fg shadow-lg">
+          {undoable.label}
+          <button
+            className="rounded-full border border-current px-3 py-1 font-semibold text-toast-accent hover:bg-toast-fg/10"
+            onClick={() => void undoLast()}
+            title="Undo (z)"
+          >
+            Undo
+          </button>
+        </div>
+      )}
+      {!pendingSend && !undoable && notice && !working && (
         <div className="rounded-full bg-toast px-4 py-2 text-sm font-medium text-toast-fg shadow-lg">{notice}</div>
       )}
     </div>
