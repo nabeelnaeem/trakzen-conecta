@@ -875,14 +875,18 @@ export const useMail = create<MailState>((set, get) => ({
   closeCompose: () => {
     const c = get().composer;
     if (draftTimer) window.clearTimeout(draftTimer);
-    if (!c?.dirty) {
+    if (!c) return;
+    // Saved drafts only reach the Drafts list through a sync.
+    const syncDrafts = () => mail.sync(c.accountId).catch((e: unknown) => set({ error: errorMessage(e) }));
+    if (!c.dirty) {
       set({ composer: null });
+      if (c.savedAt) void syncDrafts();
       return;
     }
     void get().saveDraftNow().then(() => {
       set({ composer: null, notice: "Draft saved" });
       window.setTimeout(() => set({ notice: null }), 2500);
-      void get().sync();
+      void syncDrafts();
     });
   },
 
