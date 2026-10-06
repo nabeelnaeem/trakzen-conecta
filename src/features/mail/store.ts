@@ -52,6 +52,9 @@ export interface PendingSend {
 
 const threadKey = (m: MessageSummary) => m.threadId ?? m.remoteId;
 
+const viewKey = (s: Pick<MailState, "activeAccountId" | "folder" | "category" | "label" | "search" | "conversations" | "serverSearch">) =>
+  [s.activeAccountId, s.folder, s.category, s.label, s.search, s.conversations, s.serverSearch].join("|");
+
 interface MailState {
   accounts: Account[];
   activeAccountId: number | null;
@@ -151,6 +154,11 @@ const splitList = (s: string) =>
 
 let lastSelectedId: number | null = null;
 let fetchSeq = 0;
+// Newer list/label reads supersede older ones still in flight, so a slow
+// answer for a previous view or query never overwrites the current one.
+let refreshSeq = 0;
+let labelsSeq = 0;
+let searchTimer: number | null = null;
 let draftTimer: number | null = null;
 /** The autosave in flight, resolving to the server draft id (null if it failed). */
 let draftSave: Promise<string | null> | null = null;
@@ -373,10 +381,12 @@ export const useMail = create<MailState>((set, get) => ({
       set({ labels: [] });
       return;
     }
+    const seq = ++labelsSeq;
     try {
-      set({ labels: await mail.listLabels(id) });
+      const labels = await mail.listLabels(id);
+      if (seq === labelsSeq && get().activeAccountId === id) set({ labels });
     } catch (e) {
-      set({ error: errorMessage(e) });
+      if (seq === labelsSeq) set({ error: errorMessage(e) });
     }
   },
 
@@ -408,7 +418,11 @@ export const useMail = create<MailState>((set, get) => ({
 
   setSearch: (search) => {
     set({ search, serverSearch: false, selected: [], allInView: false, viewCount: null });
-    void get().refresh();
+    if (searchTimer) window.clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(() => {
+      searchTimer = null;
+      void get().refresh();
+    }, 250);
   },
 
   searchOnServer: async () => {
@@ -418,7 +432,7 @@ export const useMail = create<MailState>((set, get) => ({
     set({ fetching: true, serverSearch: true });
     try {
       const messages = await mail.searchServer(id, q);
-      if (get().search.trim() === q) set({ messages, hasMore: false });
+      if (get().search.trim() === q && get().serverSearch && get().activeAccountId === id) set({ messages, hasMore: false });
     } catch (e) {
       set({ error: errorMessage(e) });
     } finally {
@@ -428,15 +442,18 @@ export const useMail = create<MailState>((set, get) => ({
 
   refresh: async () => {
     const { activeAccountId, search, folder, conversations, serverSearch } = get();
+    const seq = ++refreshSeq;
     if (activeAccountId === null) {
       set({ messages: [], unread: 0, snoozed: [] });
       return;
     }
     if (serverSearch) return;
+    const view = viewKey(get());
+    const current = () => seq === refreshSeq && viewKey(get()) === view;
     try {
       if (folder === "snoozed" && !search.trim()) {
         const [snoozed, unread] = await Promise.all([mail.listSnoozed(activeAccountId), mail.unreadCount(activeAccountId)]);
-        set({ snoozed, messages: snoozed, unread, hasMore: false });
+        if (current()) set({ snoozed, messages: snoozed, unread, hasMore: false });
         return;
       }
       const [messages, unread] = await Promise.all([
@@ -445,9 +462,9 @@ export const useMail = create<MailState>((set, get) => ({
           : mail.listMessages(activeAccountId, get().query(), 5000, 0, conversations),
         mail.unreadCount(activeAccountId),
       ]);
-      set({ messages, unread });
+      if (current()) set({ messages, unread });
     } catch (e) {
-      set({ error: errorMessage(e) });
+      if (current()) set({ error: errorMessage(e) });
     }
   },
 
