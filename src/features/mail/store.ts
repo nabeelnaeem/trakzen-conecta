@@ -193,6 +193,30 @@ function refreshUnread() {
     .catch(() => undefined);
 }
 
+// Picks up replies that a sync brought into the open conversation, and its
+// latest flags. What the user expanded stays expanded; new unread replies
+// open the way they would have had the thread been opened now.
+async function reloadThread(accountId: number) {
+  const { thread, openId, conversations } = useMail.getState();
+  if (openId === null || thread.length === 0 || thread[0].accountId !== accountId) return;
+  if (!conversations && thread.length === 1) return;
+  const key = threadKey(thread[0]);
+  let fresh: MessageSummary[];
+  try {
+    fresh = await mail.listThread(accountId, key);
+  } catch {
+    return;
+  }
+  const now = useMail.getState();
+  if (fresh.length === 0 || now.openId !== openId || now.thread.length === 0 || threadKey(now.thread[0]) !== key) return;
+  const known = new Set(now.thread.map((m) => m.id));
+  const ids = new Set(fresh.map((m) => m.id));
+  useMail.setState({ thread: fresh, expanded: now.expanded.filter((id) => ids.has(id)) });
+  for (const m of fresh) {
+    if (!known.has(m.id) && !m.isRead) await useMail.getState().expand(m.id, true);
+  }
+}
+
 export function textToHtml(text: string): string {
   const esc = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   return esc.split("\n").join("<br>");
@@ -313,6 +337,7 @@ export const useMail = create<MailState>((set, get) => ({
         case "progress":
           set({ syncing: { ...syncing, [ev.accountId]: { done: ev.done, total: ev.total } } });
           if (shown) void get().refresh();
+          void reloadThread(ev.accountId);
           break;
         case "finished": {
           const next = { ...syncing };
@@ -322,6 +347,7 @@ export const useMail = create<MailState>((set, get) => ({
             void get().refresh();
             void get().loadLabels();
           }
+          void reloadThread(ev.accountId);
           break;
         }
         case "failed": {
