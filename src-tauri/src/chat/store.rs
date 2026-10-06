@@ -351,21 +351,24 @@ impl ChatStore {
     }
 
     /// Forgets file paths that no longer exist on disk (after a storage
-    /// clean-up) so the UI stops offering to open them.
-    pub fn forget_missing_files(&self) -> Result<usize> {
+    /// clean-up) so the UI stops offering to open them. Returns the
+    /// conversations that changed.
+    pub fn forget_missing_files(&self) -> Result<Vec<i64>> {
         let conn = self.db.conn();
-        let rows: Vec<(i64, String)> = conn
-            .prepare("SELECT id, file_path FROM chat_messages WHERE file_path IS NOT NULL")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        let rows: Vec<(i64, i64, String)> = conn
+            .prepare("SELECT id, peer_id, file_path FROM chat_messages WHERE file_path IS NOT NULL")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        let mut n = 0;
-        for (id, p) in rows {
+        let mut touched = Vec::new();
+        for (id, peer_id, p) in rows {
             if !std::path::Path::new(&p).exists() {
                 conn.execute("UPDATE chat_messages SET file_path = NULL WHERE id = ?1", params![id])?;
-                n += 1;
+                if !touched.contains(&peer_id) {
+                    touched.push(peer_id);
+                }
             }
         }
-        Ok(n)
+        Ok(touched)
     }
 
     /// Marks incoming messages read; returns their ids so the sender can be

@@ -25,6 +25,8 @@ pub const EVENT_STATUS: &str = "chat://status";
 pub const EVENT_DELETED: &str = "chat://deleted";
 pub const EVENT_TYPING: &str = "chat://typing";
 pub const EVENT_PEER_REMOVED: &str = "chat://peer-removed";
+/// Many messages of these conversations changed at once; reload them.
+pub const EVENT_RELOAD: &str = "chat://reload";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -940,6 +942,16 @@ impl ChatEngine {
         }
         let _ = self.app.emit(EVENT_DELETED, DeletedEvent { peer_id: m.peer_id, msg_ids: vec![msg_id.to_string()] });
         self.emit_peer(m.peer_id);
+        Ok(())
+    }
+
+    /// After the storage folders were emptied: drop the dead paths and have
+    /// open conversations re-read so they stop offering to open them.
+    pub fn forget_missing_files(&self) -> Result<()> {
+        let peer_ids = self.store.forget_missing_files()?;
+        if !peer_ids.is_empty() {
+            let _ = self.app.emit(EVENT_RELOAD, serde_json::json!({ "peerIds": peer_ids }));
+        }
         Ok(())
     }
 

@@ -270,7 +270,7 @@ pub async fn chat_clear_storage(state: State<'_, AppState>, which: String) -> Re
             }
         }
     }
-    state.chat.store.forget_missing_files()?;
+    state.chat.forget_missing_files()?;
     Ok(removed)
 }
 
