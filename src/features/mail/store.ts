@@ -152,6 +152,8 @@ const splitList = (s: string) =>
 let lastSelectedId: number | null = null;
 let fetchSeq = 0;
 let draftTimer: number | null = null;
+/** The autosave in flight, resolving to the server draft id (null if it failed). */
+let draftSave: Promise<string | null> | null = null;
 
 const emptyComposer = (accountId: number): ComposerState => ({
   accountId,
@@ -842,20 +844,31 @@ export const useMail = create<MailState>((set, get) => ({
   },
 
   saveDraftNow: async () => {
+    // One save at a time: a second save started before the first returns
+    // has no draft id yet and would create a duplicate draft.
+    while (draftSave) await draftSave;
     const c = get().composer;
-    if (!c || !c.dirty || c.saving) return;
+    if (!c || !c.dirty) return;
     const hasContent = c.to.trim() || c.subject.trim() || c.body.trim();
     if (!hasContent) return;
-    set({ composer: { ...c, saving: true } });
-    try {
-      const draftId = await mail.saveDraft(toOutgoing(c));
-      const now = get().composer;
-      if (now) set({ composer: { ...now, draftId, dirty: now !== c && now.dirty, saving: false, savedAt: Date.now() } });
-    } catch (e) {
-      const now = get().composer;
-      if (now) set({ composer: { ...now, saving: false } });
-      set({ error: `Draft not saved: ${errorMessage(e)}` });
-    }
+    const saving = { ...c, saving: true };
+    set({ composer: saving });
+    const run = mail.saveDraft(toOutgoing(c)).then(
+      (draftId) => {
+        const now = get().composer;
+        if (now) set({ composer: { ...now, draftId, dirty: now !== saving && now.dirty, saving: false, savedAt: Date.now() } });
+        return draftId;
+      },
+      (e: unknown) => {
+        const now = get().composer;
+        if (now) set({ composer: { ...now, saving: false } });
+        set({ error: `Draft not saved: ${errorMessage(e)}` });
+        return null;
+      },
+    );
+    draftSave = run;
+    await run;
+    if (draftSave === run) draftSave = null;
   },
 
   // Closing keeps the draft (saved to the server if anything changed).
@@ -877,11 +890,13 @@ export const useMail = create<MailState>((set, get) => ({
     const c = get().composer;
     if (draftTimer) window.clearTimeout(draftTimer);
     set({ composer: null });
-    if (c?.draftId) {
+    // A save still in flight may be creating the draft; wait for its id.
+    const draftId = (draftSave ? await draftSave : null) ?? c?.draftId;
+    if (c && draftId) {
       const row = c.draftMessageId;
       if (row !== null) set({ messages: get().messages.filter((m) => m.id !== row) });
       try {
-        await mail.discardDraft(c.accountId, c.draftId, row);
+        await mail.discardDraft(c.accountId, draftId, row);
       } catch (e) {
         set({ error: errorMessage(e) });
       }
@@ -890,9 +905,13 @@ export const useMail = create<MailState>((set, get) => ({
   },
 
   send: async () => {
+    if (!get().composer) return;
+    if (draftTimer) window.clearTimeout(draftTimer);
+    // Sending deletes the draft by id, so let an in-flight autosave land
+    // first; otherwise the draft it creates is left behind in Drafts.
+    if (draftSave) await draftSave;
     const c = get().composer;
     if (!c) return;
-    if (draftTimer) window.clearTimeout(draftTimer);
     const message = toOutgoing(c);
     if (message.to.length === 0) {
       set({ error: "Add at least one recipient." });
@@ -932,6 +951,9 @@ export const useMail = create<MailState>((set, get) => ({
   },
 
   scheduleSend: async (when) => {
+    if (!get().composer) return;
+    if (draftTimer) window.clearTimeout(draftTimer);
+    if (draftSave) await draftSave;
     const c = get().composer;
     if (!c) return;
     const message = toOutgoing(c);
