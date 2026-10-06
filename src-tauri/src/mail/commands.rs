@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -15,8 +15,46 @@ use super::types::*;
 
 pub const EVENT_SYNC: &str = "mail://sync";
 
+/// Accounts with a sync in flight, each with whether another pass was
+/// asked for meanwhile. A request that arrives mid-sync may be for changes
+/// the running pass has already read past (a just-sent message, a filter
+/// applied to existing mail), so it must not simply be dropped.
 #[derive(Default)]
-pub struct SyncGuard(Mutex<HashSet<i64>>);
+pub struct SyncGuard(Mutex<HashMap<i64, bool>>);
+
+impl SyncGuard {
+    /// True if the caller should start syncing; otherwise a rerun is queued
+    /// for the sync already running.
+    fn begin(&self, account_id: i64) -> bool {
+        let mut running = self.0.lock().unwrap();
+        match running.get_mut(&account_id) {
+            Some(rerun) => {
+                *rerun = true;
+                false
+            }
+            None => {
+                running.insert(account_id, false);
+                true
+            }
+        }
+    }
+
+    /// True if another pass was requested; the caller keeps the slot and
+    /// syncs again. Otherwise the account is released.
+    fn finish(&self, account_id: i64) -> bool {
+        let mut running = self.0.lock().unwrap();
+        match running.get_mut(&account_id) {
+            Some(rerun) if *rerun => {
+                *rerun = false;
+                true
+            }
+            _ => {
+                running.remove(&account_id);
+                false
+            }
+        }
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct PageState {
@@ -113,25 +151,26 @@ pub async fn mail_sync(app: AppHandle, account_id: i64) -> Result<()> {
 pub fn spawn_sync(app: AppHandle, account_id: i64) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        {
-            let mut running = state.sync_guard.0.lock().unwrap();
-            if !running.insert(account_id) {
-                return;
+        if !state.sync_guard.begin(account_id) {
+            return;
+        }
+        loop {
+            let result = run_sync(&app, &state, account_id).await;
+            let ev = match result {
+                Ok(()) => SyncEvent::Finished { account_id },
+                Err(e) => {
+                    tracing::error!(account_id, error = %e, "sync failed");
+                    SyncEvent::Failed {
+                        account_id,
+                        error: e.to_string(),
+                    }
+                }
+            };
+            let _ = app.emit(EVENT_SYNC, ev);
+            if !state.sync_guard.finish(account_id) {
+                break;
             }
         }
-        let result = run_sync(&app, &state, account_id).await;
-        state.sync_guard.0.lock().unwrap().remove(&account_id);
-        let ev = match result {
-            Ok(()) => SyncEvent::Finished { account_id },
-            Err(e) => {
-                tracing::error!(account_id, error = %e, "sync failed");
-                SyncEvent::Failed {
-                    account_id,
-                    error: e.to_string(),
-                }
-            }
-        };
-        let _ = app.emit(EVENT_SYNC, ev);
     });
 }
 
@@ -1072,5 +1111,35 @@ pub async fn flush_outbox(app: &AppHandle) {
             }
             Err(e) => tracing::warn!(%e, "bad scheduled payload"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_requested_mid_run_runs_once_more() {
+        let guard = SyncGuard::default();
+        assert!(guard.begin(1));
+        // Requests while running collapse into a single rerun.
+        assert!(!guard.begin(1));
+        assert!(!guard.begin(1));
+        assert!(guard.finish(1));
+        assert!(!guard.finish(1));
+        // Released: the next request starts a fresh sync.
+        assert!(guard.begin(1));
+        assert!(!guard.finish(1));
+    }
+
+    #[test]
+    fn accounts_are_guarded_independently() {
+        let guard = SyncGuard::default();
+        assert!(guard.begin(1));
+        assert!(guard.begin(2));
+        assert!(!guard.begin(2));
+        assert!(!guard.finish(1));
+        assert!(guard.finish(2));
+        assert!(!guard.finish(2));
     }
 }
