@@ -953,6 +953,10 @@ async fn resolve_attachments(
     Ok(resolved)
 }
 
+fn has_recipients(m: &OutgoingMessage) -> bool {
+    m.to.iter().chain(&m.cc).chain(&m.bcc).any(|t| !t.trim().is_empty())
+}
+
 /// `draft_message_id` is the local row of the draft being sent, dropped
 /// right away so the list does not show it until the next sync.
 #[tauri::command]
@@ -961,7 +965,7 @@ pub async fn mail_send(
     mut message: OutgoingMessage,
     draft_message_id: Option<i64>,
 ) -> Result<()> {
-    if message.to.iter().all(|t| t.trim().is_empty()) {
+    if !has_recipients(&message) {
         return Err(AppError::Other("add at least one recipient".into()));
     }
     let sig = crate::settings::signature_for(&state.db, message.account_id)?;
@@ -1096,7 +1100,7 @@ pub async fn mail_save_attachment(
 
 #[tauri::command]
 pub async fn mail_schedule(state: State<'_, AppState>, message: OutgoingMessage, send_at: i64) -> Result<()> {
-    if message.to.iter().all(|t| t.trim().is_empty()) {
+    if !has_recipients(&message) {
         return Err(AppError::Other("add at least one recipient".into()));
     }
     let payload = serde_json::to_string(&message)?;

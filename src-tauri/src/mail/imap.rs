@@ -338,6 +338,7 @@ impl MailProvider for ImapProvider {
             use lettre::transport::smtp::authentication::Credentials;
             use lettre::{SmtpTransport, Transport};
             let envelope = envelope_from_raw(&raw, &cfg.username)?;
+            let raw = super::compose::without_bcc(&raw);
             let creds = Credentials::new(cfg.username.clone(), pass);
             let mailer = if cfg.smtp_implicit_tls() {
                 SmtpTransport::relay(&cfg.smtp_host)

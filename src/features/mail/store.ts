@@ -1072,7 +1072,7 @@ export const useMail = create<MailState>((set, get) => ({
     while (draftSave) await draftSave;
     const c = get().composer;
     if (!c || !c.dirty) return;
-    const hasContent = c.to.trim() || c.subject.trim() || c.body.trim();
+    const hasContent = c.to.trim() || c.cc.trim() || c.bcc.trim() || c.subject.trim() || c.body.trim();
     if (!hasContent) return;
     const saving = { ...c, saving: true };
     set({ composer: saving });
@@ -1140,7 +1140,7 @@ export const useMail = create<MailState>((set, get) => ({
     const c = get().composer;
     if (!c) return;
     const message = toOutgoing(c);
-    if (message.to.length === 0) {
+    if (message.to.length + message.cc.length + message.bcc.length === 0) {
       set({ error: "Add at least one recipient." });
       return;
     }
@@ -1185,7 +1185,7 @@ export const useMail = create<MailState>((set, get) => ({
     const c = get().composer;
     if (!c) return;
     const message = toOutgoing(c);
-    if (message.to.length === 0) {
+    if (message.to.length + message.cc.length + message.bcc.length === 0) {
       set({ error: "Add at least one recipient." });
       return;
     }

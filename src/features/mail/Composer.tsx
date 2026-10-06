@@ -36,7 +36,7 @@ export function Composer() {
   };
 
   const fileName = (p: string) => p.split(/[\\/]/).pop() ?? p;
-  const hasRecipient = !!c.to.trim();
+  const hasRecipient = !!(c.to.trim() || c.cc.trim() || c.bcc.trim());
 
   const applyTemplate = async (t: Template) => {
     if (c.body.trim()) {
