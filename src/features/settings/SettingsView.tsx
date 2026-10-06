@@ -30,6 +30,7 @@ import { useMail } from "../mail/store";
 import { Spinner } from "../../lib/Spinner";
 import { FilesTab } from "../files/FilesTab";
 import { FilterEditor } from "../mail/FilterEditor";
+import { getAutoDownload, setAutoDownload, useUpdater } from "../../lib/updater";
 
 type Tab = "general" | "appearance" | "mail" | "accounts" | "filters" | "chat" | "files" | "about";
 
@@ -906,8 +907,21 @@ function ChatTab({ s, save }: { s: Settings; save: Save }) {
 
 function AboutTab() {
   const built = useMemo(() => new Date(__BUILD_DATE__.replace(" UTC", "Z").replace(" ", "T")).toLocaleString(), []);
-  const [updateNote, setUpdateNote] = useState<string | null>(null);
-  const [checking, setChecking] = useState(false);
+  const u = useUpdater();
+  const [autoDownload, setAutoDownloadState] = useState(getAutoDownload());
+  const pct = u.total ? Math.min(100, Math.round((u.downloaded / u.total) * 100)) : null;
+  const updateNote =
+    u.phase === "checking"
+      ? null
+      : u.phase === "upToDate"
+        ? "You're on the latest version."
+        : u.phase === "available"
+          ? `Version ${u.version} is available.`
+          : u.phase === "downloading"
+            ? `Downloading version ${u.version}…${pct !== null ? ` ${pct}%` : ""}`
+            : u.phase === "ready" || u.phase === "installing"
+              ? `Version ${u.version} is downloaded and ready to install.`
+              : null;
   return (
     <div className="space-y-2 text-sm text-gray-600">
       <div>
@@ -917,34 +931,45 @@ function AboutTab() {
         {__BUILD_DATE__} · {built}
       </div>
       <div className="flex flex-wrap items-center gap-3 text-xs">
-        <button
-          className="btn"
-          disabled={checking}
-          onClick={() => {
-            setChecking(true);
-            setUpdateNote(null);
-            void import("@tauri-apps/plugin-updater")
-              .then(({ check }) => check())
-              .then(async (update) => {
-                if (!update) {
-                  setUpdateNote("You're on the latest version.");
-                  return;
-                }
-                setUpdateNote(`Version ${update.version} is available. Downloading…`);
-                await update.downloadAndInstall();
-                setUpdateNote("Update installed. Restart the app to finish.");
-              })
-              .catch((e) => setUpdateNote(errorMessage(e)))
-              .finally(() => setChecking(false));
-          }}
-        >
-          {checking ? "Checking…" : "Check for updates"}
-        </button>
+        {u.phase === "ready" || u.phase === "installing" ? (
+          <button className="btn btn-primary" disabled={u.phase === "installing"} onClick={() => void u.install()}>
+            {u.phase === "installing" ? "Installing…" : "Restart to update"}
+          </button>
+        ) : u.phase === "available" ? (
+          <button className="btn btn-primary" onClick={() => void u.download(true)}>
+            Download version {u.version}
+          </button>
+        ) : (
+          <button className="btn" disabled={u.phase === "checking" || u.phase === "downloading"} onClick={() => void u.check(true)}>
+            {u.phase === "checking" ? "Checking…" : "Check for updates"}
+          </button>
+        )}
         <button className="text-blue-700 hover:underline" onClick={() => void openUrl("https://github.com/nabeelnaeem/trakzen-conecta/releases")}>Releases</button>
         <button className="text-blue-700 hover:underline" onClick={() => void openUrl("https://github.com/nabeelnaeem/trakzen-conecta/issues")}>Report a problem</button>
         <button className="text-blue-700 hover:underline" onClick={() => void openUrl("https://github.com/nabeelnaeem/trakzen-conecta/blob/main/PRIVACY.md")}>Privacy</button>
       </div>
       {updateNote && <p className="text-xs">{updateNote}</p>}
+      {u.phase === "downloading" && (
+        <div className="h-1 w-64 overflow-hidden rounded bg-gray-200">
+          <div className="h-full bg-blue-600 transition-[width]" style={{ width: `${pct ?? 0}%` }} />
+        </div>
+      )}
+      {u.error && <p className="text-xs text-red-700">{u.error}</p>}
+      {u.notes && (u.phase === "available" || u.phase === "downloading" || u.phase === "ready") && (
+        <details className="text-xs">
+          <summary className="cursor-pointer">What's new in {u.version}</summary>
+          <div className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap rounded bg-gray-50 p-2 text-gray-700">{u.notes}</div>
+        </details>
+      )}
+      <Toggle
+        v={autoDownload}
+        on={(v) => {
+          setAutoDownload(v);
+          setAutoDownloadState(v);
+        }}
+        label="Download updates automatically"
+        hint="Checks GitHub releases every few hours. Off: you're told when a new version is out and download it yourself."
+      />
       <div className="pt-4">
         <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">Developer</div>
         <div className="text-sm text-gray-800">Nabeel Naeem</div>

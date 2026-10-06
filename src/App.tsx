@@ -14,6 +14,8 @@ import { setActiveTab } from "./lib/activeTab";
 import { ConfirmHost } from "./lib/confirm";
 import { SaveToFilesHost } from "./features/files/SaveToFiles";
 import { watchFilesStatus } from "./features/files/store";
+import { UpdateBanner } from "./lib/UpdateBanner";
+import { startUpdateChecks } from "./lib/updater";
 
 type Tab = "mail" | "chat" | "settings";
 
@@ -31,6 +33,7 @@ export default function App() {
   useEffect(() => onNavigate((t) => setTab(t)), []);
   // Save-to-Files buttons only show once connected; the check runs in the background.
   useEffect(() => watchFilesStatus(), []);
+  useEffect(() => startUpdateChecks(), []);
 
   // Deep links and notification clicks arrive here from the backend.
   useEffect(() => {
@@ -120,6 +123,7 @@ export default function App() {
     <div className="flex h-full">
       <ConfirmHost />
       <SaveToFilesHost />
+      <UpdateBanner />
       <nav className="flex w-16 shrink-0 flex-col items-center gap-1 border-r border-gray-200 bg-gray-100 py-2">
         <div className="mb-2 flex h-9 w-9 items-center justify-center rounded-xl bg-blue-600 text-on-accent shadow-sm" title="Trakzen Conecta">
           <svg viewBox="0 0 512 512" width="22" height="22" aria-hidden>

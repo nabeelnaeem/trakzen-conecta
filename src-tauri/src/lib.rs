@@ -235,6 +235,7 @@ pub fn run() {
             Some(vec![MINIMIZED_ARG]),
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(notify::PendingRoute::default())
         .on_window_event(|window, event| {
             // Closing the main window hides it to the tray unless the user
