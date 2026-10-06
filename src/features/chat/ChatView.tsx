@@ -924,6 +924,11 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
 function GroupMembers({ groupId, name, left, members, onClose }: { groupId: number; name: string; left: boolean; members: Peer[]; onClose: () => void }) {
   const { peers, identity } = useChat();
   const [title, setTitle] = useState(name);
+  // Follows renames by other members until the user starts typing.
+  const [edited, setEdited] = useState(false);
+  useEffect(() => {
+    if (!edited) setTitle(name);
+  }, [name, edited]);
   const [adding, setAdding] = useState(false);
   const [picked, setPicked] = useState<number[]>([]);
   const [err, setErr] = useState<string | null>(null);
@@ -941,8 +946,14 @@ function GroupMembers({ groupId, name, left, members, onClose }: { groupId: numb
             <input
               className="input flex-1"
               value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              onBlur={() => title.trim() && title.trim() !== name && run(chatIpc.groupRename(groupId, title))}
+              onChange={(e) => {
+                setTitle(e.target.value);
+                setEdited(true);
+              }}
+              onBlur={() => {
+                if (edited && title.trim() && title.trim() !== name) void run(chatIpc.groupRename(groupId, title)).finally(() => setEdited(false));
+                else setEdited(false);
+              }}
               onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
               aria-label="Group name"
             />
