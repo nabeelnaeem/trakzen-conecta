@@ -14,7 +14,7 @@ import { textToHtml, useMail } from "../mail/store";
 import { Spinner } from "../../lib/Spinner";
 import type { ChatMessage, Peer } from "../../lib/types";
 import { confirmDialog } from "../../lib/confirm";
-import { Check, CheckCheck, Clock, MoreHorizontal, Paperclip, Pencil, QrCode, Search, Send, SmilePlus, Users, X } from "lucide-react";
+import { ArrowDown, Check, CheckCheck, Clock, MoreHorizontal, Paperclip, Pencil, QrCode, Search, Send, SmilePlus, Users, X } from "lucide-react";
 
 const QUICK_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🙏", "✅", "👀"];
 
@@ -418,6 +418,9 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
   // Where the first message sat before an older page went in above it.
   const anchor = useRef<{ msgId: string; top: number } | null>(null);
   const lastId = useRef<number | null>(null);
+  const atBottom = useRef(true);
+  // The newest message when the user scrolled up; anything after it is unseen.
+  const [seenUpTo, setSeenUpTo] = useState<number | null>(null);
   const area = useRef<HTMLTextAreaElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -529,13 +532,18 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
     const last = messages[messages.length - 1];
     const prev = lastId.current;
     lastId.current = last?.id ?? null;
-    if (last && (prev === null || last.id > prev)) el.scrollTop = el.scrollHeight;
+    if (last && (prev === null || (last.id > prev && (atBottom.current || last.direction === "out")))) el.scrollTop = el.scrollHeight;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, results]);
 
   const onScroll = () => {
     const el = scroller.current;
-    if (!el || results || !hasOlder || loadingOlder || el.scrollTop > 300) return;
+    if (!el || results) return;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    const newest = messages[messages.length - 1]?.id ?? null;
+    atBottom.current = near;
+    setSeenUpTo((v) => (near ? null : (v ?? newest)));
+    if (!hasOlder || loadingOlder || el.scrollTop > 300) return;
     const first = messages[0];
     const row = first ? rowOf(first.msgId) : null;
     if (!row) return;
@@ -667,6 +675,7 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
   };
 
   const shown = results ?? messages;
+  const unseen = seenUpTo === null || results ? 0 : messages.filter((m) => m.id > seenUpTo && m.direction === "in").length;
   let lastDay = "";
   let lastFrom: string | null = null;
   let lastAt = 0;
@@ -871,6 +880,17 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
             );
           })}
         </div>
+        {unseen > 0 && (
+          <div className="pointer-events-none sticky bottom-0 flex h-0 justify-center">
+            <button
+              className="pointer-events-auto flex -translate-y-12 items-center gap-1 rounded-full bg-blue-600 px-3 py-1 text-xs text-on-accent shadow-lg hover:bg-blue-700"
+              onClick={() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" })}
+            >
+              <ArrowDown size={13} />
+              {unseen} new message{unseen === 1 ? "" : "s"}
+            </button>
+          </div>
+        )}
       </div>
 
       {left ? (
