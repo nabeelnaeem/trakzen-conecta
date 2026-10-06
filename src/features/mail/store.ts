@@ -159,6 +159,8 @@ let fetchSeq = 0;
 let refreshSeq = 0;
 let labelsSeq = 0;
 let searchTimer: number | null = null;
+/** The last "Sync failed" banner, cleared once that account syncs again. */
+let syncError: { accountId: number; message: string } | null = null;
 let draftTimer: number | null = null;
 /** The autosave in flight, resolving to the server draft id (null if it failed). */
 let draftSave: Promise<string | null> | null = null;
@@ -336,6 +338,10 @@ export const useMail = create<MailState>((set, get) => ({
           const next = { ...syncing };
           delete next[ev.accountId];
           set({ syncing: next });
+          if (syncError?.accountId === ev.accountId) {
+            if (get().error === syncError.message) set({ error: null });
+            syncError = null;
+          }
           if (activeAccountId === null) {
             void get().loadAccounts().catch((e: unknown) => set({ error: errorMessage(e) }));
           } else if (shown) {
@@ -348,7 +354,8 @@ export const useMail = create<MailState>((set, get) => ({
         case "failed": {
           const next = { ...syncing };
           delete next[ev.accountId];
-          set({ syncing: next, error: `Sync failed: ${ev.error}` });
+          syncError = { accountId: ev.accountId, message: `Sync failed: ${ev.error}` };
+          set({ syncing: next, error: syncError.message });
           break;
         }
         case "newMail": {
@@ -375,13 +382,19 @@ export const useMail = create<MailState>((set, get) => ({
         }
       }
     });
-    // Coming back to the window is the moment people expect fresh mail.
-    let lastFocusSync = 0;
-    window.addEventListener("focus", () => {
+    // Coming back to the window (or back online) is the moment people
+    // expect fresh mail.
+    let lastWakeSync = 0;
+    const wakeSync = (force = false) => {
       const now = Date.now();
-      if (now - lastFocusSync < 15_000) return;
-      lastFocusSync = now;
+      if (!force && now - lastWakeSync < 15_000) return;
+      lastWakeSync = now;
       void get().sync();
+    };
+    window.addEventListener("focus", () => wakeSync());
+    window.addEventListener("online", () => wakeSync(true));
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") wakeSync();
     });
     try {
       await get().loadAccounts();
