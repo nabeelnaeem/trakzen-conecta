@@ -9,6 +9,9 @@ import { LabelChip } from "./LabelChip";
 import { useMailShortcuts } from "./useShortcuts";
 import { LabelTree } from "./LabelTree";
 import { Spinner } from "../../lib/Spinner";
+import { settings } from "../../lib/ipc";
+import { navigateTo } from "../../lib/navigate";
+import { onActiveTab } from "../../lib/activeTab";
 import type { Category, Folder } from "../../lib/types";
 import { Archive, ChevronDown, ChevronRight, Clock, FileText, Inbox, Mails, PenLine, RefreshCw, Search, Send, ShieldAlert, Star, Tag, Trash2, type LucideIcon } from "lucide-react";
 
@@ -44,22 +47,7 @@ export function MailView() {
   }, []);
 
   if (s.accounts.length === 0) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 text-center">
-        <div>
-          <h2 className="text-lg font-semibold">No mail accounts yet</h2>
-          <p className="mt-1 max-w-md text-gray-600">
-            Add your Google OAuth client ID in Settings first, then connect a Gmail account.
-            Sign-in happens in your browser; only a refresh token is kept, in the OS credential
-            store.
-          </p>
-        </div>
-        <button className="btn btn-primary" onClick={() => void s.addAccount()} disabled={s.busy}>
-          {s.busy ? "Waiting for browser…" : "Connect Gmail"}
-        </button>
-        {s.error && <ErrorBanner />}
-      </div>
-    );
+    return <NoAccounts />;
   }
 
   const sync =
@@ -259,6 +247,68 @@ export function MailView() {
       {s.filterEditor && <FilterEditor />}
       {s.shortcutsHelp && <ShortcutsHelp onClose={() => s.showShortcuts(false)} />}
       <Toasts />
+    </div>
+  );
+}
+
+function NoAccounts() {
+  const { addAccount, busy, error } = useMail();
+  // null until known, so the Gmail option doesn't flash a warning.
+  const [clientId, setClientId] = useState<string | null>(null);
+  useEffect(() => {
+    const load = () =>
+      void settings
+        .get()
+        .then((v) => setClientId(v.googleClientId.trim()))
+        .catch(() => setClientId(""));
+    load();
+    // The ID is usually pasted in Settings and then the user comes back here.
+    return onActiveTab((t) => t === "mail" && load());
+  }, []);
+  const openAccounts = () => navigateTo("settings", { tab: "accounts" });
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-6 px-6 text-center">
+      <div>
+        <h2 className="text-lg font-semibold">No mail accounts yet</h2>
+        <p className="mt-1 max-w-md text-gray-600">Connect a Gmail account, or any other provider over IMAP.</p>
+      </div>
+      <div className="grid w-full max-w-2xl gap-4 text-left sm:grid-cols-2">
+        <div className="flex flex-col gap-2 rounded-lg border border-gray-200 p-4">
+          <div className="font-medium">Gmail</div>
+          <p className="flex-1 text-sm text-gray-600">
+            Sign-in happens in your browser; only a refresh token is kept, in the OS credential store.
+          </p>
+          {clientId === "" && (
+            <p className="rounded bg-amber-50 px-2 py-1 text-xs text-amber-900">
+              This app ships no Google credentials. Add your own Google OAuth client ID (and secret) under Settings → Accounts
+              first; the README explains how to create one.
+            </p>
+          )}
+          {clientId === "" ? (
+            <button className="btn self-start" onClick={openAccounts}>
+              Add a Google client ID
+            </button>
+          ) : (
+            <button className="btn btn-primary self-start" onClick={() => void addAccount()} disabled={busy || clientId === null}>
+              {busy ? "Waiting for browser…" : "Connect Gmail"}
+            </button>
+          )}
+        </div>
+        <div className="flex flex-col gap-2 rounded-lg border border-gray-200 p-4">
+          <div className="font-medium">Other provider (IMAP)</div>
+          <p className="flex-1 text-sm text-gray-600">
+            iCloud, Fastmail, Yahoo, your own server… Use your mail server details and a password or app password.
+          </p>
+          <button className="btn self-start" onClick={openAccounts}>
+            Set up IMAP
+          </button>
+        </div>
+      </div>
+      {error && (
+        <div className="w-full max-w-2xl">
+          <ErrorBanner />
+        </div>
+      )}
     </div>
   );
 }

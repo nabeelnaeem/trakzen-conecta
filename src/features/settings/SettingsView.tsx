@@ -8,6 +8,7 @@ import { disable as autostartDisable, enable as autostartEnable, isEnabled as au
 import { errorMessage, mail, settings } from "../../lib/ipc";
 import { asSoundName, notifyPrefs, playNamed, SOUND_NAMES, SOUNDS, type SoundName } from "../../lib/notify";
 import { onZoom, setZoom, zoomLevel, zoomStep } from "../../lib/zoom";
+import { onNavigate } from "../../lib/navigate";
 import { bytes } from "../../lib/format";
 import { chat as chatIpc } from "../../lib/ipc";
 import {
@@ -65,6 +66,14 @@ export function SettingsView() {
       .then((v) => setS((cur) => cur ?? v))
       .catch((e) => setErr(errorMessage(e)));
   }, []);
+
+  useEffect(
+    () =>
+      onNavigate((target, detail) => {
+        if (target === "settings" && TABS.some((t) => t.key === detail.tab)) setTab(detail.tab as Tab);
+      }),
+    [],
+  );
 
   // Saves reach the backend one at a time, so replies arrive in order and a
   // slow earlier one can't land after a later one and flip a toggle back.
