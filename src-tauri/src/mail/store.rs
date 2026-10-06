@@ -805,7 +805,8 @@ impl MailStore {
         Ok(self.db.conn().query_row(
             "SELECT COUNT(*) FROM mail_messages
              WHERE (?1 = 0 OR account_id = ?1) AND is_read = 0 AND has_label(labels, 'INBOX')
-               AND NOT has_label(labels, 'TRASH')",
+               AND NOT has_label(labels, 'TRASH')
+               AND NOT EXISTS (SELECT 1 FROM mail_snoozes s WHERE s.message_id = mail_messages.id)",
             params![account_id],
             |r| r.get(0),
         )?)
@@ -1103,6 +1104,20 @@ mod tests {
             let q = ListQuery { folder: f, category: None, label: None };
             store.list_messages_grouped(acc.id, &q, 50, 0, true).unwrap();
         }
+    }
+
+    #[test]
+    fn unread_count_skips_snoozed_mail() {
+        let store = store();
+        let acc = store.upsert_account("gmail", "a@b.c", None).unwrap();
+        store
+            .upsert_messages(acc.id, &[msg("1", &["INBOX", "UNREAD"]), msg("2", &["INBOX", "UNREAD"])])
+            .unwrap();
+        assert_eq!(store.unread_count(acc.id).unwrap(), 2);
+        let snoozed = store.summaries_by_remote_ids(acc.id, &["2".into()]).unwrap()[0].id;
+        store.snooze(snoozed, i64::MAX).unwrap();
+        assert_eq!(store.unread_count(acc.id).unwrap(), 1);
+        assert_eq!(store.unread_count(UNIFIED_ACCOUNT).unwrap(), 1);
     }
 
     #[test]
