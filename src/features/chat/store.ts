@@ -196,6 +196,10 @@ export const useChat = create<ChatState>((set, get) => ({
         if (get().activePeerId === id) void get().selectPeer(mergedInto);
         reloadPeersSoon();
       }),
+      chat.onReload(({ peerIds }) => {
+        const id = get().activePeerId;
+        if (id !== null && peerIds.includes(id)) void loadConversation(id).catch(() => undefined);
+      }),
       chat.onMessage((m) => {
         const { activePeerId, messages, peers } = get();
         const viewing = m.peerId === activePeerId && isViewing();

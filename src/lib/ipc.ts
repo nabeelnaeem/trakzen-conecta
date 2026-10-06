@@ -165,6 +165,9 @@ export const chat = {
   onPeer: (cb: (p: Peer) => void) => listen<Peer>("chat://peer", (e) => cb(e.payload)),
   onPeerRemoved: (cb: (r: PeerRemovedEvent) => void) =>
     listen<PeerRemovedEvent>("chat://peer-removed", (e) => cb(e.payload)),
+  /** Many messages in these conversations changed at once. */
+  onReload: (cb: (r: { peerIds: number[] }) => void) =>
+    listen<{ peerIds: number[] }>("chat://reload", (e) => cb(e.payload)),
   onTransfer: (cb: (t: TransferProgress) => void) =>
     listen<TransferProgress>("chat://transfer", (e) => cb(e.payload)),
   onStatus: (cb: (s: ChatStatus) => void) =>
