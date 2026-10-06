@@ -891,7 +891,15 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
             lastFrom = from;
             lastAt = m.createdAt;
             return (
-              <div key={m.msgId} data-msg={m.msgId} className={`rounded-lg transition-colors duration-700 ${flash === m.msgId ? "bg-amber-50" : ""}`}>
+              <div
+                key={m.msgId}
+                data-msg={m.msgId}
+                className={`rounded-lg transition-colors duration-700 ${flash === m.msgId ? "bg-amber-50" : ""} ${results ? "cursor-pointer hover:bg-gray-50" : ""}`}
+                title={results ? "Show in chat" : undefined}
+                onClick={(e) => {
+                  if (results && !(e.target as HTMLElement).closest("button, a, img, .md-copy")) jump(m);
+                }}
+              >
                 {showDay && (
                   <div className="my-3 flex items-center gap-3 text-[11px] text-gray-400">
                     <span className="h-px flex-1 bg-gray-200" />
