@@ -47,3 +47,21 @@ export function displayPath(path: string): string {
   const space = parts[0] === "home" ? "My files" : parts[0] === "shared" ? "Shared" : parts[0];
   return [space, ...parts.slice(1)].join(" › ");
 }
+
+/** The backend's message for a token the server no longer accepts. */
+export const isAuthError = (e: unknown) => errorMessage(e).startsWith("authentication failed");
+/** What `files.connect` / `files.upload` fail with after `files.abort`. */
+export const isCancelled = (e: unknown) => errorMessage(e) === "cancelled";
+
+let lastCheck = 0;
+/** Checks the connection now and whenever the window regains focus, at most once a minute. */
+export function watchFilesStatus() {
+  const check = () => {
+    if (Date.now() - lastCheck < 60_000) return;
+    lastCheck = Date.now();
+    void useFiles.getState().refresh(true);
+  };
+  check();
+  window.addEventListener("focus", check);
+  return () => window.removeEventListener("focus", check);
+}

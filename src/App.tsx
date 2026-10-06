@@ -13,7 +13,7 @@ import { onNavigate } from "./lib/navigate";
 import { setActiveTab } from "./lib/activeTab";
 import { ConfirmHost } from "./lib/confirm";
 import { SaveToFilesHost } from "./features/files/SaveToFiles";
-import { useFiles } from "./features/files/store";
+import { watchFilesStatus } from "./features/files/store";
 
 type Tab = "mail" | "chat" | "settings";
 
@@ -30,7 +30,7 @@ export default function App() {
   }, [tab]);
   useEffect(() => onNavigate((t) => setTab(t)), []);
   // Save-to-Files buttons only show once connected; the check runs in the background.
-  useEffect(() => void useFiles.getState().refresh(true), []);
+  useEffect(() => watchFilesStatus(), []);
 
   // Deep links and notification clicks arrive here from the backend.
   useEffect(() => {
