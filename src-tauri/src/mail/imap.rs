@@ -18,13 +18,36 @@ use super::store::MailStore;
 use super::types::*;
 use super::{MailProvider, SyncObserver};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SmtpSecurity {
+    /// TLS from the first byte (usually port 465).
+    Tls,
+    /// Plain connection upgraded with STARTTLS (usually port 587).
+    Starttls,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImapConfig {
     pub host: String,
     pub port: u16,
     pub smtp_host: String,
     pub smtp_port: u16,
+    /// Accounts added before this was configurable have none stored and
+    /// keep the old port-based choice.
+    #[serde(default)]
+    pub smtp_security: Option<SmtpSecurity>,
     pub username: String,
+}
+
+impl ImapConfig {
+    pub fn smtp_implicit_tls(&self) -> bool {
+        match self.smtp_security {
+            Some(SmtpSecurity::Tls) => true,
+            Some(SmtpSecurity::Starttls) => false,
+            None => self.smtp_port == 465,
+        }
+    }
 }
 
 fn cfg_key(email: &str) -> String {
@@ -57,6 +80,12 @@ impl ImapProvider {
         secrets::set(&pass_key(&cfg.username), password)?;
         settings::set(&self.db, &cfg_key(&cfg.username), &serde_json::to_string(&cfg)?)?;
         store.upsert_account(ProviderKind::Imap.as_str(), &cfg.username, None)
+    }
+
+    /// Logs in once so a wrong host or password is reported while the
+    /// user is still looking at the form, not by the first sync.
+    pub fn check_login(cfg: &ImapConfig, password: &str) -> Result<()> {
+        with_session(cfg, password, |_| Ok(()))
     }
 
     fn config(&self, account: &Account) -> Result<(ImapConfig, String)> {
@@ -310,7 +339,7 @@ impl MailProvider for ImapProvider {
             use lettre::{SmtpTransport, Transport};
             let envelope = envelope_from_raw(&raw, &cfg.username)?;
             let creds = Credentials::new(cfg.username.clone(), pass);
-            let mailer = if cfg.smtp_port == 465 {
+            let mailer = if cfg.smtp_implicit_tls() {
                 SmtpTransport::relay(&cfg.smtp_host)
             } else {
                 SmtpTransport::starttls_relay(&cfg.smtp_host)
@@ -489,4 +518,36 @@ fn walk_parts(p: &mailparse::ParsedMail, path: &str, out: &mut RemoteBody) {
 
 fn strip_angle_brackets(s: &str) -> String {
     s.trim().trim_start_matches('<').trim_end_matches('>').to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(port: u16, security: Option<SmtpSecurity>) -> ImapConfig {
+        ImapConfig {
+            host: "imap.example.com".into(),
+            port: 993,
+            smtp_host: "smtp.example.com".into(),
+            smtp_port: port,
+            smtp_security: security,
+            username: "me@example.com".into(),
+        }
+    }
+
+    #[test]
+    fn smtp_security_falls_back_to_port() {
+        assert!(cfg(465, None).smtp_implicit_tls());
+        assert!(!cfg(587, None).smtp_implicit_tls());
+        assert!(cfg(2525, Some(SmtpSecurity::Tls)).smtp_implicit_tls());
+        assert!(!cfg(465, Some(SmtpSecurity::Starttls)).smtp_implicit_tls());
+    }
+
+    #[test]
+    fn old_configs_without_security_still_parse() {
+        let raw = r#"{"host":"imap.x","port":993,"smtp_host":"smtp.x","smtp_port":465,"username":"u"}"#;
+        let c: ImapConfig = serde_json::from_str(raw).unwrap();
+        assert_eq!(c.smtp_security, None);
+        assert!(c.smtp_implicit_tls());
+    }
 }

@@ -24,7 +24,7 @@ import {
   type Mode,
 } from "../../lib/theme";
 import { getSenderLogos, getStartIn, setSenderLogos, setStartIn, type StartIn } from "../../lib/prefs";
-import type { Account, MailFilter, NewFilter, SettingsPatch, SettingsView as Settings, StorageStats } from "../../lib/types";
+import type { Account, MailFilter, NewFilter, SettingsPatch, SettingsView as Settings, SmtpSecurity, StorageStats } from "../../lib/types";
 import { useChat } from "../chat/store";
 import { useMail } from "../mail/store";
 import { Spinner } from "../../lib/Spinner";
@@ -518,10 +518,47 @@ function TemplatesEditor({ value, onCommit }: { value: string; onCommit: (v: str
 
 // -------------------------------------------------------------- Accounts
 
+const SMTP_PORTS: Record<SmtpSecurity, string> = { tls: "465", starttls: "587" };
+const EMPTY_IMAP = { host: "", username: "", password: "", port: "993", smtpHost: "", smtpPort: "465", smtpSecurity: "tls" as SmtpSecurity };
+
+const guessSmtpHost = (imapHost: string) => imapHost.trim().replace(/^imap\./i, "smtp.");
+
 function AccountsTab({ s, save }: { s: Settings; save: Save }) {
   const { accounts, addAccount, addImap, removeAccount, busy } = useMail();
   const [confirmId, setConfirmId] = useState<number | null>(null);
-  const [imap, setImap] = useState({ host: "", username: "", password: "", port: "993", smtpPort: "587" });
+  const [imap, setImap] = useState(EMPTY_IMAP);
+  // The SMTP host follows the IMAP host until the user types their own.
+  const [smtpHostEdited, setSmtpHostEdited] = useState(false);
+  const [imapError, setImapError] = useState<string | null>(null);
+  const [reauth, setReauth] = useState<{ id: number; note: string; failed: boolean } | null>(null);
+  const smtpHost = smtpHostEdited ? imap.smtpHost : guessSmtpHost(imap.host);
+  const connectImap = async () => {
+    setImapError(null);
+    try {
+      await addImap({
+        host: imap.host.trim(),
+        username: imap.username.trim(),
+        password: imap.password,
+        port: Number(imap.port) || 993,
+        smtpHost: smtpHost.trim() || imap.host.trim(),
+        smtpPort: Number(imap.smtpPort) || Number(SMTP_PORTS[imap.smtpSecurity]),
+        smtpSecurity: imap.smtpSecurity,
+      });
+      setImap(EMPTY_IMAP);
+      setSmtpHostEdited(false);
+    } catch (e) {
+      setImapError(errorMessage(e));
+    }
+  };
+  const signInAgain = async (a: Account) => {
+    setReauth({ id: a.id, note: "Waiting for browser…", failed: false });
+    try {
+      await mail.reauth(a.id);
+      setReauth({ id: a.id, note: "Signed in again.", failed: false });
+    } catch (e) {
+      setReauth({ id: a.id, note: errorMessage(e), failed: true });
+    }
+  };
   return (
     <div className="space-y-6 text-sm">
       <div>
@@ -554,28 +591,44 @@ function AccountsTab({ s, save }: { s: Settings; save: Save }) {
         </p>
         <div className="mb-4 rounded-md border border-gray-200 bg-gray-50 p-3">
           <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">IMAP (any provider)</div>
-          <div className="grid grid-cols-2 gap-2">
-            <input className="input col-span-2" placeholder="imap.example.com" value={imap.host} onChange={(e) => setImap({ ...imap, host: e.target.value })} />
-            <input className="input col-span-2" placeholder="you@example.com" value={imap.username} onChange={(e) => setImap({ ...imap, username: e.target.value })} />
-            <input className="input col-span-2" type="password" placeholder="Password or app password" value={imap.password} onChange={(e) => setImap({ ...imap, password: e.target.value })} />
-            <input className="input" placeholder="IMAP port" value={imap.port} onChange={(e) => setImap({ ...imap, port: e.target.value })} />
-            <input className="input" placeholder="SMTP port" value={imap.smtpPort} onChange={(e) => setImap({ ...imap, smtpPort: e.target.value })} />
+          <div className="grid grid-cols-3 gap-2">
+            <input className="input col-span-3" placeholder="you@example.com" value={imap.username} onChange={(e) => setImap({ ...imap, username: e.target.value })} />
+            <input className="input col-span-3" type="password" placeholder="Password or app password" value={imap.password} onChange={(e) => setImap({ ...imap, password: e.target.value })} />
+            <input className="input col-span-2" placeholder="IMAP server, e.g. imap.example.com" value={imap.host} onChange={(e) => setImap({ ...imap, host: e.target.value })} />
+            <input className="input" placeholder="IMAP port" title="IMAP port (SSL/TLS)" value={imap.port} onChange={(e) => setImap({ ...imap, port: e.target.value })} />
+            <input
+              className="input col-span-2"
+              placeholder="SMTP server, e.g. smtp.example.com"
+              value={smtpHost}
+              onChange={(e) => {
+                setSmtpHostEdited(true);
+                setImap({ ...imap, smtpHost: e.target.value });
+              }}
+            />
+            <input className="input" placeholder="SMTP port" title="SMTP port" value={imap.smtpPort} onChange={(e) => setImap({ ...imap, smtpPort: e.target.value })} />
+            <label className="col-span-3 flex items-center gap-2 text-xs text-gray-600">
+              SMTP security
+              <select
+                className="input w-auto text-xs"
+                value={imap.smtpSecurity}
+                onChange={(e) => {
+                  const smtpSecurity = e.target.value as SmtpSecurity;
+                  const usualPort = !imap.smtpPort.trim() || Object.values(SMTP_PORTS).includes(imap.smtpPort.trim());
+                  setImap({ ...imap, smtpSecurity, smtpPort: usualPort ? SMTP_PORTS[smtpSecurity] : imap.smtpPort });
+                }}
+              >
+                <option value="tls">SSL/TLS (usually 465)</option>
+                <option value="starttls">STARTTLS (usually 587)</option>
+              </select>
+            </label>
           </div>
+          {imapError && <p className="mt-2 break-all text-xs text-red-700">Could not connect: {imapError}</p>}
           <button
             className="btn mt-2 text-xs"
             disabled={busy || !imap.host.trim() || !imap.username.trim() || !imap.password}
-            onClick={() =>
-              void addImap({
-                host: imap.host.trim(),
-                username: imap.username.trim(),
-                password: imap.password,
-                port: Number(imap.port) || 993,
-                smtpHost: imap.host.trim(),
-                smtpPort: Number(imap.smtpPort) || 587,
-              }).then(() => setImap({ host: "", username: "", password: "", port: "993", smtpPort: "587" }))
-            }
+            onClick={() => void connectImap()}
           >
-            Connect IMAP
+            {busy ? "Connecting…" : "Connect IMAP"}
           </button>
         </div>
         {accounts.length === 0 && <div className="text-gray-500">No accounts yet.</div>}
@@ -587,7 +640,7 @@ function AccountsTab({ s, save }: { s: Settings; save: Save }) {
                 <span className="rounded bg-gray-100 px-1.5 text-[10px] uppercase text-gray-600">{a.provider}</span>
                 <div className="flex-1" />
                 {a.provider === "gmail" && (
-                <button className="btn text-xs" onClick={() => mail.reauth(a.id).catch(() => undefined)} title="Re-run the Google consent flow (needed once for filter management on older accounts)">
+                <button className="btn text-xs" onClick={() => void signInAgain(a)} title="Re-run the Google consent flow (needed once for filter management on older accounts)">
                   Sign in again
                 </button>
                 )}
@@ -603,6 +656,9 @@ function AccountsTab({ s, save }: { s: Settings; save: Save }) {
                   </button>
                 )}
               </div>
+              {reauth?.id === a.id && (
+                <p className={`mt-1 break-all text-xs ${reauth.failed ? "text-red-700" : "text-gray-500"}`}>{reauth.note}</p>
+              )}
               <div className="mt-2">
                 <AccountSignature account={a} value={s.accountSignatures[a.id]} save={save} />
               </div>

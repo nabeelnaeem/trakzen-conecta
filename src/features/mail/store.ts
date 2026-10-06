@@ -7,6 +7,7 @@ import type {
   Category,
   ComposeDraft,
   Folder,
+  ImapLogin,
   Label,
   ListQuery,
   MessageDetail,
@@ -128,7 +129,8 @@ interface MailState {
   expand: (id: number, on?: boolean) => Promise<void>;
   sync: () => Promise<void>;
   addAccount: () => Promise<void>;
-  addImap: (login: { host: string; username: string; password: string; port?: number; smtpHost?: string; smtpPort?: number }) => Promise<void>;
+  /** Throws on failure so the settings form can show why. */
+  addImap: (login: ImapLogin) => Promise<void>;
   removeAccount: (id: number) => Promise<void>;
   toggleStar: (m: MessageSummary) => Promise<void>;
   // Thread-level actions on the open thread (or a specific row).
@@ -782,13 +784,11 @@ export const useMail = create<MailState>((set, get) => ({
   },
 
   addImap: async (login) => {
-    set({ busy: true, error: null });
+    set({ busy: true });
     try {
       const account = await mail.addImap(login);
       set({ activeAccountId: account.id });
-      await get().loadAccounts();
-    } catch (e) {
-      set({ error: errorMessage(e) });
+      await get().loadAccounts().catch((e: unknown) => set({ error: errorMessage(e) }));
     } finally {
       set({ busy: false });
     }

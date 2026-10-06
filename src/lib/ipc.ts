@@ -13,6 +13,7 @@ import type {
   FetchResult,
   FlagChange,
   Identity,
+  ImapLogin,
   Label,
   ListQuery,
   MailFilter,
@@ -47,7 +48,7 @@ export const settings = {
 export const mail = {
   listAccounts: () => invoke<Account[]>("mail_list_accounts"),
   addAccount: (provider: string) => invoke<Account>("mail_add_account", { provider }),
-  addImap: (login: { host: string; port?: number; smtpHost?: string; smtpPort?: number; username: string; password: string }) =>
+  addImap: (login: ImapLogin) =>
     invoke<Account>("mail_add_imap", { login }),
   removeAccount: (accountId: number) => invoke<void>("mail_remove_account", { accountId }),
   sync: (accountId: number) => invoke<void>("mail_sync", { accountId }),
