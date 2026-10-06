@@ -1000,6 +1000,21 @@ pub async fn mail_send(
     Ok(())
 }
 
+/// Sizes of files about to be attached; None for anything that is not a
+/// readable regular file (folders dropped onto the composer, say).
+#[tauri::command]
+pub async fn mail_file_sizes(paths: Vec<String>) -> Vec<Option<u64>> {
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        let size = match tokio::fs::metadata(&p).await {
+            Ok(m) if m.is_file() => Some(m.len()),
+            _ => None,
+        };
+        out.push(size);
+    }
+    out
+}
+
 #[tauri::command]
 pub async fn mail_save_draft(state: State<'_, AppState>, message: OutgoingMessage) -> Result<String> {
     let account = state.mail.get_account(message.account_id)?;

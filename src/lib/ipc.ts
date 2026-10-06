@@ -105,6 +105,7 @@ export const mail = {
   send: (message: OutgoingMessage, draftMessageId: number | null = null) =>
     invoke<void>("mail_send", { message, draftMessageId }),
   saveDraft: (message: OutgoingMessage) => invoke<string>("mail_save_draft", { message }),
+  fileSizes: (paths: string[]) => invoke<(number | null)[]>("mail_file_sizes", { paths }),
   discardDraft: (accountId: number, draftId: string, messageId: number | null = null) =>
     invoke<void>("mail_discard_draft", { accountId, draftId, messageId }),
   openDraft: (messageId: number) => invoke<DraftContent>("mail_open_draft", { messageId }),
