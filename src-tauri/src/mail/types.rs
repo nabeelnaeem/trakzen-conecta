@@ -294,6 +294,16 @@ pub struct FlagChange {
     pub starred: Option<bool>,
 }
 
+impl FlagChange {
+    /// The change that puts back what `before` had for the flags this one touches.
+    pub fn undo(&self, before: &MessageSummary) -> FlagChange {
+        FlagChange {
+            read: self.read.map(|_| before.is_read),
+            starred: self.starred.map(|_| before.is_starred),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewMailInfo {

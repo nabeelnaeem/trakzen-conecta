@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -15,8 +15,58 @@ use super::types::*;
 
 pub const EVENT_SYNC: &str = "mail://sync";
 
+static POLL_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Restarts the mail poll loop's wait, e.g. after the interval changed.
+pub fn wake_poller() {
+    POLL_WAKE.notify_one();
+}
+
+/// Resolves when [`wake_poller`] is called.
+pub async fn poller_woken() {
+    POLL_WAKE.notified().await;
+}
+
+/// Accounts with a sync in flight, each with whether another pass was
+/// asked for meanwhile. A request that arrives mid-sync may be for changes
+/// the running pass has already read past (a just-sent message, a filter
+/// applied to existing mail), so it must not simply be dropped.
 #[derive(Default)]
-pub struct SyncGuard(Mutex<HashSet<i64>>);
+pub struct SyncGuard(Mutex<HashMap<i64, bool>>);
+
+impl SyncGuard {
+    /// True if the caller should start syncing; otherwise a rerun is queued
+    /// for the sync already running.
+    fn begin(&self, account_id: i64) -> bool {
+        let mut running = self.0.lock().unwrap();
+        match running.get_mut(&account_id) {
+            Some(rerun) => {
+                *rerun = true;
+                false
+            }
+            None => {
+                running.insert(account_id, false);
+                true
+            }
+        }
+    }
+
+    /// True if another pass was requested; the caller keeps the slot and
+    /// syncs again. Otherwise the account is released.
+    fn finish(&self, account_id: i64) -> bool {
+        let mut running = self.0.lock().unwrap();
+        match running.get_mut(&account_id) {
+            Some(rerun) if *rerun => {
+                *rerun = false;
+                true
+            }
+            _ => {
+                running.remove(&account_id);
+                false
+            }
+        }
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct PageState {
@@ -113,25 +163,26 @@ pub async fn mail_sync(app: AppHandle, account_id: i64) -> Result<()> {
 pub fn spawn_sync(app: AppHandle, account_id: i64) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        {
-            let mut running = state.sync_guard.0.lock().unwrap();
-            if !running.insert(account_id) {
-                return;
+        if !state.sync_guard.begin(account_id) {
+            return;
+        }
+        loop {
+            let result = run_sync(&app, &state, account_id).await;
+            let ev = match result {
+                Ok(()) => SyncEvent::Finished { account_id },
+                Err(e) => {
+                    tracing::error!(account_id, error = %e, "sync failed");
+                    SyncEvent::Failed {
+                        account_id,
+                        error: e.to_string(),
+                    }
+                }
+            };
+            let _ = app.emit(EVENT_SYNC, ev);
+            if !state.sync_guard.finish(account_id) {
+                break;
             }
         }
-        let result = run_sync(&app, &state, account_id).await;
-        state.sync_guard.0.lock().unwrap().remove(&account_id);
-        let ev = match result {
-            Ok(()) => SyncEvent::Finished { account_id },
-            Err(e) => {
-                tracing::error!(account_id, error = %e, "sync failed");
-                SyncEvent::Failed {
-                    account_id,
-                    error: e.to_string(),
-                }
-            }
-        };
-        let _ = app.emit(EVENT_SYNC, ev);
     });
 }
 
@@ -356,6 +407,9 @@ pub async fn mail_update_filter(
     let provider = state.providers.provider_for(&account.provider)?;
     let created = provider.create_filter(&account, &filter).await?;
     provider.delete_filter(&account, &filter_id).await?;
+    if filter.apply_to_existing {
+        spawn_sync(state.app.clone(), account_id);
+    }
     Ok(created)
 }
 
@@ -698,9 +752,21 @@ async fn load_message(state: &AppState, message_id: i64) -> Result<MessageDetail
         let remote_id = detail.summary.remote_id.clone();
         let provider_bg = provider.clone();
         let account_bg = account.clone();
+        let store = state.mail.clone();
         tauri::async_runtime::spawn(async move {
-            if let Err(e) = provider_bg.set_flags(&account_bg, &remote_id, flags).await {
+            let mut result = provider_bg.set_flags(&account_bg, &remote_id, flags).await;
+            if result.is_err() {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                result = provider_bg.set_flags(&account_bg, &remote_id, flags).await;
+            }
+            // Incremental sync only sees server-side changes, so a local
+            // "read" the server never got would stick for good.
+            if let Err(e) = result {
                 tracing::warn!(%e, "mark read failed");
+                let unread = FlagChange { read: Some(false), starred: None };
+                if let Err(e) = store.apply_flags(message_id, unread) {
+                    tracing::warn!(%e, "could not restore unread flag");
+                }
             }
         });
     }
@@ -798,9 +864,14 @@ pub async fn mail_set_flags(
     let account = state.mail.get_account(detail.summary.account_id)?;
     let provider = state.providers.provider_for(&account.provider)?;
     state.mail.apply_flags(message_id, flags)?;
-    provider
+    if let Err(e) = provider
         .set_flags(&account, &detail.summary.remote_id, flags)
         .await
+    {
+        state.mail.apply_flags(message_id, flags.undo(&detail.summary))?;
+        return Err(e);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -872,8 +943,14 @@ async fn resolve_attachments(
     Ok(resolved)
 }
 
+/// `draft_message_id` is the local row of the draft being sent, dropped
+/// right away so the list does not show it until the next sync.
 #[tauri::command]
-pub async fn mail_send(state: State<'_, AppState>, mut message: OutgoingMessage) -> Result<()> {
+pub async fn mail_send(
+    state: State<'_, AppState>,
+    mut message: OutgoingMessage,
+    draft_message_id: Option<i64>,
+) -> Result<()> {
     if message.to.iter().all(|t| t.trim().is_empty()) {
         return Err(AppError::Other("add at least one recipient".into()));
     }
@@ -901,6 +978,9 @@ pub async fn mail_send(state: State<'_, AppState>, mut message: OutgoingMessage)
             tracing::warn!(%e, "could not delete draft after send");
         }
     }
+    if let Some(id) = draft_message_id {
+        state.mail.delete_draft_row(id)?;
+    }
     // Pull the sent copy into the local store so it shows up under Sent.
     spawn_sync(state.app.clone(), account.id);
     Ok(())
@@ -918,10 +998,18 @@ pub async fn mail_save_draft(state: State<'_, AppState>, message: OutgoingMessag
 }
 
 #[tauri::command]
-pub async fn mail_discard_draft(state: State<'_, AppState>, account_id: i64, draft_id: String) -> Result<()> {
+pub async fn mail_discard_draft(
+    state: State<'_, AppState>,
+    account_id: i64,
+    draft_id: String,
+    message_id: Option<i64>,
+) -> Result<()> {
     let account = state.mail.get_account(account_id)?;
     let provider = state.providers.provider_for(&account.provider)?;
     provider.delete_draft(&account, &draft_id).await?;
+    if let Some(id) = message_id {
+        state.mail.delete_draft_row(id)?;
+    }
     spawn_sync(state.app.clone(), account_id);
     Ok(())
 }
@@ -1054,7 +1142,7 @@ pub async fn mail_rsvp(state: State<'_, AppState>, message_id: i64, accept: bool
         }],
         draft_id: None,
     };
-    mail_send(state, message).await
+    mail_send(state, message, None).await
 }
 
 pub async fn flush_outbox(app: &AppHandle) {
@@ -1066,11 +1154,41 @@ pub async fn flush_outbox(app: &AppHandle) {
         match serde_json::from_str::<OutgoingMessage>(&payload) {
             Ok(message) => {
                 let state = app.state::<AppState>();
-                if let Err(e) = mail_send(state, message).await {
+                if let Err(e) = mail_send(state, message, None).await {
                     tracing::warn!(%e, "scheduled send failed");
                 }
             }
             Err(e) => tracing::warn!(%e, "bad scheduled payload"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_requested_mid_run_runs_once_more() {
+        let guard = SyncGuard::default();
+        assert!(guard.begin(1));
+        // Requests while running collapse into a single rerun.
+        assert!(!guard.begin(1));
+        assert!(!guard.begin(1));
+        assert!(guard.finish(1));
+        assert!(!guard.finish(1));
+        // Released: the next request starts a fresh sync.
+        assert!(guard.begin(1));
+        assert!(!guard.finish(1));
+    }
+
+    #[test]
+    fn accounts_are_guarded_independently() {
+        let guard = SyncGuard::default();
+        assert!(guard.begin(1));
+        assert!(guard.begin(2));
+        assert!(!guard.begin(2));
+        assert!(!guard.finish(1));
+        assert!(guard.finish(2));
+        assert!(!guard.finish(2));
     }
 }

@@ -109,8 +109,12 @@ async fn settings_update(
         }
     }
     if let Some(v) = patch.mail_poll_seconds {
-        // Picked up by the poll loop on its next tick; 0 pauses it.
+        // 0 pauses the poll loop.
+        let before = settings::poll_seconds(&state.db).ok();
         settings::set(&state.db, settings::MAIL_POLL_SECONDS, &v.to_string())?;
+        if before != Some(v) {
+            mail::commands::wake_poller();
+        }
     }
     let flag = |b: bool| if b { "true" } else { "false" };
     if let Some(v) = patch.close_to_tray {
@@ -342,7 +346,11 @@ pub fn run() {
                         settings::poll_seconds(&state.db).unwrap_or(settings::DEFAULT_MAIL_POLL_SECONDS)
                     };
                     let wait = if secs == 0 { 30 } else { secs.max(15) };
-                    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(wait)) => {}
+                        // Interval changed: start over with the new one.
+                        _ = mail::commands::poller_woken() => continue,
+                    }
                     if secs == 0 {
                         continue;
                     }

@@ -331,6 +331,16 @@ impl MailStore {
         Ok(())
     }
 
+    /// Drops a cached draft once it is sent or discarded. Only draft rows:
+    /// a stale id must never take a real message with it.
+    pub fn delete_draft_row(&self, id: i64) -> Result<()> {
+        self.db.conn().execute(
+            "DELETE FROM mail_messages WHERE id = ?1 AND has_label(labels, 'DRAFT')",
+            params![id],
+        )?;
+        Ok(())
+    }
+
     pub fn clear_messages(&self, account_id: i64) -> Result<()> {
         self.db.conn().execute(
             "DELETE FROM mail_messages WHERE account_id = ?1",
@@ -691,7 +701,12 @@ impl MailStore {
     }
 
     /// User labels plus the category labels, each with local counts.
+    /// For the unified view only the categories, summed over accounts: user
+    /// label ids are per account, so one id can mean different labels.
     pub fn list_labels(&self, account_id: i64) -> Result<Vec<Label>> {
+        if account_id == super::UNIFIED_ACCOUNT {
+            return self.list_unified_categories();
+        }
         let conn = self.db.conn();
         let mut stmt = conn.prepare_cached(
             "SELECT l.id, l.remote_id, l.name, l.kind, l.bg_color, l.fg_color,
@@ -705,6 +720,34 @@ impl MailStore {
              ORDER BY l.kind DESC, l.name COLLATE NOCASE",
         )?;
         let rows = stmt.query_map(params![account_id], |r| {
+            Ok(Label {
+                id: r.get(0)?,
+                remote_id: r.get(1)?,
+                name: r.get(2)?,
+                kind: r.get(3)?,
+                bg_color: r.get(4)?,
+                fg_color: r.get(5)?,
+                unread: r.get(6)?,
+                total: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn list_unified_categories(&self) -> Result<Vec<Label>> {
+        let conn = self.db.conn();
+        let mut stmt = conn.prepare_cached(
+            "SELECT MIN(l.id), l.remote_id, MIN(l.name), MIN(l.kind), MIN(l.bg_color), MIN(l.fg_color),
+                SUM((SELECT COUNT(*) FROM mail_messages m WHERE m.account_id = l.account_id
+                    AND m.is_read = 0 AND has_label(m.labels, l.remote_id) AND NOT has_label(m.labels, 'TRASH'))),
+                SUM((SELECT COUNT(*) FROM mail_messages m WHERE m.account_id = l.account_id
+                    AND has_label(m.labels, l.remote_id) AND NOT has_label(m.labels, 'TRASH')))
+             FROM mail_labels l
+             WHERE l.visible = 1 AND l.remote_id LIKE 'CATEGORY_%'
+             GROUP BY l.remote_id
+             ORDER BY MIN(l.name) COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |r| {
             Ok(Label {
                 id: r.get(0)?,
                 remote_id: r.get(1)?,
@@ -772,7 +815,8 @@ impl MailStore {
         Ok(self.db.conn().query_row(
             "SELECT COUNT(*) FROM mail_messages
              WHERE (?1 = 0 OR account_id = ?1) AND is_read = 0 AND has_label(labels, 'INBOX')
-               AND NOT has_label(labels, 'TRASH')",
+               AND NOT has_label(labels, 'TRASH')
+               AND NOT EXISTS (SELECT 1 FROM mail_snoozes s WHERE s.message_id = mail_messages.id)",
             params![account_id],
             |r| r.get(0),
         )?)
@@ -988,6 +1032,7 @@ pub fn register_sql_functions(conn: &rusqlite::Connection) -> rusqlite::Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mail::UNIFIED_ACCOUNT;
 
     fn store() -> MailStore {
         let dir = std::env::temp_dir().join(format!("tc-test-{}", uuid::Uuid::new_v4()));
@@ -1069,6 +1114,64 @@ mod tests {
             let q = ListQuery { folder: f, category: None, label: None };
             store.list_messages_grouped(acc.id, &q, 50, 0, true).unwrap();
         }
+    }
+
+    #[test]
+    fn unread_count_skips_snoozed_mail() {
+        let store = store();
+        let acc = store.upsert_account("gmail", "a@b.c", None).unwrap();
+        store
+            .upsert_messages(acc.id, &[msg("1", &["INBOX", "UNREAD"]), msg("2", &["INBOX", "UNREAD"])])
+            .unwrap();
+        assert_eq!(store.unread_count(acc.id).unwrap(), 2);
+        let snoozed = store.summaries_by_remote_ids(acc.id, &["2".into()]).unwrap()[0].id;
+        store.snooze(snoozed, i64::MAX).unwrap();
+        assert_eq!(store.unread_count(acc.id).unwrap(), 1);
+        assert_eq!(store.unread_count(UNIFIED_ACCOUNT).unwrap(), 1);
+    }
+
+    #[test]
+    fn only_draft_rows_are_deleted_as_drafts() {
+        let store = store();
+        let acc = store.upsert_account("gmail", "a@b.c", None).unwrap();
+        store
+            .upsert_messages(acc.id, &[msg("1", &["DRAFT"]), msg("2", &["INBOX"])])
+            .unwrap();
+        let ids: Vec<i64> = store
+            .summaries_by_remote_ids(acc.id, &["1".into(), "2".into()])
+            .unwrap()
+            .iter()
+            .map(|m| m.id)
+            .collect();
+        for id in &ids {
+            store.delete_draft_row(*id).unwrap();
+        }
+        assert_eq!(store.known_remote_ids(acc.id).unwrap(), vec!["2".to_string()]);
+    }
+
+    #[test]
+    fn unified_labels_sum_categories_and_skip_user_labels() {
+        let store = store();
+        let label = |remote_id: &str, kind: &str| RemoteLabel {
+            remote_id: remote_id.into(),
+            name: remote_id.into(),
+            kind: kind.into(),
+            visible: true,
+            ..Default::default()
+        };
+        for (email, user) in [("a@b.c", "Label_1"), ("d@e.f", "Label_2")] {
+            let acc = store.upsert_account("gmail", email, None).unwrap();
+            store
+                .replace_labels(acc.id, &[label("CATEGORY_SOCIAL", "system"), label(user, "user")])
+                .unwrap();
+            store
+                .upsert_messages(acc.id, &[msg("1", &["INBOX", "UNREAD", "CATEGORY_SOCIAL"])])
+                .unwrap();
+        }
+        let labels = store.list_labels(UNIFIED_ACCOUNT).unwrap();
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].remote_id, "CATEGORY_SOCIAL");
+        assert_eq!((labels[0].unread, labels[0].total), (2, 2));
     }
 }
 
