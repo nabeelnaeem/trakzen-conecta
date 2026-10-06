@@ -29,6 +29,8 @@ interface ChatState {
   /** There is history before the first loaded message. */
   hasOlder: boolean;
   loadingOlder: boolean;
+  /** Pinned messages of the open conversation, loaded or not. */
+  pinned: ChatMessage[];
   /** Live transfers by transfer id; a group file has one per member. */
   transfers: Record<string, TransferProgress>;
   nearby: Nearby[];
@@ -49,6 +51,10 @@ interface ChatState {
   selectPeer: (id: number | null) => Promise<void>;
   /** Puts the page before the first loaded message in front; resolves to how many were added. */
   loadOlder: (limit?: number) => Promise<number>;
+  /** Loads older pages until `m` is in `messages`; false if it cannot be reached. */
+  jumpTo: (m: ChatMessage) => Promise<boolean>;
+  /** Puts a changed message of the open conversation in place. */
+  applyMessage: (m: ChatMessage) => void;
   addPeer: (name: string, host: string, port?: number) => Promise<void>;
   removePeer: (id: number) => Promise<void>;
   sendText: (body: string, replyTo?: string | null) => Promise<void>;
@@ -165,6 +171,16 @@ function upsertMessage(list: ChatMessage[], m: ChatMessage, hasOlder: boolean): 
   return next;
 }
 
+function withPinned(list: ChatMessage[], m: ChatMessage): ChatMessage[] {
+  const rest = list.filter((x) => x.msgId !== m.msgId);
+  if (!m.pinned) return rest.length === list.length ? list : rest;
+  return [...rest, m].sort((a, b) => a.id - b.id);
+}
+
+function applied(st: ChatState, m: ChatMessage): Partial<ChatState> {
+  return { messages: upsertMessage(st.messages, m, st.hasOlder), pinned: withPinned(st.pinned, m) };
+}
+
 function prependMessages(list: ChatMessage[], page: ChatMessage[]): ChatMessage[] {
   const have = new Set(list.map((m) => m.msgId));
   return [...page.filter((m) => !have.has(m.msgId)), ...list].sort((a, b) => a.id - b.id);
@@ -198,6 +214,7 @@ const FIRST_PAGE = 200;
 const OLDER_PAGE = 100;
 /** The most `chat_list_messages` returns at once. */
 const MAX_PAGE = 500;
+const JUMP_PAGES = 10;
 
 /** Every message from row `from` on, newest pages first. */
 async function listSince(peerId: number, from: number): Promise<ChatMessage[]> {
@@ -217,7 +234,10 @@ async function loadConversation(id: number, from: number | null = null): Promise
   const load: Load = { peerId: id, seen: new Map(), deleted: new Set(), cleared: false };
   loads.add(load);
   try {
-    const snapshot = from === null ? await chat.listMessages(id, FIRST_PAGE) : await listSince(id, from);
+    const [snapshot, pinnedNow] = await Promise.all([
+      from === null ? chat.listMessages(id, FIRST_PAGE) : listSince(id, from),
+      chat.listPinned(id),
+    ]);
     const st = useChat.getState();
     if (st.activePeerId !== id) return false;
     const hasOlder = !load.cleared && (from === null ? snapshot.length === FIRST_PAGE : st.hasOlder);
@@ -233,7 +253,9 @@ async function loadConversation(id: number, from: number | null = null): Promise
       if (s) merged.set(m.msgId, fresher(m, s));
       else if (m.id >= floor) merged.set(m.msgId, m);
     }
-    useChat.setState({ messages: [...merged.values()].sort((a, b) => a.id - b.id), hasOlder });
+    let pinned = load.cleared ? [] : pinnedNow.filter((m) => !load.deleted.has(m.msgId));
+    for (const m of load.seen.values()) pinned = withPinned(pinned, m);
+    useChat.setState({ messages: [...merged.values()].sort((a, b) => a.id - b.id), hasOlder, pinned });
     return true;
   } finally {
     loads.delete(load);
@@ -274,6 +296,7 @@ export const useChat = create<ChatState>((set, get) => ({
   messages: [],
   hasOlder: false,
   loadingOlder: false,
+  pinned: [],
   transfers: {},
   nearby: [],
   typing: {},
@@ -325,11 +348,11 @@ export const useChat = create<ChatState>((set, get) => ({
         if (id !== null && peerIds.includes(id)) void reloadConversation(id).catch(() => undefined);
       }),
       chat.onMessage((m) => {
-        const { activePeerId, messages, peers } = get();
+        const { activePeerId, peers } = get();
         const viewing = m.peerId === activePeerId && isViewing();
         for (const l of loads) if (l.peerId === m.peerId) l.seen.set(m.msgId, m);
         if (m.peerId === activePeerId) {
-          set({ messages: upsertMessage(messages, m, get().hasOlder) });
+          set(applied(get(), m));
           if (viewing && m.direction === "in" && m.status === "unread") void chat.markRead(m.peerId);
         }
         if (m.direction === "in" && (m.status === "unread" || m.status === "offered") && !viewing) {
@@ -368,8 +391,11 @@ export const useChat = create<ChatState>((set, get) => ({
         if (d.peerId === get().activePeerId) {
           set(
             d.msgIds.length === 0
-              ? { messages: [], hasOlder: false }
-              : { messages: get().messages.filter((m) => !d.msgIds.includes(m.msgId)) },
+              ? { messages: [], hasOlder: false, pinned: [] }
+              : {
+                  messages: get().messages.filter((m) => !d.msgIds.includes(m.msgId)),
+                  pinned: get().pinned.filter((m) => !d.msgIds.includes(m.msgId)),
+                },
           );
         }
         reloadPeersSoon();
@@ -418,7 +444,7 @@ export const useChat = create<ChatState>((set, get) => ({
   },
 
   selectPeer: async (id) => {
-    set({ activePeerId: id, messages: [], hasOlder: false, loadingOlder: false });
+    set({ activePeerId: id, messages: [], hasOlder: false, loadingOlder: false, pinned: [] });
     if (id === null) return;
     try {
       if (!(await loadConversation(id))) return;
@@ -463,6 +489,24 @@ export const useChat = create<ChatState>((set, get) => ({
     return done;
   },
 
+  jumpTo: async (m) => {
+    const id = get().activePeerId;
+    if (id === null || m.peerId !== id) return false;
+    for (let i = 0; ; i++) {
+      if (get().messages.some((x) => x.msgId === m.msgId)) return true;
+      if (get().activePeerId !== id || !get().hasOlder || i === JUMP_PAGES) break;
+      await get().loadOlder(MAX_PAGE);
+    }
+    if (get().activePeerId === id) {
+      set({ error: get().hasOlder ? "That message is too far back to show here." : "That message is no longer in this conversation." });
+    }
+    return false;
+  },
+
+  applyMessage: (m) => {
+    if (m.peerId === get().activePeerId) set(applied(get(), m));
+  },
+
   addPeer: async (name, host, port) => {
     try {
       const p = await chat.addPeer(name, host, port);
@@ -490,6 +534,7 @@ export const useChat = create<ChatState>((set, get) => ({
         activePeerId: get().activePeerId === id ? null : get().activePeerId,
         messages: get().activePeerId === id ? [] : get().messages,
         hasOlder: get().activePeerId === id ? false : get().hasOlder,
+        pinned: get().activePeerId === id ? [] : get().pinned,
       });
     } catch (e) {
       set({ error: errorMessage(e) });
@@ -553,7 +598,7 @@ export const useChat = create<ChatState>((set, get) => ({
   react: async (msgId, emoji) => {
     try {
       const m = await chat.react(msgId, emoji);
-      if (m) set({ messages: upsertMessage(get().messages, m, get().hasOlder) });
+      if (m) get().applyMessage(m);
     } catch (e) {
       set({ error: errorMessage(e) });
     }
@@ -562,7 +607,7 @@ export const useChat = create<ChatState>((set, get) => ({
   edit: async (msgId, body) => {
     try {
       const m = await chat.edit(msgId, body);
-      if (m) set({ messages: upsertMessage(get().messages, m, get().hasOlder) });
+      if (m) get().applyMessage(m);
       return true;
     } catch (e) {
       set({ error: errorMessage(e) });
@@ -593,7 +638,7 @@ export const useChat = create<ChatState>((set, get) => ({
   deleteMessage: async (msgId, forEveryone) => {
     try {
       await chat.deleteMessage(msgId, forEveryone);
-      set({ messages: get().messages.filter((m) => m.msgId !== msgId) });
+      set({ messages: get().messages.filter((m) => m.msgId !== msgId), pinned: get().pinned.filter((m) => m.msgId !== msgId) });
     } catch (e) {
       set({ error: errorMessage(e) });
     }
@@ -604,7 +649,7 @@ export const useChat = create<ChatState>((set, get) => ({
     if (id === null) return;
     try {
       await chat.clearChat(id);
-      set({ messages: [], hasOlder: false });
+      set({ messages: [], hasOlder: false, pinned: [] });
       void get().loadPeers();
     } catch (e) {
       set({ error: errorMessage(e) });

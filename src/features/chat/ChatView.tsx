@@ -382,7 +382,7 @@ const MAX_ROWS = 8;
 const CODE_LANGS = ["", "typescript", "javascript", "python", "rust", "go", "java", "csharp", "sql", "bash", "json", "yaml", "html", "css"];
 
 function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer: Peer; peerId: number; name: string; seed: string; host: string; online: boolean; typing: { who: string | null } | null }) {
-  const { messages, hasOlder, loadingOlder, loadOlder, transfers, sendText, sendFile, removePeer, clearChat, edit } = useChat();
+  const { messages, hasOlder, loadingOlder, loadOlder, pinned, jumpTo, transfers, sendText, sendFile, removePeer, clearChat, edit } = useChat();
   const isGroup = !!peer.isGroup;
   const left = !!peer.groupLeft;
   const [members, setMembers] = useState<Peer[] | null>(null);
@@ -414,6 +414,9 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
   const [search, setSearch] = useState<string | null>(null);
   const [results, setResults] = useState<ChatMessage[] | null>(null);
   const [searching, setSearching] = useState(false);
+  // A message to bring into view once it is loaded, then highlight briefly.
+  const [target, setTarget] = useState<string | null>(null);
+  const [flash, setFlash] = useState<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   // Where the first message sat before an older page went in above it.
   const anchor = useRef<{ msgId: string; top: number } | null>(null);
@@ -532,9 +535,37 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
     const last = messages[messages.length - 1];
     const prev = lastId.current;
     lastId.current = last?.id ?? null;
+    if (target) return;
     if (last && (prev === null || (last.id > prev && (atBottom.current || last.direction === "out")))) el.scrollTop = el.scrollHeight;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, results]);
+
+  useLayoutEffect(() => {
+    if (!target || results) return;
+    const row = rowOf(target);
+    if (!row) return;
+    setTarget(null);
+    row.scrollIntoView({ block: "center" });
+    setFlash(target);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target, messages, results]);
+
+  useEffect(() => {
+    if (!flash) return;
+    const t = window.setTimeout(() => setFlash(null), 1500);
+    return () => window.clearTimeout(t);
+  }, [flash]);
+
+  const jump = (m: ChatMessage) => {
+    setSearch(null);
+    setResults(null);
+    setTarget(m.msgId);
+    void jumpTo(m).then((ok) => {
+      if (ok) return;
+      setTarget(null);
+      if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
+    });
+  };
 
   const onScroll = () => {
     const el = scroller.current;
@@ -817,6 +848,17 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
         </div>
       )}
 
+      {pinned.length > 0 && (
+        <div className="max-h-28 overflow-y-auto border-b border-amber-200 bg-amber-50 px-4 py-1.5 text-xs text-amber-900">
+          <div className="mb-0.5 font-semibold">Pinned</div>
+          {pinned.map((m) => (
+            <button key={m.msgId} className="block w-full truncate text-left hover:underline" title="Show in chat" onClick={() => jump(m)}>
+              {m.kind === "file" ? m.fileName : m.body}
+            </button>
+          ))}
+        </div>
+      )}
+
       <div ref={scroller} className="flex-1 overflow-y-auto" onScroll={onScroll}>
         <div className="mx-auto w-full max-w-[880px] px-4 py-3">
           {results === null && loadingOlder && (
@@ -826,14 +868,6 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
           )}
           {results === null && !hasOlder && messages.length > 0 && (
             <div className="py-2 text-center text-[11px] text-gray-400">Beginning of conversation</div>
-          )}
-          {messages.filter((m) => m.pinned).length > 0 && (
-            <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-              <div className="mb-1 font-semibold">Pinned</div>
-              {messages.filter((m) => m.pinned).map((m) => (
-                <div key={m.msgId} className="truncate">{m.kind === "file" ? m.fileName : m.body}</div>
-              ))}
-            </div>
           )}
           {shown.length === 0 && (
             <div className="flex flex-col items-center justify-center gap-2 py-24 text-center text-gray-400">
@@ -857,7 +891,7 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
             lastFrom = from;
             lastAt = m.createdAt;
             return (
-              <div key={m.msgId} data-msg={m.msgId}>
+              <div key={m.msgId} data-msg={m.msgId} className={`rounded-lg transition-colors duration-700 ${flash === m.msgId ? "bg-amber-50" : ""}`}>
                 {showDay && (
                   <div className="my-3 flex items-center gap-3 text-[11px] text-gray-400">
                     <span className="h-px flex-1 bg-gray-200" />
@@ -1174,7 +1208,7 @@ function Bubble({
   onEdit: () => void;
 }) {
   const mine = m.direction === "out";
-  const { deleteMessage, react, peers } = useChat();
+  const { deleteMessage, react, applyMessage, peers } = useChat();
   const openCompose = useMail((s) => s.openCompose);
   const updateComposer = useMail((s) => s.updateComposer);
   const [menu, setMenu] = useState(false);
@@ -1256,12 +1290,7 @@ function Bubble({
             onClick={() => {
               setMenu(false);
               void chatIpc.pin(m.msgId, !m.pinned).then((next) => {
-                if (!next) return;
-                const list = useChat.getState().messages;
-                const i = list.findIndex((x) => x.msgId === next.msgId);
-                useChat.setState({
-                  messages: i === -1 ? [...list, next] : list.map((x, n) => (n === i ? next : x)),
-                });
+                if (next) applyMessage(next);
               });
             }}
           >
