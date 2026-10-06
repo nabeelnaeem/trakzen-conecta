@@ -10,6 +10,7 @@ import { isDark, onTheme, toggleDark } from "./lib/theme";
 import { Mail, MessageSquare, Moon, Settings, Sun, type LucideIcon } from "lucide-react";
 import { getLastTab, getRailOrder, getStartIn, setLastTab, setRailOrder, type RailItem } from "./lib/prefs";
 import { onNavigate } from "./lib/navigate";
+import { setActiveTab } from "./lib/activeTab";
 import { ConfirmHost } from "./lib/confirm";
 import { SaveToFilesHost } from "./features/files/SaveToFiles";
 import { useFiles } from "./features/files/store";
@@ -24,6 +25,7 @@ export default function App() {
   const [order, setOrder] = useState<RailItem[]>(getRailOrder());
   const [dragging, setDragging] = useState<RailItem | null>(null);
   useEffect(() => {
+    setActiveTab(tab);
     if (tab === "mail" || tab === "chat") setLastTab(tab);
   }, [tab]);
   useEffect(() => onNavigate((t) => setTab(t)), []);
