@@ -15,6 +15,18 @@ use super::types::*;
 
 pub const EVENT_SYNC: &str = "mail://sync";
 
+static POLL_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Restarts the mail poll loop's wait, e.g. after the interval changed.
+pub fn wake_poller() {
+    POLL_WAKE.notify_one();
+}
+
+/// Resolves when [`wake_poller`] is called.
+pub async fn poller_woken() {
+    POLL_WAKE.notified().await;
+}
+
 /// Accounts with a sync in flight, each with whether another pass was
 /// asked for meanwhile. A request that arrives mid-sync may be for changes
 /// the running pass has already read past (a just-sent message, a filter
