@@ -737,9 +737,21 @@ async fn load_message(state: &AppState, message_id: i64) -> Result<MessageDetail
         let remote_id = detail.summary.remote_id.clone();
         let provider_bg = provider.clone();
         let account_bg = account.clone();
+        let store = state.mail.clone();
         tauri::async_runtime::spawn(async move {
-            if let Err(e) = provider_bg.set_flags(&account_bg, &remote_id, flags).await {
+            let mut result = provider_bg.set_flags(&account_bg, &remote_id, flags).await;
+            if result.is_err() {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                result = provider_bg.set_flags(&account_bg, &remote_id, flags).await;
+            }
+            // Incremental sync only sees server-side changes, so a local
+            // "read" the server never got would stick for good.
+            if let Err(e) = result {
                 tracing::warn!(%e, "mark read failed");
+                let unread = FlagChange { read: Some(false), starred: None };
+                if let Err(e) = store.apply_flags(message_id, unread) {
+                    tracing::warn!(%e, "could not restore unread flag");
+                }
             }
         });
     }
@@ -837,9 +849,14 @@ pub async fn mail_set_flags(
     let account = state.mail.get_account(detail.summary.account_id)?;
     let provider = state.providers.provider_for(&account.provider)?;
     state.mail.apply_flags(message_id, flags)?;
-    provider
+    if let Err(e) = provider
         .set_flags(&account, &detail.summary.remote_id, flags)
         .await
+    {
+        state.mail.apply_flags(message_id, flags.undo(&detail.summary))?;
+        return Err(e);
+    }
+    Ok(())
 }
 
 #[tauri::command]
