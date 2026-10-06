@@ -404,17 +404,58 @@ impl ChatStore {
         Ok(out)
     }
 
-    /// Outgoing text that could not be sent because the peer was offline.
+    /// Outgoing direct text the peer has not acknowledged: queued while it
+    /// was offline, or handed to a connection that dropped before the ack.
     pub fn queued_messages(&self, peer_id: i64) -> Result<Vec<ChatMessage>> {
         let conn = self.db.conn();
         let sql = format!(
             "SELECT {MSG_COLS} FROM chat_messages
-             WHERE peer_id = ?1 AND direction = 'out' AND kind = 'text' AND status = 'queued'
+             WHERE peer_id = ?1 AND direction = 'out' AND kind = 'text' AND status IN ('queued', 'sending')
              ORDER BY id ASC"
         );
         let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![peer_id], row_to_message)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Moves a queued message to `sending`; an ack that already arrived
+    /// must not be overwritten. Returns the message if it changed.
+    pub fn mark_sending(&self, msg_id: &str) -> Result<Option<ChatMessage>> {
+        let n = self.db.conn().execute(
+            "UPDATE chat_messages SET status = 'sending' WHERE msg_id = ?1 AND status = 'queued'",
+            params![msg_id],
+        )?;
+        if n == 0 {
+            return Ok(None);
+        }
+        self.get_message(msg_id)
+    }
+
+    /// The connection to this peer dropped: direct text it never
+    /// acknowledged goes back on the queue. Returns the messages moved.
+    pub fn requeue_sending_text(&self, peer_id: i64) -> Result<Vec<ChatMessage>> {
+        let conn = self.db.conn();
+        let ids: Vec<String> = conn
+            .prepare(
+                "SELECT msg_id FROM chat_messages
+                 WHERE peer_id = ?1 AND direction = 'out' AND kind = 'text' AND status = 'sending'",
+            )?
+            .query_map(params![peer_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(conn);
+        let mut out = Vec::new();
+        for id in ids {
+            let n = self.db.conn().execute(
+                "UPDATE chat_messages SET status = 'queued' WHERE msg_id = ?1 AND status = 'sending'",
+                params![id],
+            )?;
+            if n > 0 {
+                if let Some(m) = self.get_message(&id)? {
+                    out.push(m);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Outgoing files waiting for the peer, oldest first.
@@ -901,6 +942,49 @@ mod tests {
         assert_eq!(ids, vec!["q1", "s1"]);
         assert_eq!(store.get_message("d1").unwrap().unwrap().status, "delivered");
         assert_eq!(store.get_message("r1").unwrap().unwrap().status, "interrupted");
+    }
+
+    #[test]
+    fn unacked_text_goes_back_on_the_queue() {
+        let dir = std::env::temp_dir().join(format!("tc-chat-{}", uuid::Uuid::new_v4()));
+        let store = ChatStore::new(Arc::new(Db::open(&dir).unwrap()));
+        let peer = store.add_peer("Rabiya", "10.0.0.2", 47800).unwrap();
+        let other = store.add_peer("Omar", "10.0.0.3", 47800).unwrap();
+        let text = |id: &'static str, peer_id: i64, direction, status: &'static str| NewMessage {
+            msg_id: id,
+            peer_id,
+            direction,
+            kind: MessageKind::Text,
+            body: "hi",
+            file_name: None,
+            file_path: None,
+            file_size: None,
+            status,
+            created_at: 1,
+            reply_to: None,
+            sender_id: None,
+        };
+        store.insert_message(&text("q", peer.id, Direction::Out, "queued")).unwrap();
+        store.insert_message(&text("s", peer.id, Direction::Out, "sending")).unwrap();
+        store.insert_message(&text("d", peer.id, Direction::Out, "delivered")).unwrap();
+        store.insert_message(&text("i", peer.id, Direction::In, "unread")).unwrap();
+        store.insert_message(&text("o", other.id, Direction::Out, "sending")).unwrap();
+
+        // A reconnect resends both what was queued and what was in flight.
+        let ids: Vec<String> = store.queued_messages(peer.id).unwrap().into_iter().map(|m| m.msg_id).collect();
+        assert_eq!(ids, vec!["q", "s"]);
+
+        // Marking sent never overwrites an ack that already landed.
+        assert!(store.mark_sending("d").unwrap().is_none());
+        assert_eq!(store.mark_sending("q").unwrap().unwrap().status, "sending");
+
+        // A dropped connection puts only that peer's unacked text back.
+        let moved: Vec<String> = store.requeue_sending_text(peer.id).unwrap().into_iter().map(|m| m.msg_id).collect();
+        assert_eq!(moved, vec!["q", "s"]);
+        assert_eq!(store.get_message("d").unwrap().unwrap().status, "delivered");
+        assert_eq!(store.get_message("i").unwrap().unwrap().status, "unread");
+        assert_eq!(store.get_message("o").unwrap().unwrap().status, "sending");
+        assert!(store.requeue_sending_text(peer.id).unwrap().is_empty());
     }
 
     #[test]

@@ -571,15 +571,39 @@ impl ChatEngine {
                     }
                 }
             }
-            let mut conns = engine.conns.lock().unwrap();
-            if conns.get(&row_id).map_or(false, |c| c.generation == generation) {
-                conns.remove(&row_id);
+            let current = {
+                let mut conns = engine.conns.lock().unwrap();
+                let current = conns.get(&row_id).is_some_and(|c| c.generation == generation);
+                if current {
+                    conns.remove(&row_id);
+                }
+                current
+            };
+            if current {
+                engine.requeue_unacked(row_id).await;
             }
-            drop(conns);
             engine.emit_peer(row_id);
         });
 
         tx
+    }
+
+    /// Text handed to a connection that then dropped may never have left
+    /// the machine; put it back on the queue so the UI does not claim it is
+    /// on its way. If a new connection came up meanwhile, flush it there.
+    async fn requeue_unacked(&self, row_id: i64) {
+        match self.store.requeue_sending_text(row_id) {
+            Ok(moved) => {
+                for m in &moved {
+                    self.emit_message(m);
+                }
+            }
+            Err(e) => tracing::warn!(row_id, %e, "could not requeue unacknowledged messages"),
+        }
+        let live = self.conns.lock().unwrap().get(&row_id).map(|c| c.tx.clone());
+        if let Some(tx) = live {
+            self.flush_queue(row_id, &tx).await;
+        }
     }
 
     async fn on_control(self: &Arc<Self>, row_id: i64, msg: ControlMsg, out: &mpsc::Sender<Frame>) -> Result<()> {
@@ -954,8 +978,9 @@ impl ChatEngine {
         Ok(msg)
     }
 
-    /// Sends what was written while the peer was offline: direct messages
-    /// queued for it, then group messages it has not acknowledged.
+    /// Sends what the peer has not acknowledged: direct messages queued for
+    /// it or lost with an earlier connection, then group messages. The
+    /// receiver drops (and re-acks) a msg_id it already has.
     async fn flush_queue(&self, row_id: i64, tx: &mpsc::Sender<Frame>) {
         let Ok(queued) = self.store.queued_messages(row_id) else { return };
         for m in queued {
@@ -969,7 +994,7 @@ impl ChatEngine {
             if tx.send(frame).await.is_err() {
                 return;
             }
-            if let Ok(Some(m)) = self.store.set_status(&m.msg_id, "sending") {
+            if let Ok(Some(m)) = self.store.mark_sending(&m.msg_id) {
                 self.emit_message(&m);
             }
         }
@@ -986,10 +1011,8 @@ impl ChatEngine {
             if tx.send(frame).await.is_err() {
                 return;
             }
-            if m.status == "queued" {
-                if let Ok(Some(m)) = self.store.set_status(&m.msg_id, "sending") {
-                    self.emit_message(&m);
-                }
+            if let Ok(Some(m)) = self.store.mark_sending(&m.msg_id) {
+                self.emit_message(&m);
             }
         }
     }
