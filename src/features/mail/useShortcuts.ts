@@ -24,6 +24,13 @@ export function useMailShortcuts(searchRef: React.RefObject<HTMLInputElement | n
         return;
       }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (s.shortcutsHelp) {
+        if (e.key === "Escape" || e.key === "?") {
+          e.preventDefault();
+          s.showShortcuts(false);
+        }
+        return;
+      }
       const open = s.openId;
       const latest = s.thread[s.thread.length - 1];
       const stop = () => {
@@ -109,13 +116,36 @@ export function useMailShortcuts(searchRef: React.RefObject<HTMLInputElement | n
           stop();
           s.selectAll(s.selected.length === 0);
           break;
+        case "b":
+          if (open !== null) {
+            stop();
+            s.setThreadMenu(s.threadMenu === "snooze" ? null : "snooze");
+          }
+          break;
+        case "l":
+          if (open !== null) {
+            stop();
+            s.setThreadMenu(s.threadMenu === "labels" ? null : "labels");
+          }
+          break;
+        case "?":
+          stop();
+          s.showShortcuts(true);
+          break;
         case "Escape":
-          if (s.selected.length) s.selectAll(false);
+          if (s.threadMenu) s.setThreadMenu(null);
+          else if (s.selected.length) s.selectAll(false);
           else void s.open(null);
           break;
         case "u":
           stop();
           void s.open(null);
+          break;
+        case "z":
+          if (s.undoable) {
+            stop();
+            void s.undoLast();
+          }
           break;
         default:
           return;

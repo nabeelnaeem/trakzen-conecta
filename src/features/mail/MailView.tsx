@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { useMail } from "./store";
+import { MAIL_SHORTCUTS } from "./shortcuts";
 import { MessageList } from "./MessageList";
 import { ThreadView } from "./ThreadView";
 import { Composer } from "./Composer";
@@ -8,6 +9,9 @@ import { LabelChip } from "./LabelChip";
 import { useMailShortcuts } from "./useShortcuts";
 import { LabelTree } from "./LabelTree";
 import { Spinner } from "../../lib/Spinner";
+import { settings } from "../../lib/ipc";
+import { navigateTo } from "../../lib/navigate";
+import { onActiveTab } from "../../lib/activeTab";
 import type { Category, Folder } from "../../lib/types";
 import { Archive, ChevronDown, ChevronRight, Clock, FileText, Inbox, Mails, PenLine, RefreshCw, Search, Send, ShieldAlert, Star, Tag, Trash2, type LucideIcon } from "lucide-react";
 
@@ -43,22 +47,7 @@ export function MailView() {
   }, []);
 
   if (s.accounts.length === 0) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 text-center">
-        <div>
-          <h2 className="text-lg font-semibold">No mail accounts yet</h2>
-          <p className="mt-1 max-w-md text-gray-600">
-            Add your Google OAuth client ID in Settings first, then connect a Gmail account.
-            Sign-in happens in your browser; only a refresh token is kept, in the OS credential
-            store.
-          </p>
-        </div>
-        <button className="btn btn-primary" onClick={() => void s.addAccount()} disabled={s.busy}>
-          {s.busy ? "Waiting for browser…" : "Connect Gmail"}
-        </button>
-        {s.error && <ErrorBanner />}
-      </div>
-    );
+    return <NoAccounts />;
   }
 
   const sync =
@@ -256,7 +245,99 @@ export function MailView() {
 
       {s.composer && <Composer />}
       {s.filterEditor && <FilterEditor />}
+      {s.shortcutsHelp && <ShortcutsHelp onClose={() => s.showShortcuts(false)} />}
       <Toasts />
+    </div>
+  );
+}
+
+function NoAccounts() {
+  const { addAccount, busy, error } = useMail();
+  // null until known, so the Gmail option doesn't flash a warning.
+  const [clientId, setClientId] = useState<string | null>(null);
+  useEffect(() => {
+    const load = () =>
+      void settings
+        .get()
+        .then((v) => setClientId(v.googleClientId.trim()))
+        .catch(() => setClientId(""));
+    load();
+    // The ID is usually pasted in Settings and then the user comes back here.
+    return onActiveTab((t) => t === "mail" && load());
+  }, []);
+  const openAccounts = () => navigateTo("settings", { tab: "accounts" });
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-6 px-6 text-center">
+      <div>
+        <h2 className="text-lg font-semibold">No mail accounts yet</h2>
+        <p className="mt-1 max-w-md text-gray-600">Connect a Gmail account, or any other provider over IMAP.</p>
+      </div>
+      <div className="grid w-full max-w-2xl gap-4 text-left sm:grid-cols-2">
+        <div className="flex flex-col gap-2 rounded-lg border border-gray-200 p-4">
+          <div className="font-medium">Gmail</div>
+          <p className="flex-1 text-sm text-gray-600">
+            Sign-in happens in your browser; only a refresh token is kept, in the OS credential store.
+          </p>
+          {clientId === "" && (
+            <p className="rounded bg-amber-50 px-2 py-1 text-xs text-amber-900">
+              This app ships no Google credentials. Add your own Google OAuth client ID (and secret) under Settings → Accounts
+              first; the README explains how to create one.
+            </p>
+          )}
+          {clientId === "" ? (
+            <button className="btn self-start" onClick={openAccounts}>
+              Add a Google client ID
+            </button>
+          ) : (
+            <button className="btn btn-primary self-start" onClick={() => void addAccount()} disabled={busy || clientId === null}>
+              {busy ? "Waiting for browser…" : "Connect Gmail"}
+            </button>
+          )}
+        </div>
+        <div className="flex flex-col gap-2 rounded-lg border border-gray-200 p-4">
+          <div className="font-medium">Other provider (IMAP)</div>
+          <p className="flex-1 text-sm text-gray-600">
+            iCloud, Fastmail, Yahoo, your own server… Use your mail server details and a password or app password.
+          </p>
+          <button className="btn self-start" onClick={openAccounts}>
+            Set up IMAP
+          </button>
+        </div>
+      </div>
+      {error && (
+        <div className="w-full max-w-2xl">
+          <ErrorBanner />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ShortcutsHelp({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/30 p-4" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Keyboard shortcuts"
+        className="max-h-full w-[460px] overflow-y-auto rounded-lg border border-gray-300 bg-white shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center border-b border-gray-200 px-4 py-2">
+          <span className="font-medium">Keyboard shortcuts</span>
+          <button className="ml-auto text-gray-500 hover:text-gray-900" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 px-4 py-3 text-sm">
+          {MAIL_SHORTCUTS.map(([keys, action]) => (
+            <Fragment key={keys + action}>
+              <kbd className="justify-self-start rounded border border-gray-300 bg-gray-50 px-1 font-mono text-xs">{keys}</kbd>
+              <span className="text-gray-700">{action}</span>
+            </Fragment>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -328,7 +409,7 @@ function viewName(s: ReturnType<typeof useMail.getState>): string {
 }
 
 function BulkLabelMenu() {
-  const { labels, modifyLabels, selected } = useMail();
+  const { labels, relabel, selected } = useMail();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -350,10 +431,10 @@ function BulkLabelMenu() {
             <div key={l.id} className="flex items-center gap-1 px-2 py-1 text-sm">
               <span className="h-2.5 w-2.5 rounded-sm" style={{ background: l.bgColor ?? "#9ca3af" }} />
               <span className="min-w-0 flex-1 truncate">{l.name}</span>
-              <button className="text-xs text-green-700 hover:underline" onClick={() => void modifyLabels(selected, [l.remoteId], [])}>
+              <button className="text-xs text-green-700 hover:underline" onClick={() => void relabel(selected, [l.remoteId], [])}>
                 add
               </button>
-              <button className="text-xs text-red-700 hover:underline" onClick={() => void modifyLabels(selected, [], [l.remoteId])}>
+              <button className="text-xs text-red-700 hover:underline" onClick={() => void relabel(selected, [], [l.remoteId])}>
                 remove
               </button>
             </div>
@@ -365,7 +446,7 @@ function BulkLabelMenu() {
 }
 
 function Toasts() {
-  const { pendingSend, undoSend, sendNow, notice, working } = useMail();
+  const { pendingSend, undoSend, sendNow, notice, working, undoable, undoLast } = useMail();
   const [left, setLeft] = useState(0);
   useEffect(() => {
     if (!pendingSend) return;
@@ -374,7 +455,7 @@ function Toasts() {
     const t = window.setInterval(tick, 250);
     return () => window.clearInterval(t);
   }, [pendingSend]);
-  if (!pendingSend && !notice && !working) return null;
+  if (!pendingSend && !notice && !working && !undoable) return null;
   return (
     <div className="pointer-events-none fixed bottom-4 left-1/2 z-40 flex -translate-x-1/2 flex-col items-center gap-2">
       {working && (
@@ -399,7 +480,19 @@ function Toasts() {
           </button>
         </div>
       )}
-      {!pendingSend && notice && !working && (
+      {!pendingSend && undoable && !working && (
+        <div className="pointer-events-auto flex items-center gap-3 rounded-full bg-toast py-1.5 pr-1.5 pl-4 text-sm font-medium text-toast-fg shadow-lg">
+          {undoable.label}
+          <button
+            className="rounded-full border border-current px-3 py-1 font-semibold text-toast-accent hover:bg-toast-fg/10"
+            onClick={() => void undoLast()}
+            title="Undo (z)"
+          >
+            Undo
+          </button>
+        </div>
+      )}
+      {!pendingSend && !undoable && notice && !working && (
         <div className="rounded-full bg-toast px-4 py-2 text-sm font-medium text-toast-fg shadow-lg">{notice}</div>
       )}
     </div>

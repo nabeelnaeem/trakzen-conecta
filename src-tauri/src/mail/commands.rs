@@ -116,6 +116,7 @@ pub struct ImapLogin {
     pub port: Option<u16>,
     pub smtp_host: Option<String>,
     pub smtp_port: Option<u16>,
+    pub smtp_security: Option<super::imap::SmtpSecurity>,
     pub username: String,
     pub password: String,
 }
@@ -125,13 +126,22 @@ pub async fn mail_add_imap(app: AppHandle, state: State<'_, AppState>, login: Im
     let cfg = super::imap::ImapConfig {
         host: login.host.trim().to_string(),
         port: login.port.unwrap_or(993),
-        smtp_host: login.smtp_host.unwrap_or_else(|| login.host.trim().to_string()),
+        smtp_host: login
+            .smtp_host
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| login.host.trim().to_string()),
         smtp_port: login.smtp_port.unwrap_or(587),
+        smtp_security: login.smtp_security,
         username: login.username.trim().to_string(),
     };
     if cfg.host.is_empty() || cfg.username.is_empty() || login.password.is_empty() {
         return Err(AppError::Other("IMAP host, username and password are required".into()));
     }
+    let (check_cfg, password) = (cfg.clone(), login.password.clone());
+    tokio::task::spawn_blocking(move || super::imap::ImapProvider::check_login(&check_cfg, &password))
+        .await
+        .map_err(|e| AppError::Other(e.to_string()))??;
     let account = state.providers.imap.add_account(&state.mail, cfg, &login.password)?;
     spawn_sync(app.clone(), account.id);
     Ok(account)
@@ -943,6 +953,10 @@ async fn resolve_attachments(
     Ok(resolved)
 }
 
+fn has_recipients(m: &OutgoingMessage) -> bool {
+    m.to.iter().chain(&m.cc).chain(&m.bcc).any(|t| !t.trim().is_empty())
+}
+
 /// `draft_message_id` is the local row of the draft being sent, dropped
 /// right away so the list does not show it until the next sync.
 #[tauri::command]
@@ -951,7 +965,7 @@ pub async fn mail_send(
     mut message: OutgoingMessage,
     draft_message_id: Option<i64>,
 ) -> Result<()> {
-    if message.to.iter().all(|t| t.trim().is_empty()) {
+    if !has_recipients(&message) {
         return Err(AppError::Other("add at least one recipient".into()));
     }
     let sig = crate::settings::signature_for(&state.db, message.account_id)?;
@@ -984,6 +998,21 @@ pub async fn mail_send(
     // Pull the sent copy into the local store so it shows up under Sent.
     spawn_sync(state.app.clone(), account.id);
     Ok(())
+}
+
+/// Sizes of files about to be attached; None for anything that is not a
+/// readable regular file (folders dropped onto the composer, say).
+#[tauri::command]
+pub async fn mail_file_sizes(paths: Vec<String>) -> Vec<Option<u64>> {
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        let size = match tokio::fs::metadata(&p).await {
+            Ok(m) if m.is_file() => Some(m.len()),
+            _ => None,
+        };
+        out.push(size);
+    }
+    out
 }
 
 #[tauri::command]
@@ -1086,7 +1115,7 @@ pub async fn mail_save_attachment(
 
 #[tauri::command]
 pub async fn mail_schedule(state: State<'_, AppState>, message: OutgoingMessage, send_at: i64) -> Result<()> {
-    if message.to.iter().all(|t| t.trim().is_empty()) {
+    if !has_recipients(&message) {
         return Err(AppError::Other("add at least one recipient".into()));
     }
     let payload = serde_json::to_string(&message)?;

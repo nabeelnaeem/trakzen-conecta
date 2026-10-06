@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { confirmDialog } from "../../lib/confirm";
 import { RichEditor } from "../mail/RichEditor";
 import { textToHtml } from "../mail/store";
@@ -8,6 +8,7 @@ import { disable as autostartDisable, enable as autostartEnable, isEnabled as au
 import { errorMessage, mail, settings } from "../../lib/ipc";
 import { asSoundName, notifyPrefs, playNamed, SOUND_NAMES, SOUNDS, type SoundName } from "../../lib/notify";
 import { onZoom, setZoom, zoomLevel, zoomStep } from "../../lib/zoom";
+import { onNavigate } from "../../lib/navigate";
 import { bytes } from "../../lib/format";
 import { chat as chatIpc } from "../../lib/ipc";
 import {
@@ -24,9 +25,10 @@ import {
   type Mode,
 } from "../../lib/theme";
 import { getSenderLogos, getStartIn, setSenderLogos, setStartIn, type StartIn } from "../../lib/prefs";
-import type { Account, MailFilter, NewFilter, SettingsPatch, SettingsView as Settings, StorageStats } from "../../lib/types";
+import type { Account, MailFilter, NewFilter, SettingsPatch, SettingsView as Settings, SmtpSecurity, StorageStats } from "../../lib/types";
 import { useChat } from "../chat/store";
 import { useMail } from "../mail/store";
+import { MAIL_SHORTCUTS } from "../mail/shortcuts";
 import { Spinner } from "../../lib/Spinner";
 import { FilesTab } from "../files/FilesTab";
 import { FilterEditor } from "../mail/FilterEditor";
@@ -64,6 +66,14 @@ export function SettingsView() {
       .then((v) => setS((cur) => cur ?? v))
       .catch((e) => setErr(errorMessage(e)));
   }, []);
+
+  useEffect(
+    () =>
+      onNavigate((target, detail) => {
+        if (target === "settings" && TABS.some((t) => t.key === detail.tab)) setTab(detail.tab as Tab);
+      }),
+    [],
+  );
 
   // Saves reach the backend one at a time, so replies arrive in order and a
   // slow earlier one can't land after a later one and flip a toggle back.
@@ -465,17 +475,11 @@ function MailTab({ s, save }: { s: Settings; save: Save }) {
       <details className="text-xs text-gray-600">
         <summary className="cursor-pointer">Keyboard shortcuts</summary>
         <div className="mt-1 grid grid-cols-2 gap-x-6 gap-y-0.5 font-mono">
-          <span>j / k</span><span className="font-sans">next / previous</span>
-          <span>e</span><span className="font-sans">archive</span>
-          <span># or Del</span><span className="font-sans">trash</span>
-          <span>!</span><span className="font-sans">spam</span>
-          <span>r / a / f</span><span className="font-sans">reply / reply all / forward</span>
-          <span>c</span><span className="font-sans">compose</span>
-          <span>s</span><span className="font-sans">star</span>
-          <span>x / *</span><span className="font-sans">select / select all</span>
-          <span>Shift+U / Shift+I</span><span className="font-sans">mark unread / read</span>
-          <span>/</span><span className="font-sans">search</span>
-          <span>u or Esc</span><span className="font-sans">back to list</span>
+          {MAIL_SHORTCUTS.map(([keys, action]) => (
+            <Fragment key={keys + action}>
+              <span>{keys}</span><span className="font-sans">{action}</span>
+            </Fragment>
+          ))}
         </div>
       </details>
     </div>
@@ -518,10 +522,47 @@ function TemplatesEditor({ value, onCommit }: { value: string; onCommit: (v: str
 
 // -------------------------------------------------------------- Accounts
 
+const SMTP_PORTS: Record<SmtpSecurity, string> = { tls: "465", starttls: "587" };
+const EMPTY_IMAP = { host: "", username: "", password: "", port: "993", smtpHost: "", smtpPort: "465", smtpSecurity: "tls" as SmtpSecurity };
+
+const guessSmtpHost = (imapHost: string) => imapHost.trim().replace(/^imap\./i, "smtp.");
+
 function AccountsTab({ s, save }: { s: Settings; save: Save }) {
   const { accounts, addAccount, addImap, removeAccount, busy } = useMail();
   const [confirmId, setConfirmId] = useState<number | null>(null);
-  const [imap, setImap] = useState({ host: "", username: "", password: "", port: "993", smtpPort: "587" });
+  const [imap, setImap] = useState(EMPTY_IMAP);
+  // The SMTP host follows the IMAP host until the user types their own.
+  const [smtpHostEdited, setSmtpHostEdited] = useState(false);
+  const [imapError, setImapError] = useState<string | null>(null);
+  const [reauth, setReauth] = useState<{ id: number; note: string; failed: boolean } | null>(null);
+  const smtpHost = smtpHostEdited ? imap.smtpHost : guessSmtpHost(imap.host);
+  const connectImap = async () => {
+    setImapError(null);
+    try {
+      await addImap({
+        host: imap.host.trim(),
+        username: imap.username.trim(),
+        password: imap.password,
+        port: Number(imap.port) || 993,
+        smtpHost: smtpHost.trim() || imap.host.trim(),
+        smtpPort: Number(imap.smtpPort) || Number(SMTP_PORTS[imap.smtpSecurity]),
+        smtpSecurity: imap.smtpSecurity,
+      });
+      setImap(EMPTY_IMAP);
+      setSmtpHostEdited(false);
+    } catch (e) {
+      setImapError(errorMessage(e));
+    }
+  };
+  const signInAgain = async (a: Account) => {
+    setReauth({ id: a.id, note: "Waiting for browser…", failed: false });
+    try {
+      await mail.reauth(a.id);
+      setReauth({ id: a.id, note: "Signed in again.", failed: false });
+    } catch (e) {
+      setReauth({ id: a.id, note: errorMessage(e), failed: true });
+    }
+  };
   return (
     <div className="space-y-6 text-sm">
       <div>
@@ -554,28 +595,44 @@ function AccountsTab({ s, save }: { s: Settings; save: Save }) {
         </p>
         <div className="mb-4 rounded-md border border-gray-200 bg-gray-50 p-3">
           <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">IMAP (any provider)</div>
-          <div className="grid grid-cols-2 gap-2">
-            <input className="input col-span-2" placeholder="imap.example.com" value={imap.host} onChange={(e) => setImap({ ...imap, host: e.target.value })} />
-            <input className="input col-span-2" placeholder="you@example.com" value={imap.username} onChange={(e) => setImap({ ...imap, username: e.target.value })} />
-            <input className="input col-span-2" type="password" placeholder="Password or app password" value={imap.password} onChange={(e) => setImap({ ...imap, password: e.target.value })} />
-            <input className="input" placeholder="IMAP port" value={imap.port} onChange={(e) => setImap({ ...imap, port: e.target.value })} />
-            <input className="input" placeholder="SMTP port" value={imap.smtpPort} onChange={(e) => setImap({ ...imap, smtpPort: e.target.value })} />
+          <div className="grid grid-cols-3 gap-2">
+            <input className="input col-span-3" placeholder="you@example.com" value={imap.username} onChange={(e) => setImap({ ...imap, username: e.target.value })} />
+            <input className="input col-span-3" type="password" placeholder="Password or app password" value={imap.password} onChange={(e) => setImap({ ...imap, password: e.target.value })} />
+            <input className="input col-span-2" placeholder="IMAP server, e.g. imap.example.com" value={imap.host} onChange={(e) => setImap({ ...imap, host: e.target.value })} />
+            <input className="input" placeholder="IMAP port" title="IMAP port (SSL/TLS)" value={imap.port} onChange={(e) => setImap({ ...imap, port: e.target.value })} />
+            <input
+              className="input col-span-2"
+              placeholder="SMTP server, e.g. smtp.example.com"
+              value={smtpHost}
+              onChange={(e) => {
+                setSmtpHostEdited(true);
+                setImap({ ...imap, smtpHost: e.target.value });
+              }}
+            />
+            <input className="input" placeholder="SMTP port" title="SMTP port" value={imap.smtpPort} onChange={(e) => setImap({ ...imap, smtpPort: e.target.value })} />
+            <label className="col-span-3 flex items-center gap-2 text-xs text-gray-600">
+              SMTP security
+              <select
+                className="input w-auto text-xs"
+                value={imap.smtpSecurity}
+                onChange={(e) => {
+                  const smtpSecurity = e.target.value as SmtpSecurity;
+                  const usualPort = !imap.smtpPort.trim() || Object.values(SMTP_PORTS).includes(imap.smtpPort.trim());
+                  setImap({ ...imap, smtpSecurity, smtpPort: usualPort ? SMTP_PORTS[smtpSecurity] : imap.smtpPort });
+                }}
+              >
+                <option value="tls">SSL/TLS (usually 465)</option>
+                <option value="starttls">STARTTLS (usually 587)</option>
+              </select>
+            </label>
           </div>
+          {imapError && <p className="mt-2 break-all text-xs text-red-700">Could not connect: {imapError}</p>}
           <button
             className="btn mt-2 text-xs"
             disabled={busy || !imap.host.trim() || !imap.username.trim() || !imap.password}
-            onClick={() =>
-              void addImap({
-                host: imap.host.trim(),
-                username: imap.username.trim(),
-                password: imap.password,
-                port: Number(imap.port) || 993,
-                smtpHost: imap.host.trim(),
-                smtpPort: Number(imap.smtpPort) || 587,
-              }).then(() => setImap({ host: "", username: "", password: "", port: "993", smtpPort: "587" }))
-            }
+            onClick={() => void connectImap()}
           >
-            Connect IMAP
+            {busy ? "Connecting…" : "Connect IMAP"}
           </button>
         </div>
         {accounts.length === 0 && <div className="text-gray-500">No accounts yet.</div>}
@@ -587,7 +644,7 @@ function AccountsTab({ s, save }: { s: Settings; save: Save }) {
                 <span className="rounded bg-gray-100 px-1.5 text-[10px] uppercase text-gray-600">{a.provider}</span>
                 <div className="flex-1" />
                 {a.provider === "gmail" && (
-                <button className="btn text-xs" onClick={() => mail.reauth(a.id).catch(() => undefined)} title="Re-run the Google consent flow (needed once for filter management on older accounts)">
+                <button className="btn text-xs" onClick={() => void signInAgain(a)} title="Re-run the Google consent flow (needed once for filter management on older accounts)">
                   Sign in again
                 </button>
                 )}
@@ -603,6 +660,9 @@ function AccountsTab({ s, save }: { s: Settings; save: Save }) {
                   </button>
                 )}
               </div>
+              {reauth?.id === a.id && (
+                <p className={`mt-1 break-all text-xs ${reauth.failed ? "text-red-700" : "text-gray-500"}`}>{reauth.note}</p>
+              )}
               <div className="mt-2">
                 <AccountSignature account={a} value={s.accountSignatures[a.id]} save={save} />
               </div>

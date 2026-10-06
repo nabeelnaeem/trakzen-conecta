@@ -4,6 +4,18 @@
 
 export type ProviderKind = "gmail" | "imap";
 
+export type SmtpSecurity = "tls" | "starttls";
+
+export interface ImapLogin {
+  host: string;
+  port?: number;
+  smtpHost?: string;
+  smtpPort?: number;
+  smtpSecurity?: SmtpSecurity;
+  username: string;
+  password: string;
+}
+
 export interface Account {
   id: number;
   provider: ProviderKind;

@@ -431,6 +431,7 @@ pub fn run() {
             mail::commands::mail_unsnooze,
             mail::commands::mail_list_snoozed,
             mail::commands::mail_save_draft,
+            mail::commands::mail_file_sizes,
             mail::commands::mail_discard_draft,
             mail::commands::mail_open_draft,
             mail::commands::mail_list_accounts,

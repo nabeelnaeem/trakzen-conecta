@@ -13,6 +13,7 @@ import type {
   FetchResult,
   FlagChange,
   Identity,
+  ImapLogin,
   Label,
   ListQuery,
   MailFilter,
@@ -47,7 +48,7 @@ export const settings = {
 export const mail = {
   listAccounts: () => invoke<Account[]>("mail_list_accounts"),
   addAccount: (provider: string) => invoke<Account>("mail_add_account", { provider }),
-  addImap: (login: { host: string; port?: number; smtpHost?: string; smtpPort?: number; username: string; password: string }) =>
+  addImap: (login: ImapLogin) =>
     invoke<Account>("mail_add_imap", { login }),
   removeAccount: (accountId: number) => invoke<void>("mail_remove_account", { accountId }),
   sync: (accountId: number) => invoke<void>("mail_sync", { accountId }),
@@ -104,6 +105,7 @@ export const mail = {
   send: (message: OutgoingMessage, draftMessageId: number | null = null) =>
     invoke<void>("mail_send", { message, draftMessageId }),
   saveDraft: (message: OutgoingMessage) => invoke<string>("mail_save_draft", { message }),
+  fileSizes: (paths: string[]) => invoke<(number | null)[]>("mail_file_sizes", { paths }),
   discardDraft: (accountId: number, draftId: string, messageId: number | null = null) =>
     invoke<void>("mail_discard_draft", { accountId, draftId, messageId }),
   openDraft: (messageId: number) => invoke<DraftContent>("mail_open_draft", { messageId }),
