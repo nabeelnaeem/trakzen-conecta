@@ -172,6 +172,19 @@ const emptyComposer = (accountId: number): ComposerState => ({
   savedAt: null,
 });
 
+// The badge is re-read rather than adjusted: the same message can be
+// counted down from more than one place.
+function refreshUnread() {
+  const id = useMail.getState().activeAccountId;
+  if (id === null) return;
+  mail
+    .unreadCount(id)
+    .then((unread) => {
+      if (useMail.getState().activeAccountId === id) useMail.setState({ unread });
+    })
+    .catch(() => undefined);
+}
+
 export function textToHtml(text: string): string {
   const esc = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   return esc.split("\n").join("<br>");
@@ -574,23 +587,33 @@ export const useMail = create<MailState>((set, get) => ({
       return;
     }
     set({ expanded: [...get().expanded, mid] });
-    if (get().details[mid]) return;
+    const cached = get().details[mid];
+    const wasUnread = get().thread.some((m) => m.id === mid && !m.isRead) || get().messages.some((m) => m.id === mid && !m.isRead);
+    // A cached body skips the fetch, but a message marked unread since it
+    // was last opened still has to be marked read again.
+    if (cached && !wasUnread) return;
     try {
-      const detail = await mail.getMessage(mid);
-      const wasUnread = get().thread.some((m) => m.id === mid && !m.isRead) || get().messages.some((m) => m.id === mid && !m.isRead);
+      let detail = cached;
+      if (detail) await mail.setFlags(mid, { read: true });
+      else detail = await mail.getMessage(mid);
+      const key = threadKey(detail);
       set({
-        details: { ...get().details, [mid]: detail },
+        details: { ...get().details, [mid]: { ...detail, isRead: true } },
         thread: get().thread.map((m) => (m.id === mid ? { ...m, isRead: true } : m)),
         messages: get().messages.map((m) =>
-          m.id === mid
-            ? { ...m, isRead: true, threadUnread: Math.max(0, m.threadUnread - 1) }
-            : get().conversations && threadKey(m) === threadKey(detail) && wasUnread
-              ? { ...m, threadUnread: Math.max(0, m.threadUnread - 1) }
-              : m,
+          !wasUnread
+            ? m
+            : m.id === mid
+              ? { ...m, isRead: true, threadUnread: Math.max(0, m.threadUnread - 1) }
+              : get().conversations && threadKey(m) === key
+                ? { ...m, threadUnread: Math.max(0, m.threadUnread - 1) }
+                : m,
         ),
-        unread: wasUnread ? Math.max(0, get().unread - 1) : get().unread,
       });
-      if (wasUnread) void get().loadLabels();
+      if (wasUnread) {
+        refreshUnread();
+        void get().loadLabels();
+      }
     } catch (e) {
       set({ error: errorMessage(e) });
     }
@@ -729,8 +752,7 @@ export const useMail = create<MailState>((set, get) => ({
       for (const k of Object.keys(details)) details[Number(k)] = apply(details[Number(k)]) as MessageDetail;
       set({ messages: get().messages.map(apply), thread: get().thread.map(apply), details });
       // Unread badge and label counts change with almost every action.
-      const accountId = get().activeAccountId;
-      if (accountId !== null) mail.unreadCount(accountId).then((unread) => set({ unread })).catch(() => undefined);
+      refreshUnread();
       void get().loadLabels();
       return true;
     } catch (e) {
