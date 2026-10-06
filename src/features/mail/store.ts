@@ -94,6 +94,9 @@ interface MailState {
   pendingSend: PendingSend | null;
   /** The last label change that can still be reverted from the toast. */
   undoable: UndoableAction | null;
+  /** Toolbar menu of the open thread, also opened by its shortcut. */
+  threadMenu: "snooze" | "labels" | "more" | null;
+  shortcutsHelp: boolean;
   filterEditor: NewFilter | null;
   /** Set while editing an existing filter (replace on save). */
   filterEditing: { accountId: number; filterId: string } | null;
@@ -161,6 +164,8 @@ interface MailState {
   closeFilterEditor: () => void;
   createFilter: (f: NewFilter) => Promise<boolean>;
   clearError: () => void;
+  setThreadMenu: (menu: MailState["threadMenu"]) => void;
+  showShortcuts: (on: boolean) => void;
 }
 
 const splitList = (s: string) =>
@@ -337,6 +342,8 @@ export const useMail = create<MailState>((set, get) => ({
   undoSeconds: 10,
   pendingSend: null,
   undoable: null,
+  threadMenu: null,
+  shortcutsHelp: false,
   filterEditor: null,
   filterEditing: null,
   error: null,
@@ -1241,4 +1248,6 @@ export const useMail = create<MailState>((set, get) => ({
   },
 
   clearError: () => set({ error: null }),
+  setThreadMenu: (threadMenu) => set({ threadMenu }),
+  showShortcuts: (shortcutsHelp) => set({ shortcutsHelp }),
 }));

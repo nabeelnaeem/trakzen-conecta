@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { useMail } from "./store";
+import { MAIL_SHORTCUTS } from "./shortcuts";
 import { MessageList } from "./MessageList";
 import { ThreadView } from "./ThreadView";
 import { Composer } from "./Composer";
@@ -256,7 +257,37 @@ export function MailView() {
 
       {s.composer && <Composer />}
       {s.filterEditor && <FilterEditor />}
+      {s.shortcutsHelp && <ShortcutsHelp onClose={() => s.showShortcuts(false)} />}
       <Toasts />
+    </div>
+  );
+}
+
+function ShortcutsHelp({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/30 p-4" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Keyboard shortcuts"
+        className="max-h-full w-[460px] overflow-y-auto rounded-lg border border-gray-300 bg-white shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center border-b border-gray-200 px-4 py-2">
+          <span className="font-medium">Keyboard shortcuts</span>
+          <button className="ml-auto text-gray-500 hover:text-gray-900" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 px-4 py-3 text-sm">
+          {MAIL_SHORTCUTS.map(([keys, action]) => (
+            <Fragment key={keys + action}>
+              <kbd className="justify-self-start rounded border border-gray-300 bg-gray-50 px-1 font-mono text-xs">{keys}</kbd>
+              <span className="text-gray-700">{action}</span>
+            </Fragment>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

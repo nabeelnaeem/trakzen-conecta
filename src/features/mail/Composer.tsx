@@ -36,19 +36,32 @@ export function Composer() {
   };
 
   const fileName = (p: string) => p.split(/[\\/]/).pop() ?? p;
+  const hasRecipient = !!c.to.trim();
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.defaultPrevented) return;
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      if (hasRecipient && !busy) void send();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      closeCompose();
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-20 flex items-end justify-end bg-black/20 p-4" onClick={closeCompose}>
       <div
         className="flex h-[80vh] w-[720px] max-w-full flex-col overflow-hidden rounded-lg border border-gray-300 bg-white shadow-xl"
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={onKeyDown}
       >
         <div className="flex items-center justify-between border-b border-gray-200 bg-gray-50 px-3 py-2">
           <span className="text-sm font-medium">{c.subject || "New message"}</span>
           <span className="ml-auto mr-3 text-xs text-gray-500">
             {c.saving ? "Saving…" : c.dirty ? "Unsaved changes" : c.savedAt ? "Draft saved" : ""}
           </span>
-          <button className="text-gray-500 hover:text-gray-900" onClick={closeCompose} aria-label="Close">
+          <button className="text-gray-500 hover:text-gray-900" onClick={closeCompose} aria-label="Close" title="Close and keep draft (Esc)">
             ✕
           </button>
         </div>
@@ -120,7 +133,7 @@ export function Composer() {
         )}
 
         <div className="flex items-center gap-2 border-t border-gray-200 bg-gray-50 px-3 py-2">
-          <button className="btn btn-primary" onClick={() => void send()} disabled={busy || !c.to.trim()}>
+          <button className="btn btn-primary" onClick={() => void send()} disabled={busy || !hasRecipient} title="Send (Ctrl+Enter)">
             {busy ? "Sending…" : "Send"}
           </button>
           <button className="btn" onClick={() => void pickFiles()}>
@@ -154,7 +167,7 @@ export function Composer() {
           {later && (
             <button
               className="btn text-xs"
-              disabled={!c.to.trim()}
+              disabled={!hasRecipient}
               onClick={() => void scheduleSend(new Date(later).getTime())}
             >
               Schedule

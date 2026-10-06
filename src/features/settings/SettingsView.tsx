@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { confirmDialog } from "../../lib/confirm";
 import { RichEditor } from "../mail/RichEditor";
 import { textToHtml } from "../mail/store";
@@ -27,6 +27,7 @@ import { getSenderLogos, getStartIn, setSenderLogos, setStartIn, type StartIn } 
 import type { Account, MailFilter, NewFilter, SettingsPatch, SettingsView as Settings, SmtpSecurity, StorageStats } from "../../lib/types";
 import { useChat } from "../chat/store";
 import { useMail } from "../mail/store";
+import { MAIL_SHORTCUTS } from "../mail/shortcuts";
 import { Spinner } from "../../lib/Spinner";
 import { FilesTab } from "../files/FilesTab";
 import { FilterEditor } from "../mail/FilterEditor";
@@ -465,17 +466,11 @@ function MailTab({ s, save }: { s: Settings; save: Save }) {
       <details className="text-xs text-gray-600">
         <summary className="cursor-pointer">Keyboard shortcuts</summary>
         <div className="mt-1 grid grid-cols-2 gap-x-6 gap-y-0.5 font-mono">
-          <span>j / k</span><span className="font-sans">next / previous</span>
-          <span>e</span><span className="font-sans">archive</span>
-          <span># or Del</span><span className="font-sans">trash</span>
-          <span>!</span><span className="font-sans">spam</span>
-          <span>r / a / f</span><span className="font-sans">reply / reply all / forward</span>
-          <span>c</span><span className="font-sans">compose</span>
-          <span>s</span><span className="font-sans">star</span>
-          <span>x / *</span><span className="font-sans">select / select all</span>
-          <span>Shift+U / Shift+I</span><span className="font-sans">mark unread / read</span>
-          <span>/</span><span className="font-sans">search</span>
-          <span>u or Esc</span><span className="font-sans">back to list</span>
+          {MAIL_SHORTCUTS.map(([keys, action]) => (
+            <Fragment key={keys + action}>
+              <span>{keys}</span><span className="font-sans">{action}</span>
+            </Fragment>
+          ))}
         </div>
       </details>
     </div>

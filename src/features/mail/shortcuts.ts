@@ -1,0 +1,21 @@
+/** Every mail shortcut, as shown in Settings and the `?` overlay. */
+export const MAIL_SHORTCUTS: [keys: string, action: string][] = [
+  ["j / k", "next / previous"],
+  ["o or Enter", "open"],
+  ["u or Esc", "back to list"],
+  ["e", "archive"],
+  ["# or Del", "trash"],
+  ["!", "spam"],
+  ["z", "undo the last archive, trash, spam or label change"],
+  ["b", "snooze"],
+  ["l", "labels"],
+  ["s", "star"],
+  ["r / a / f", "reply / reply all / forward"],
+  ["c", "compose"],
+  ["Ctrl/Cmd+Enter","send (in the compose window)"],
+  ["Esc", "close the compose window, keeping the draft"],
+  ["x / *", "select / select all"],
+  ["Shift+U / Shift+I", "mark unread / read"],
+  ["/", "search"],
+  ["?", "show these shortcuts"],
+];

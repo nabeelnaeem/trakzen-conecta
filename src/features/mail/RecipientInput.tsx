@@ -83,6 +83,7 @@ export function RecipientInput({
             e.preventDefault();
             pick(items[active]);
           } else if (e.key === "Escape") {
+            e.stopPropagation();
             setOpen(false);
           }
         }}

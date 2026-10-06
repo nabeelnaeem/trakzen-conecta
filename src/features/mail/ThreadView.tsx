@@ -18,9 +18,8 @@ import { Archive, Clock, Forward, MessageSquare, MoreHorizontal, Reply, ReplyAll
 export function ThreadView() {
   const s = useMail();
   const { openId, thread, expanded, details, loadingDetail, labels, folder } = s;
-  const [labelMenu, setLabelMenu] = useState(false);
-  const [snoozeMenu, setSnoozeMenu] = useState(false);
-  const [moreMenu, setMoreMenu] = useState(false);
+  const { threadMenu, setThreadMenu } = s;
+  const toggleMenu = (m: NonNullable<typeof threadMenu>) => setThreadMenu(threadMenu === m ? null : m);
   const [sharePicker, setSharePicker] = useState(false);
   const menusRef = useRef<HTMLDivElement>(null);
 
@@ -32,9 +31,7 @@ export function ThreadView() {
     };
     const onClick = (e: MouseEvent) => {
       if (menusRef.current && !menusRef.current.contains(e.target as Node)) {
-        setLabelMenu(false);
-        setSnoozeMenu(false);
-        setMoreMenu(false);
+        useMail.getState().setThreadMenu(null);
       }
     };
     window.addEventListener("message", onMessage);
@@ -46,9 +43,7 @@ export function ThreadView() {
   }, []);
 
   useEffect(() => {
-    setLabelMenu(false);
-    setSnoozeMenu(false);
-    setMoreMenu(false);
+    useMail.getState().setThreadMenu(null);
   }, [openId]);
 
   if (openId === null) {
@@ -143,10 +138,10 @@ export function ThreadView() {
         )}
 
         <div className="relative">
-          <button className="btn btn-ghost" onClick={() => setSnoozeMenu((v) => !v)} title="Snooze (b)">
+          <button className="btn btn-ghost" onClick={() => toggleMenu("snooze")} title="Snooze (b)">
             <Clock size={15} />
           </button>
-          {snoozeMenu && (
+          {threadMenu === "snooze" && (
             <Menu>
               {folder === "snoozed" ? (
                 <MenuItem onClick={() => void s.snooze(ids, null)}>Unsnooze</MenuItem>
@@ -166,10 +161,10 @@ export function ThreadView() {
         </div>
 
         <div className="relative">
-          <button className="btn btn-ghost" onClick={() => setLabelMenu((v) => !v)} title="Labels (l)">
+          <button className="btn btn-ghost" onClick={() => toggleMenu("labels")} title="Labels (l)">
             <Tag size={15} /> ▾
           </button>
-          {labelMenu && (
+          {threadMenu === "labels" && (
             <Menu>
               {userLabels.length === 0 && <div className="px-3 py-2 text-xs text-gray-500">No labels in this account</div>}
               {userLabels.map((l) => {
@@ -200,15 +195,15 @@ export function ThreadView() {
         </button>
 
         <div className="relative">
-          <button className="btn btn-ghost" onClick={() => setMoreMenu((v) => !v)} title="More">
+          <button className="btn btn-ghost" onClick={() => toggleMenu("more")} title="More">
             <MoreHorizontal size={15} />
           </button>
-          {moreMenu && (
+          {threadMenu === "more" && (
             <Menu>
               <MenuItem onClick={() => void s.act("unread", ids)}>Mark as unread</MenuItem>
               <MenuItem
                 onClick={() => {
-                  setMoreMenu(false);
+                  setThreadMenu(null);
                   s.openFilterEditor({ from: latest.fromAddr });
                 }}
               >
@@ -217,7 +212,7 @@ export function ThreadView() {
               <div className="my-1 border-t border-gray-100" />
               <MenuItem
                 onClick={() => {
-                  setMoreMenu(false);
+                  setThreadMenu(null);
                   setSharePicker(true);
                 }}
               >
@@ -474,6 +469,7 @@ function EmptyPane() {
         <kbd className="rounded border border-gray-300 bg-gray-50 px-1 font-mono">r</kbd><span>reply</span>
         <kbd className="rounded border border-gray-300 bg-gray-50 px-1 font-mono">c</kbd><span>compose</span>
         <kbd className="rounded border border-gray-300 bg-gray-50 px-1 font-mono">/</kbd><span>search (Enter searches Gmail)</span>
+        <kbd className="rounded border border-gray-300 bg-gray-50 px-1 font-mono">?</kbd><span>all shortcuts</span>
       </div>
     </div>
   );
