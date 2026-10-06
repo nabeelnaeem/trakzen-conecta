@@ -331,6 +331,11 @@ pub async fn chat_pause_transfer(state: State<'_, AppState>, transfer_id: String
     Ok(())
 }
 
+#[tauri::command]
+pub async fn chat_list_transfers(state: State<'_, AppState>) -> Result<Vec<TransferProgress>> {
+    Ok(state.chat.list_transfers())
+}
+
 /// Accept or decline a file a peer is offering (message status `offered`).
 /// `always` also switches the sender to auto-accept from now on.
 #[tauri::command]

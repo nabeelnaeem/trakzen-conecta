@@ -1222,6 +1222,7 @@ impl ChatEngine {
                 transfer_id,
                 msg_id: m.msg_id.clone(),
                 peer_id: m.peer_id,
+                member_id: row_id,
                 direction: Direction::Out,
                 file_name: name,
                 bytes_done: size as u64,
@@ -1306,6 +1307,7 @@ impl ChatEngine {
             transfer_id: transfer_id.to_string(),
             msg_id: msg_id.to_string(),
             peer_id: conversation,
+            member_id: row_id,
             direction: Direction::Out,
             file_name: name.to_string(),
             bytes_done: done,
@@ -1521,6 +1523,7 @@ impl ChatEngine {
             transfer_id: transfer_id.clone(),
             msg_id: msg_id.clone(),
             peer_id: dest,
+            member_id: row_id,
             direction: Direction::In,
             file_name: name.clone(),
             bytes_done: done,
@@ -1668,6 +1671,12 @@ impl ChatEngine {
         let _ = self.app.emit(EVENT_TRANSFER, p);
     }
 
+    /// Transfers running or paused right now, for a UI that (re)loads
+    /// while they are in progress.
+    pub fn list_transfers(&self) -> Vec<TransferProgress> {
+        self.transfers.lock().unwrap().values().cloned().collect()
+    }
+
     /// Resolves an incoming file offer. While the sender is still holding
     /// the transfer connection the answer goes straight back on it;
     /// otherwise it travels over the chat connection (now, or when the
@@ -1777,7 +1786,7 @@ impl ChatEngine {
         let current = self.transfers.lock().unwrap().get(transfer_id).cloned();
         let Some(mut p) = current else { return };
         p.state = if pause { "paused" } else { "active" }.into();
-        let tx = self.conns.lock().unwrap().get(&p.peer_id).map(|c| c.tx.clone());
+        let tx = self.conns.lock().unwrap().get(&p.member_id).map(|c| c.tx.clone());
         if let Some(tx) = tx {
             let msg = if pause {
                 ControlMsg::FilePause { transfer_id: transfer_id.to_string() }
