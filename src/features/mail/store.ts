@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { errorMessage, mail, settings } from "../../lib/ipc";
 import { asSoundName, notify, notifyPrefs } from "../../lib/notify";
+import { activeTab } from "../../lib/activeTab";
 import type {
   Account,
   Category,
@@ -360,8 +361,19 @@ export const useMail = create<MailState>((set, get) => ({
         }
         case "newMail": {
           const account = get().accounts.find((a) => a.id === ev.accountId);
-          const focused = document.hasFocus();
-          if (ev.messages.length === 1) {
+          // New mail lands in the inbox, so someone already looking at that
+          // inbox sees it arrive; the list refresh is the notification.
+          const { folder, label, search } = get();
+          const watching =
+            document.hasFocus() &&
+            activeTab() === "mail" &&
+            shown &&
+            folder === "inbox" &&
+            !label &&
+            !search.trim();
+          if (watching) {
+            refreshUnread();
+          } else if (ev.messages.length === 1) {
             const m = ev.messages[0];
             const route = m.threadId ? `conecta://mail/${ev.accountId}/${encodeURIComponent(m.threadId)}` : undefined;
             void notify(m.fromName, m.subject || "(no subject)", "mail", route);
@@ -377,7 +389,6 @@ export const useMail = create<MailState>((set, get) => ({
               first.threadId ? `conecta://mail/${ev.accountId}/${encodeURIComponent(first.threadId)}` : undefined,
             );
           }
-          void focused;
           break;
         }
       }
