@@ -395,6 +395,9 @@ pub async fn mail_update_filter(
     let provider = state.providers.provider_for(&account.provider)?;
     let created = provider.create_filter(&account, &filter).await?;
     provider.delete_filter(&account, &filter_id).await?;
+    if filter.apply_to_existing {
+        spawn_sync(state.app.clone(), account_id);
+    }
     Ok(created)
 }
 
