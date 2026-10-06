@@ -197,6 +197,8 @@ export const app = {
   /** Clickable OS notification; `route` is a conecta:// link. */
   notify: (title: string, body: string, route?: string) => invoke<void>("app_notify", { title, body, route: route ?? null }),
   onNavigate: (cb: (r: NavRoute) => void) => listen<NavRoute>("app://navigate", (e) => cb(e.payload)),
+  /** Call once `onNavigate` is listening: the route a cold start was launched with, if any. */
+  takeRoute: () => invoke<NavRoute | null>("app_take_route"),
 };
 
 export function errorMessage(e: unknown): string {

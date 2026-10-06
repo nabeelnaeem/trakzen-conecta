@@ -5,7 +5,7 @@ import { SettingsView } from "./features/settings/SettingsView";
 import { useMail } from "./features/mail/store";
 import { useChat } from "./features/chat/store";
 import { restoreZoom, setZoom, zoomStep } from "./lib/zoom";
-import { app as appIpc } from "./lib/ipc";
+import { app as appIpc, type NavRoute } from "./lib/ipc";
 import { isDark, onTheme, toggleDark } from "./lib/theme";
 import { Mail, MessageSquare, Moon, Settings, Sun, type LucideIcon } from "lucide-react";
 import { getLastTab, getRailOrder, getStartIn, setLastTab, setRailOrder, type RailItem } from "./lib/prefs";
@@ -34,22 +34,26 @@ export default function App() {
 
   // Deep links and notification clicks arrive here from the backend.
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    void appIpc
-      .onNavigate((r) => {
-        if (r.kind === "chat") {
-          setTab("chat");
-          void useChat.getState().selectByRoute(r.peer);
-        } else if (r.kind === "mail") {
-          setTab("mail");
-          void useMail.getState().openThread(r.accountId, r.threadId);
-        } else if (r.kind === "pair") {
-          setTab("chat");
-          useChat.getState().setPendingPair(r.link);
-        }
-      })
-      .then((u) => (unlisten = u));
-    return () => unlisten?.();
+    const go = (r: NavRoute) => {
+      if (r.kind === "chat") {
+        setTab("chat");
+        void useChat.getState().selectByRoute(r.peer);
+      } else if (r.kind === "mail") {
+        setTab("mail");
+        void useMail.getState().openThread(r.accountId, r.threadId);
+      } else if (r.kind === "pair") {
+        setTab("chat");
+        useChat.getState().setPendingPair(r.link);
+      }
+    };
+    const p = appIpc.onNavigate(go);
+    // Whatever arrived before the listener was up (a cold start from a
+    // notification or link) is held by the backend until asked for.
+    void p
+      .then(() => appIpc.takeRoute())
+      .then((r) => r && go(r))
+      .catch((e) => console.warn("navigate:", e));
+    return () => void p.then((f) => f());
   }, []);
   const reorder = (target: RailItem) => {
     if (!dragging || dragging === target) return;

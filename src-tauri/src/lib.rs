@@ -156,6 +156,13 @@ async fn app_notify(app: AppHandle, title: String, body: String, route: Option<S
     notify::show(&app, &title, &body, r);
 }
 
+/// Called by the UI once its navigate listener is up; returns the route a
+/// cold start was launched with, if any.
+#[tauri::command]
+fn app_take_route(pending: State<'_, notify::PendingRoute>) -> Option<notify::Route> {
+    pending.take()
+}
+
 /// Unread total shown on the tray tooltip and window title.
 #[tauri::command]
 async fn app_set_badge(app: AppHandle, count: u32) {
@@ -200,6 +207,7 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(notify::PendingRoute::default())
         .on_window_event(|window, event| {
             // Closing the main window hides it to the tray unless the user
             // turned that off; the tray menu has an explicit Quit.
@@ -283,12 +291,8 @@ pub fn run() {
                 }
                 if let Ok(Some(urls)) = app.deep_link().get_current() {
                     let list: Vec<String> = urls.iter().map(|u| u.to_string()).collect();
-                    let handle = app.handle().clone();
-                    // The webview is not up yet; give it a moment before routing.
-                    tauri::async_runtime::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-                        notify::handle_urls(&handle, &list);
-                    });
+                    // Held in PendingRoute until the UI asks for it.
+                    notify::handle_urls(app.handle(), &list);
                 }
                 let handle = app.handle().clone();
                 app.deep_link().on_open_url(move |event| {
@@ -441,6 +445,7 @@ pub fn run() {
             chat::commands::chat_pairing_qr,
             app_set_badge,
             app_notify,
+            app_take_route,
             trakzen_files::trakzen_files_status,
             trakzen_files::trakzen_files_discover,
             trakzen_files::trakzen_files_connect,
