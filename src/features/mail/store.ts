@@ -279,19 +279,20 @@ export const useMail = create<MailState>((set, get) => ({
     });
     await mail.onSync((ev: SyncEvent) => {
       const { syncing, activeAccountId } = get();
+      const shown = activeAccountId === 0 || ev.accountId === activeAccountId;
       switch (ev.type) {
         case "started":
           set({ syncing: { ...syncing, [ev.accountId]: { done: 0, total: 0 } } });
           break;
         case "progress":
           set({ syncing: { ...syncing, [ev.accountId]: { done: ev.done, total: ev.total } } });
-          if (ev.accountId === activeAccountId) void get().refresh();
+          if (shown) void get().refresh();
           break;
         case "finished": {
           const next = { ...syncing };
           delete next[ev.accountId];
           set({ syncing: next });
-          if (ev.accountId === activeAccountId) {
+          if (shown) {
             void get().refresh();
             void get().loadLabels();
           }
