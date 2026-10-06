@@ -291,21 +291,27 @@ function AddPeer() {
     );
   }
   return (
-    <div className="space-y-2 border-b border-gray-200 p-2">
+    <form
+      className="space-y-2 border-b border-gray-200 p-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void submit();
+      }}
+    >
       <input className="input" placeholder="Name (optional)" value={name} onChange={(e) => setName(e.target.value)} />
       <div className="flex gap-2">
-        <input className="input" placeholder="192.168.1.20 or conecta://…" value={host} autoFocus onChange={(e) => setHost(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void submit()} />
+        <input className="input" placeholder="192.168.1.20 or conecta://…" value={host} autoFocus onChange={(e) => setHost(e.target.value)} />
         <input className="input w-24" placeholder={String(identity?.port ?? 47800)} value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} />
       </div>
       <div className="flex gap-2">
-        <button className="btn btn-primary flex-1 justify-center" onClick={() => void submit()} disabled={!host.trim()}>
+        <button type="submit" className="btn btn-primary flex-1 justify-center" disabled={!host.trim()}>
           Add
         </button>
-        <button className="btn" onClick={() => setOpenForm(false)}>
+        <button type="button" className="btn" onClick={() => setOpenForm(false)}>
           Cancel
         </button>
       </div>
-    </div>
+    </form>
   );
 }
 
