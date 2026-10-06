@@ -29,6 +29,7 @@ import { useChat } from "../chat/store";
 import { useMail } from "../mail/store";
 import { Spinner } from "../../lib/Spinner";
 import { FilesTab } from "../files/FilesTab";
+import { FilterEditor } from "../mail/FilterEditor";
 
 type Tab = "general" | "appearance" | "mail" | "accounts" | "filters" | "chat" | "files" | "about";
 
@@ -726,6 +727,8 @@ function FiltersTab() {
 
   return (
     <div className="space-y-6 text-sm">
+      {/* The one in MailView is hidden along with the Mail tab. */}
+      {filterEditor && <FilterEditor />}
       <p className="text-gray-600">Rules your provider applies to incoming mail. Accounts connected before filter management was added need one "Sign in again" (Accounts tab).</p>
       <input className="input" placeholder="Search filters (sender, words, label)…" value={q} onChange={(e) => setQ(e.target.value)} />
       {accounts.map((a) => {
