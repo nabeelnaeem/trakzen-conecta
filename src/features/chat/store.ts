@@ -3,6 +3,22 @@ import { chat, errorMessage } from "../../lib/ipc";
 import { notify } from "../../lib/notify";
 import type { ChatMessage, ChatStatus, Identity, Nearby, Peer, TransferProgress } from "../../lib/types";
 
+/** A file waiting in the composer to be sent. */
+export interface PendingFile {
+  path: string;
+  name: string;
+  preview: string | null;
+}
+
+/** An unsent message, kept while other conversations are open. */
+export interface Draft {
+  text: string;
+  files: PendingFile[];
+  replyTo: ChatMessage | null;
+  codeMode: boolean;
+  codeLang: string;
+}
+
 interface ChatState {
   identity: Identity | null;
   status: ChatStatus | null;
@@ -20,6 +36,8 @@ interface ChatState {
   initialised: boolean;
   /** The chat tab is on screen. Hidden tabs stay mounted, so App reports this. */
   visible: boolean;
+  /** peer row id → unsent message */
+  drafts: Record<number, Draft>;
 
   init: () => Promise<void>;
   refreshIdentity: () => Promise<void>;
@@ -42,8 +60,36 @@ interface ChatState {
   clearChat: () => Promise<void>;
   clearError: () => void;
   setVisible: (visible: boolean) => void;
+  setDraft: (peerId: number, draft: Draft) => void;
   /** Re-reads peers and the open conversation, e.g. after the machine wakes. */
   resync: () => Promise<void>;
+}
+
+// Only the text survives a restart: attachments may be temporary files and a
+// reply target may be gone by then.
+const DRAFT_KEY = "tc.chatDraft.";
+
+export function saveDraftText(peerId: number, text: string) {
+  try {
+    if (text) localStorage.setItem(DRAFT_KEY + peerId, text);
+    else localStorage.removeItem(DRAFT_KEY + peerId);
+  } catch {
+    return;
+  }
+}
+
+function savedDrafts(): Record<number, Draft> {
+  const out: Record<number, Draft> = {};
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      const text = key?.startsWith(DRAFT_KEY) ? localStorage.getItem(key) : null;
+      if (key && text) out[Number(key.slice(DRAFT_KEY.length))] = { text, files: [], replyTo: null, codeMode: false, codeLang: "" };
+    }
+  } catch {
+    return out;
+  }
+  return out;
 }
 
 /** The user can see the open conversation right now. */
@@ -185,6 +231,7 @@ export const useChat = create<ChatState>((set, get) => ({
   error: null,
   initialised: false,
   visible: false,
+  drafts: savedDrafts(),
 
   init: async () => {
     if (get().initialised) return;
@@ -353,7 +400,11 @@ export const useChat = create<ChatState>((set, get) => ({
   removePeer: async (id) => {
     try {
       await chat.removePeer(id);
+      const drafts = { ...get().drafts };
+      delete drafts[id];
+      saveDraftText(id, "");
       set({
+        drafts,
         peers: get().peers.filter((p) => p.id !== id),
         activePeerId: get().activePeerId === id ? null : get().activePeerId,
         messages: get().activePeerId === id ? [] : get().messages,
@@ -484,6 +535,16 @@ export const useChat = create<ChatState>((set, get) => ({
     if (get().visible === visible) return;
     set({ visible });
     if (isViewing()) void markActiveRead();
+  },
+
+  setDraft: (peerId, draft) => {
+    // The conversation of a removed peer saves its draft as it unmounts.
+    if (!get().peers.some((p) => p.id === peerId)) return;
+    const drafts = { ...get().drafts };
+    if (draft.text || draft.files.length || draft.replyTo || draft.codeMode) drafts[peerId] = draft;
+    else delete drafts[peerId];
+    set({ drafts });
+    saveDraftText(peerId, draft.text);
   },
 
   resync: async () => {

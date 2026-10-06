@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { progressByMessage, senderName, useChat, type MessageProgress } from "./store";
+import { progressByMessage, saveDraftText, senderName, useChat, type Draft, type MessageProgress, type PendingFile as Pending } from "./store";
 import { Avatar } from "../mail/Avatar";
 import { bytes, shortDate, timeOnly } from "../../lib/format";
 import { chat as chatIpc, errorMessage } from "../../lib/ipc";
@@ -95,6 +95,10 @@ export function ChatView() {
                   <span className={`truncate text-xs ${p.unread ? "text-gray-800" : "text-gray-500"}`}>
                     {s.typing[p.id] ? (
                       <em className="text-blue-700">typing…</em>
+                    ) : p.id !== s.activePeerId && s.drafts[p.id] ? (
+                      <>
+                        <span className="text-red-700">Draft:</span> {draftPreview(s.drafts[p.id])}
+                      </>
                     ) : (
                       (p.lastMessage ?? (p.isGroup ? "No messages yet" : `${p.host}:${p.port}`))
                     )}
@@ -146,6 +150,12 @@ export function ChatView() {
       {switcher && <PeerSwitcher onClose={() => setSwitcher(false)} />}
     </div>
   );
+}
+
+function draftPreview(d: Draft): string {
+  if (d.text) return d.text;
+  if (d.files.length) return d.files.map((f) => f.name).join(", ");
+  return "…";
 }
 
 function PeerSwitcher({ onClose }: { onClose: () => void }) {
@@ -368,12 +378,6 @@ function NewGroup() {
   );
 }
 
-interface Pending {
-  path: string;
-  name: string;
-  preview: string | null;
-}
-
 const MAX_ROWS = 8;
 const CODE_LANGS = ["", "typescript", "javascript", "python", "rust", "go", "java", "csharp", "sql", "bash", "json", "yaml", "html", "css"];
 
@@ -393,16 +397,19 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
     };
     // Re-read whenever any peer changes: a roster update arrives as a peer event.
   }, [isGroup, peerId, peerVersion]);
-  const [text, setText] = useState("");
+  const [draft] = useState(() => useChat.getState().drafts[peerId]);
+  const [text, setText] = useState(draft?.text ?? "");
   const [editing, setEditing] = useState<ChatMessage | null>(null);
-  const [pending, setPending] = useState<Pending[]>([]);
-  const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
+  // The draft being written when an edit started; it comes back afterwards.
+  const beforeEdit = useRef("");
+  const [pending, setPending] = useState<Pending[]>(draft?.files ?? []);
+  const [replyTo, setReplyTo] = useState<ChatMessage | null>(draft?.replyTo ?? null);
   const [dragging, setDragging] = useState(false);
   const [toolbar, setToolbar] = useState(false);
   // Slack-style code mode: monospace box, Enter inserts a line, Ctrl+Enter
   // sends, the text goes out wrapped in a fenced block.
-  const [codeMode, setCodeMode] = useState(false);
-  const [codeLang, setCodeLang] = useState("");
+  const [codeMode, setCodeMode] = useState(draft?.codeMode ?? false);
+  const [codeLang, setCodeLang] = useState(draft?.codeLang ?? "");
   const [menu, setMenu] = useState(false);
   const [search, setSearch] = useState<string | null>(null);
   const [results, setResults] = useState<ChatMessage[] | null>(null);
@@ -412,6 +419,29 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
   const searchRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const lastTyping = useRef(0);
+
+  const unsent = useRef<Draft | null>(null);
+  unsent.current = { text: editing ? beforeEdit.current : text, files: pending, replyTo, codeMode, codeLang };
+  useEffect(() => saveDraftText(peerId, editing ? beforeEdit.current : text), [peerId, text, editing]);
+  useEffect(
+    () => () => {
+      if (unsent.current) useChat.getState().setDraft(peerId, unsent.current);
+    },
+    [peerId],
+  );
+
+  const startEdit = (m: ChatMessage) => {
+    if (!editing) beforeEdit.current = text;
+    setEditing(m);
+    setCodeMode(false);
+    setText(m.body);
+    area.current?.focus();
+  };
+  const stopEdit = () => {
+    setEditing(null);
+    setText(beforeEdit.current);
+    beforeEdit.current = "";
+  };
 
   const byId = useMemo(() => new Map(messages.map((m) => [m.msgId, m])), [messages]);
   const progress = useMemo(() => progressByMessage(transfers), [transfers]);
@@ -437,8 +467,7 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
           setSearch(null);
           setResults(null);
         } else if (editing) {
-          setEditing(null);
-          setText("");
+          stopEdit();
         } else if (replyTo || pending.length || text) {
           setReplyTo(null);
           setPending([]);
@@ -514,10 +543,7 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
     if (editing) {
       const body = text.trim();
       if (!body) return;
-      if (await edit(editing.msgId, body)) {
-        setEditing(null);
-        setText("");
-      }
+      if (await edit(editing.msgId, body)) stopEdit();
       return;
     }
     let body = codeMode ? text.replace(/^\n+|\n+$/g, "") : text.trim();
@@ -796,12 +822,7 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
                     setReplyTo(m);
                     area.current?.focus();
                   }}
-                  onEdit={() => {
-                    setEditing(m);
-                    setCodeMode(false);
-                    setText(m.body);
-                    area.current?.focus();
-                  }}
+                  onEdit={() => startEdit(m)}
                 />
               </div>
             );
@@ -819,7 +840,7 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
             <div className="mb-2 flex items-center gap-2 rounded-md border-l-4 border-amber-500 bg-gray-50 px-3 py-1.5 text-xs">
               <Pencil size={12} className="text-amber-600" />
               <div className="min-w-0 flex-1 text-gray-700">Editing message · Enter to save, Esc to cancel</div>
-              <button className="text-gray-500 hover:text-gray-900" onClick={() => { setEditing(null); setText(""); }} aria-label="Cancel edit">✕</button>
+              <button className="text-gray-500 hover:text-gray-900" onClick={stopEdit} aria-label="Cancel edit">✕</button>
             </div>
           )}
           {replyTo && (
