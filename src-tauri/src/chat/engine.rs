@@ -24,6 +24,7 @@ pub const EVENT_TRANSFER: &str = "chat://transfer";
 pub const EVENT_STATUS: &str = "chat://status";
 pub const EVENT_DELETED: &str = "chat://deleted";
 pub const EVENT_TYPING: &str = "chat://typing";
+pub const EVENT_PEER_REMOVED: &str = "chat://peer-removed";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -124,6 +125,14 @@ pub struct DeletedEvent {
     pub peer_id: i64,
     /// Empty means the whole conversation was cleared.
     pub msg_ids: Vec<String>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerRemovedEvent {
+    pub id: i64,
+    /// The row that now holds its history, when it was a merge.
+    pub merged_into: Option<i64>,
 }
 
 struct RemoteHello {
@@ -464,12 +473,12 @@ impl ChatEngine {
             &host,
             hello.port,
         )?;
-        let tx = self.clone().run_chat_connection(stream, bound);
         if bound != row_id {
-            // Merged into an existing row; tell the UI so it refreshes.
-            let _ = self.app.emit(EVENT_PEER, self.store.get_peer(bound)?);
+            // The row we dialled was merged into the one that already had
+            // this peer id and no longer exists.
+            let _ = self.app.emit(EVENT_PEER_REMOVED, PeerRemovedEvent { id: row_id, merged_into: Some(bound) });
         }
-        Ok(tx)
+        Ok(self.clone().run_chat_connection(stream, bound))
     }
 
     async fn handshake(&self, stream: &mut TcpStream, purpose: Purpose) -> Result<RemoteHello> {
