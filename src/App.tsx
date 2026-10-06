@@ -26,6 +26,8 @@ export default function App() {
   useEffect(() => {
     if (tab === "mail" || tab === "chat") setLastTab(tab);
   }, [tab]);
+  // The chat view stays mounted behind other tabs; it must not count as read.
+  useEffect(() => useChat.getState().setVisible(tab === "chat"), [tab]);
   useEffect(() => onNavigate((t) => setTab(t)), []);
   // Save-to-Files buttons only show once connected; the check runs in the background.
   useEffect(() => void useFiles.getState().refresh(true), []);

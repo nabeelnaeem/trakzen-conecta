@@ -17,6 +17,8 @@ interface ChatState {
   pendingPair: string | null;
   error: string | null;
   initialised: boolean;
+  /** The chat tab is on screen. Hidden tabs stay mounted, so App reports this. */
+  visible: boolean;
 
   init: () => Promise<void>;
   refreshIdentity: () => Promise<void>;
@@ -38,6 +40,37 @@ interface ChatState {
   createGroup: (name: string, memberIds: number[]) => Promise<void>;
   clearChat: () => Promise<void>;
   clearError: () => void;
+  setVisible: (visible: boolean) => void;
+  /** Re-reads peers and the open conversation, e.g. after the machine wakes. */
+  resync: () => Promise<void>;
+}
+
+/** The user can see the open conversation right now. */
+function isViewing() {
+  return useChat.getState().visible && document.hasFocus();
+}
+
+async function markActiveRead() {
+  const id = useChat.getState().activePeerId;
+  if (id === null) return;
+  try {
+    await chat.markRead(id);
+  } catch {
+    return;
+  }
+  const { peers } = useChat.getState();
+  useChat.setState({ peers: peers.map((p) => (p.id === id ? { ...p, unread: 0 } : p)) });
+  reloadPeersSoon();
+}
+
+// Focus and visibilitychange usually fire together.
+let resyncTimer: number | undefined;
+function resyncSoon() {
+  if (resyncTimer !== undefined) return;
+  resyncTimer = window.setTimeout(() => {
+    resyncTimer = undefined;
+    void useChat.getState().resync();
+  }, 100);
 }
 
 function upsertMessage(list: ChatMessage[], m: ChatMessage): ChatMessage[] {
@@ -120,6 +153,7 @@ export const useChat = create<ChatState>((set, get) => ({
   pendingPair: null,
   error: null,
   initialised: false,
+  visible: false,
 
   init: async () => {
     if (get().initialised) return;
@@ -153,7 +187,7 @@ export const useChat = create<ChatState>((set, get) => ({
       }),
       chat.onMessage((m) => {
         const { activePeerId, messages, peers } = get();
-        const viewing = m.peerId === activePeerId && document.hasFocus();
+        const viewing = m.peerId === activePeerId && isViewing();
         for (const l of loads) if (l.peerId === m.peerId) l.seen.set(m.msgId, m);
         if (m.peerId === activePeerId) {
           set({ messages: upsertMessage(messages, m) });
@@ -206,12 +240,11 @@ export const useChat = create<ChatState>((set, get) => ({
         set({ transfers });
       }),
     ]);
-    // Messages that arrived while the window was in the background are
-    // only marked read once the user is actually looking at them.
-    window.addEventListener("focus", () => {
-      const id = get().activePeerId;
-      if (id === null) return;
-      void chat.markRead(id).then(() => get().loadPeers());
+    // Coming back (focus, restore, wake from sleep) re-reads what may have
+    // been missed, and marks read what arrived while nobody was looking.
+    window.addEventListener("focus", resyncSoon);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") resyncSoon();
     });
     chat.nearby().then((nearby) => set({ nearby })).catch(() => undefined);
     await Promise.all([get().refreshIdentity(), get().loadPeers()]);
@@ -243,8 +276,9 @@ export const useChat = create<ChatState>((set, get) => ({
     if (id === null) return;
     try {
       if (!(await loadConversation(id))) return;
-      await chat.markRead(id);
-      set({ peers: get().peers.map((p) => (p.id === id ? { ...p, unread: 0 } : p)) });
+      // Selected from elsewhere (a notification, share-to-chat) while the
+      // tab is hidden: it is marked read when the tab is shown.
+      if (get().visible) await markActiveRead();
       void chat.connectPeer(id);
     } catch (e) {
       // A peer that vanished underneath us (removed elsewhere) means the
@@ -393,4 +427,22 @@ export const useChat = create<ChatState>((set, get) => ({
   },
 
   clearError: () => set({ error: null }),
+
+  setVisible: (visible) => {
+    if (get().visible === visible) return;
+    set({ visible });
+    if (isViewing()) void markActiveRead();
+  },
+
+  resync: async () => {
+    void get().loadPeers();
+    const id = get().activePeerId;
+    if (id === null) return;
+    try {
+      if (!(await loadConversation(id))) return;
+    } catch {
+      return;
+    }
+    if (isViewing()) await markActiveRead();
+  },
 }));
