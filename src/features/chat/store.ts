@@ -471,7 +471,12 @@ export const useChat = create<ChatState>((set, get) => ({
       try {
         const page = await chat.listMessages(id, limit, messages[0].id);
         if (get().activePeerId !== id) return 0;
-        const fresh = load.cleared ? [] : page.filter((m) => !load.deleted.has(m.msgId));
+        const fresh = load.cleared
+          ? []
+          : page.filter((m) => !load.deleted.has(m.msgId)).map((m) => {
+              const e = load.seen.get(m.msgId);
+              return e ? fresher(e, m) : m;
+            });
         const before = get().messages.length;
         const next = prependMessages(get().messages, fresh);
         set({ messages: next, hasOlder: !load.cleared && page.length === limit });
