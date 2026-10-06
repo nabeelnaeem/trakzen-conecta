@@ -1,5 +1,5 @@
 import { saveToFiles, useFiles } from "../files/store";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -382,7 +382,7 @@ const MAX_ROWS = 8;
 const CODE_LANGS = ["", "typescript", "javascript", "python", "rust", "go", "java", "csharp", "sql", "bash", "json", "yaml", "html", "css"];
 
 function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer: Peer; peerId: number; name: string; seed: string; host: string; online: boolean; typing: { who: string | null } | null }) {
-  const { messages, transfers, sendText, sendFile, removePeer, clearChat, edit } = useChat();
+  const { messages, hasOlder, loadingOlder, loadOlder, transfers, sendText, sendFile, removePeer, clearChat, edit } = useChat();
   const isGroup = !!peer.isGroup;
   const left = !!peer.groupLeft;
   const [members, setMembers] = useState<Peer[] | null>(null);
@@ -414,7 +414,10 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
   const [search, setSearch] = useState<string | null>(null);
   const [results, setResults] = useState<ChatMessage[] | null>(null);
   const [searching, setSearching] = useState(false);
-  const bottom = useRef<HTMLDivElement>(null);
+  const scroller = useRef<HTMLDivElement>(null);
+  // Where the first message sat before an older page went in above it.
+  const anchor = useRef<{ msgId: string; top: number } | null>(null);
+  const lastId = useRef<number | null>(null);
   const area = useRef<HTMLTextAreaElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -506,9 +509,41 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
     el.style.height = `${Math.min(line * rows + 18, Math.max(codeMode ? 120 : 40, el.scrollHeight))}px`;
   }, [text, codeMode]);
 
-  useEffect(() => {
-    bottom.current?.scrollIntoView({ block: "end" });
-  }, [messages.length, peerId, results === null]);
+  // The bubble rather than its row: the day divider above it can come and go.
+  const rowOf = (msgId: string) => scroller.current?.querySelector(`[data-msg="${CSS.escape(msgId)}"]`)?.lastElementChild ?? null;
+
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    if (results) {
+      // Back from search, the timeline opens at the bottom again.
+      lastId.current = null;
+      return;
+    }
+    const a = anchor.current;
+    if (a && messages[0]?.msgId !== a.msgId) {
+      anchor.current = null;
+      const row = rowOf(a.msgId);
+      if (row) el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - a.top;
+    }
+    const last = messages[messages.length - 1];
+    const prev = lastId.current;
+    lastId.current = last?.id ?? null;
+    if (last && (prev === null || last.id > prev)) el.scrollTop = el.scrollHeight;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, results]);
+
+  const onScroll = () => {
+    const el = scroller.current;
+    if (!el || results || !hasOlder || loadingOlder || el.scrollTop > 300) return;
+    const first = messages[0];
+    const row = first ? rowOf(first.msgId) : null;
+    if (!row) return;
+    anchor.current = { msgId: first.msgId, top: row.getBoundingClientRect().top - el.getBoundingClientRect().top };
+    void loadOlder().then((n) => {
+      if (n === 0) anchor.current = null;
+    });
+  };
 
   const attach = async (paths: string[]) => {
     const fresh = paths.filter((p) => !pending.some((x) => x.path === p));
@@ -773,8 +808,16 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto">
+      <div ref={scroller} className="flex-1 overflow-y-auto" onScroll={onScroll}>
         <div className="mx-auto w-full max-w-[880px] px-4 py-3">
+          {results === null && loadingOlder && (
+            <div className="flex justify-center py-2">
+              <Spinner size={16} className="text-gray-400" />
+            </div>
+          )}
+          {results === null && !hasOlder && messages.length > 0 && (
+            <div className="py-2 text-center text-[11px] text-gray-400">Beginning of conversation</div>
+          )}
           {messages.filter((m) => m.pinned).length > 0 && (
             <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
               <div className="mb-1 font-semibold">Pinned</div>
@@ -805,7 +848,7 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
             lastFrom = from;
             lastAt = m.createdAt;
             return (
-              <div key={m.msgId}>
+              <div key={m.msgId} data-msg={m.msgId}>
                 {showDay && (
                   <div className="my-3 flex items-center gap-3 text-[11px] text-gray-400">
                     <span className="h-px flex-1 bg-gray-200" />
@@ -827,7 +870,6 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
               </div>
             );
           })}
-          <div ref={bottom} />
         </div>
       </div>
 
