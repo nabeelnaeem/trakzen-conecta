@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useMail } from "./store";
+import { activeTab } from "../../lib/activeTab";
 
 const typing = (el: EventTarget | null) => {
   const t = el as HTMLElement | null;
@@ -17,6 +18,7 @@ export function useMailShortcuts(searchRef: React.RefObject<HTMLInputElement | n
         if (e.key === "Escape" && s.filterEditor) s.closeFilterEditor();
         return;
       }
+      if (activeTab() !== "mail") return;
       if (typing(e.target)) {
         if (e.key === "Escape") (e.target as HTMLElement).blur();
         return;

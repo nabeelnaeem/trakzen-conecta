@@ -9,6 +9,7 @@ import { bytes, shortDate, timeOnly } from "../../lib/format";
 import { chat as chatIpc, errorMessage } from "../../lib/ipc";
 import { codeFromCopyButton, isOnlyCodeBlock, renderMarkdown } from "../../lib/markdown";
 import { navigateTo } from "../../lib/navigate";
+import { activeTab } from "../../lib/activeTab";
 import { textToHtml, useMail } from "../mail/store";
 import { Spinner } from "../../lib/Spinner";
 import type { ChatMessage, Peer } from "../../lib/types";
@@ -29,6 +30,7 @@ export function ChatView() {
   // Ctrl+K: jump to a peer.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (activeTab() !== "chat") return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setSwitcher(true);
@@ -425,6 +427,7 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
   // Ctrl+F searches this conversation; Esc clears whatever is in progress.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (activeTab() !== "chat") return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
         e.preventDefault();
         setSearch((v) => v ?? "");
