@@ -671,6 +671,9 @@ export const useMail = create<MailState>((set, get) => ({
     set({ messages: get().messages.map(patchRow), thread: get().thread.map(patchRow) });
     try {
       await mail.setFlags(m.id, { starred });
+      // The list row may stand for another message of the thread, and the
+      // Starred view gains or loses a row.
+      await get().refresh();
     } catch (e) {
       set({ error: errorMessage(e) });
       await get().refresh();
@@ -713,12 +716,21 @@ export const useMail = create<MailState>((set, get) => ({
       (action === "notSpam" && get().folder === "spam") ||
       (action === "inbox" && (get().folder === "trash" || get().folder === "spam"));
     if (removesFromView) {
+      // By thread in conversation mode: a deep-linked thread is open on its
+      // newest message, which need not be the id of its list row.
       const gone = new Set(targets);
+      const goneThreads = new Set(
+        get().conversations
+          ? [...get().messages, ...get().thread].filter((m) => gone.has(m.id)).map(threadKey)
+          : [],
+      );
+      const isGone = (m: MessageSummary) => gone.has(m.id) || goneThreads.has(threadKey(m));
+      const openGone = gone.has(get().openId ?? -1) || get().thread.some(isGone);
       set({
-        messages: get().messages.filter((m) => !gone.has(m.id)),
+        messages: get().messages.filter((m) => !isGone(m)),
         selected: [],
-        openId: gone.has(get().openId ?? -1) ? null : get().openId,
-        thread: gone.has(get().openId ?? -1) ? [] : get().thread,
+        openId: openGone ? null : get().openId,
+        thread: openGone ? [] : get().thread,
       });
     } else if (action === "unread") {
       set({ openId: null, thread: [], expanded: [], selected: [] });
