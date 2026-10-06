@@ -493,6 +493,7 @@ pub fn run() {
             trakzen_files::trakzen_files_upload,
             trakzen_files::trakzen_files_rename_upload,
             trakzen_files::trakzen_files_cancel_upload,
+            trakzen_files::trakzen_files_abort,
             trakzen_files::trakzen_files_open,
         ])
         .run(tauri::generate_context!())

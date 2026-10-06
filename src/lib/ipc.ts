@@ -181,6 +181,8 @@ export const files = {
   renameUpload: (uploadId: string, name: string) =>
     invoke<FilesUploadOutcome>("trakzen_files_rename_upload", { uploadId, name }),
   cancelUpload: (uploadId: string) => invoke<void>("trakzen_files_cancel_upload", { uploadId }),
+  /** Stops a running `upload` (by its key) or `connect` (key "connect"); the call then fails with "cancelled". */
+  abort: (key: string) => invoke<void>("trakzen_files_abort", { key }),
   open: (path: string) => invoke<void>("trakzen_files_open", { path }),
   onUpload: (cb: (p: FilesUploadProgress) => void) =>
     listen<FilesUploadProgress>("files://upload", (e) => cb(e.payload)),
