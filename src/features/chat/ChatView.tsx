@@ -1206,7 +1206,14 @@ function Bubble({
               danger
               onClick={() => {
                 setMenu(false);
-                void deleteMessage(m.msgId, true);
+                void confirmDialog({
+                  title: "Delete for everyone?",
+                  message: `The message is removed here and on ${inGroup ? "every member's machine" : `${peerName}'s machine`}.`,
+                  confirmLabel: "Delete for everyone",
+                  danger: true,
+                }).then((ok) => {
+                  if (ok) void deleteMessage(m.msgId, true);
+                });
               }}
             >
               Delete for everyone
