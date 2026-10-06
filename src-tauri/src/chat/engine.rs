@@ -1146,6 +1146,9 @@ impl ChatEngine {
         if peer.is_group {
             self.store.add_recipients(&msg_id, &targets)?;
         }
+        // flush_files announces the message when it picks it up, which is
+        // later if another file to this peer is still going.
+        self.emit_message(&msg);
         for id in targets {
             let engine = self.clone();
             tauri::async_runtime::spawn(async move { engine.flush_files(id).await });
