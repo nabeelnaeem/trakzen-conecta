@@ -29,6 +29,8 @@ export interface ComposerState {
   draft: ComposeDraft | null;
   files: string[];
   draftId: string | null;
+  /** Local list row of the draft this composer was opened from. */
+  draftMessageId: number | null;
   dirty: boolean;
   saving: boolean;
   savedAt: number | null;
@@ -162,6 +164,7 @@ const emptyComposer = (accountId: number): ComposerState => ({
   draft: null,
   files: [],
   draftId: null,
+  draftMessageId: null,
   dirty: false,
   saving: false,
   savedAt: null,
@@ -491,6 +494,7 @@ export const useMail = create<MailState>((set, get) => ({
             bodyHtml: d.bodyHtml ?? textToHtml(d.bodyText),
             files: d.files ?? [],
             draftId: d.draftId,
+            draftMessageId: row.id,
             draft: d.threadId || d.inReplyTo
               ? {
                   accountId: row.accountId,
@@ -874,12 +878,14 @@ export const useMail = create<MailState>((set, get) => ({
     if (draftTimer) window.clearTimeout(draftTimer);
     set({ composer: null });
     if (c?.draftId) {
+      const row = c.draftMessageId;
+      if (row !== null) set({ messages: get().messages.filter((m) => m.id !== row) });
       try {
-        await mail.discardDraft(c.accountId, c.draftId);
-        if (get().folder === "drafts") await get().refresh();
+        await mail.discardDraft(c.accountId, c.draftId, row);
       } catch (e) {
         set({ error: errorMessage(e) });
       }
+      await get().refresh();
     }
   },
 
@@ -898,10 +904,10 @@ export const useMail = create<MailState>((set, get) => ({
       const pending = get().pendingSend;
       set({ pendingSend: pending?.message === message ? null : pending, busy: true, error: null });
       try {
-        await mail.send(message);
+        await mail.send(message, c.draftMessageId);
         set({ notice: "Sent." });
         window.setTimeout(() => set({ notice: null }), 3000);
-        if (get().folder === "drafts") void get().refresh();
+        void get().refresh();
       } catch (e) {
         // Give the user their draft back rather than losing it.
         set({ error: errorMessage(e), composer: c });

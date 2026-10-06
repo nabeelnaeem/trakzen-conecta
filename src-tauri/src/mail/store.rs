@@ -331,6 +331,16 @@ impl MailStore {
         Ok(())
     }
 
+    /// Drops a cached draft once it is sent or discarded. Only draft rows:
+    /// a stale id must never take a real message with it.
+    pub fn delete_draft_row(&self, id: i64) -> Result<()> {
+        self.db.conn().execute(
+            "DELETE FROM mail_messages WHERE id = ?1 AND has_label(labels, 'DRAFT')",
+            params![id],
+        )?;
+        Ok(())
+    }
+
     pub fn clear_messages(&self, account_id: i64) -> Result<()> {
         self.db.conn().execute(
             "DELETE FROM mail_messages WHERE account_id = ?1",
@@ -1118,6 +1128,25 @@ mod tests {
         store.snooze(snoozed, i64::MAX).unwrap();
         assert_eq!(store.unread_count(acc.id).unwrap(), 1);
         assert_eq!(store.unread_count(UNIFIED_ACCOUNT).unwrap(), 1);
+    }
+
+    #[test]
+    fn only_draft_rows_are_deleted_as_drafts() {
+        let store = store();
+        let acc = store.upsert_account("gmail", "a@b.c", None).unwrap();
+        store
+            .upsert_messages(acc.id, &[msg("1", &["DRAFT"]), msg("2", &["INBOX"])])
+            .unwrap();
+        let ids: Vec<i64> = store
+            .summaries_by_remote_ids(acc.id, &["1".into(), "2".into()])
+            .unwrap()
+            .iter()
+            .map(|m| m.id)
+            .collect();
+        for id in &ids {
+            store.delete_draft_row(*id).unwrap();
+        }
+        assert_eq!(store.known_remote_ids(acc.id).unwrap(), vec!["2".to_string()]);
     }
 
     #[test]

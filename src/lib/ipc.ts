@@ -100,10 +100,11 @@ export const mail = {
   archive: (messageId: number) => invoke<void>("mail_archive", { messageId }),
   composeDraft: (messageId: number, mode: ReplyMode) =>
     invoke<ComposeDraft>("mail_compose_draft", { messageId, mode }),
-  send: (message: OutgoingMessage) => invoke<void>("mail_send", { message }),
+  send: (message: OutgoingMessage, draftMessageId: number | null = null) =>
+    invoke<void>("mail_send", { message, draftMessageId }),
   saveDraft: (message: OutgoingMessage) => invoke<string>("mail_save_draft", { message }),
-  discardDraft: (accountId: number, draftId: string) =>
-    invoke<void>("mail_discard_draft", { accountId, draftId }),
+  discardDraft: (accountId: number, draftId: string, messageId: number | null = null) =>
+    invoke<void>("mail_discard_draft", { accountId, draftId, messageId }),
   openDraft: (messageId: number) => invoke<DraftContent>("mail_open_draft", { messageId }),
   saveAttachment: (attachmentId: number, open: boolean) =>
     invoke<string>("mail_save_attachment", { attachmentId, open }),

@@ -931,8 +931,14 @@ async fn resolve_attachments(
     Ok(resolved)
 }
 
+/// `draft_message_id` is the local row of the draft being sent, dropped
+/// right away so the list does not show it until the next sync.
 #[tauri::command]
-pub async fn mail_send(state: State<'_, AppState>, mut message: OutgoingMessage) -> Result<()> {
+pub async fn mail_send(
+    state: State<'_, AppState>,
+    mut message: OutgoingMessage,
+    draft_message_id: Option<i64>,
+) -> Result<()> {
     if message.to.iter().all(|t| t.trim().is_empty()) {
         return Err(AppError::Other("add at least one recipient".into()));
     }
@@ -960,6 +966,9 @@ pub async fn mail_send(state: State<'_, AppState>, mut message: OutgoingMessage)
             tracing::warn!(%e, "could not delete draft after send");
         }
     }
+    if let Some(id) = draft_message_id {
+        state.mail.delete_draft_row(id)?;
+    }
     // Pull the sent copy into the local store so it shows up under Sent.
     spawn_sync(state.app.clone(), account.id);
     Ok(())
@@ -977,10 +986,18 @@ pub async fn mail_save_draft(state: State<'_, AppState>, message: OutgoingMessag
 }
 
 #[tauri::command]
-pub async fn mail_discard_draft(state: State<'_, AppState>, account_id: i64, draft_id: String) -> Result<()> {
+pub async fn mail_discard_draft(
+    state: State<'_, AppState>,
+    account_id: i64,
+    draft_id: String,
+    message_id: Option<i64>,
+) -> Result<()> {
     let account = state.mail.get_account(account_id)?;
     let provider = state.providers.provider_for(&account.provider)?;
     provider.delete_draft(&account, &draft_id).await?;
+    if let Some(id) = message_id {
+        state.mail.delete_draft_row(id)?;
+    }
     spawn_sync(state.app.clone(), account_id);
     Ok(())
 }
@@ -1113,7 +1130,7 @@ pub async fn mail_rsvp(state: State<'_, AppState>, message_id: i64, accept: bool
         }],
         draft_id: None,
     };
-    mail_send(state, message).await
+    mail_send(state, message, None).await
 }
 
 pub async fn flush_outbox(app: &AppHandle) {
@@ -1125,7 +1142,7 @@ pub async fn flush_outbox(app: &AppHandle) {
         match serde_json::from_str::<OutgoingMessage>(&payload) {
             Ok(message) => {
                 let state = app.state::<AppState>();
-                if let Err(e) = mail_send(state, message).await {
+                if let Err(e) = mail_send(state, message, None).await {
                     tracing::warn!(%e, "scheduled send failed");
                 }
             }
