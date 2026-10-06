@@ -474,6 +474,7 @@ pub fn run() {
             chat::commands::chat_answer_file,
             chat::commands::chat_set_auto_accept,
             chat::commands::chat_pin,
+            chat::commands::chat_list_pinned,
             chat::commands::chat_create_group,
             chat::commands::chat_group_members,
             chat::commands::chat_group_add_members,

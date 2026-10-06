@@ -357,6 +357,11 @@ pub async fn chat_pin(state: State<'_, AppState>, msg_id: String, pinned: bool) 
 }
 
 #[tauri::command]
+pub async fn chat_list_pinned(state: State<'_, AppState>, peer_id: i64) -> Result<Vec<ChatMessage>> {
+    state.chat.store.list_pinned(peer_id)
+}
+
+#[tauri::command]
 pub async fn chat_create_group(state: State<'_, AppState>, name: String, member_ids: Vec<i64>) -> Result<Peer> {
     state.chat.create_group(&name, member_ids).await
 }

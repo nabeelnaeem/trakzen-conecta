@@ -684,6 +684,16 @@ impl ChatStore {
         self.get_message(msg_id)
     }
 
+    pub fn list_pinned(&self, peer_id: i64) -> Result<Vec<ChatMessage>> {
+        let conn = self.db.conn();
+        let sql = format!("SELECT {MSG_COLS} FROM chat_messages WHERE peer_id = ?1 AND pinned = 1 ORDER BY id");
+        let rows = conn
+            .prepare_cached(&sql)?
+            .query_map(params![peer_id], row_to_message)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
     pub fn set_preview(&self, msg_id: &str, preview: &LinkPreview) -> Result<Option<ChatMessage>> {
         self.db.conn().execute(
             "UPDATE chat_messages SET preview = ?2 WHERE msg_id = ?1",
@@ -910,6 +920,14 @@ mod tests {
         assert!(m.edited_at.is_some());
         assert_eq!(store.search_messages(peer.id, "tomorrow", 10).unwrap().len(), 2);
         assert!(store.search_messages(peer.id, "tonight", 10).unwrap().is_empty());
+
+        store.insert_message(&msg(peer.id, "c", "keep this")).unwrap();
+        store.set_pinned("c", true).unwrap();
+        store.set_pinned("a", true).unwrap();
+        let pinned: Vec<_> = store.list_pinned(peer.id).unwrap().into_iter().map(|m| m.msg_id).collect();
+        assert_eq!(pinned, ["a", "c"]);
+        store.set_pinned("a", false).unwrap();
+        assert_eq!(store.list_pinned(peer.id).unwrap().len(), 1);
     }
 
     #[test]
