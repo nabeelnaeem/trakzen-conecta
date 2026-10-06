@@ -39,6 +39,12 @@ const OFFER_GRACE: Duration = Duration::from_secs(60);
 /// (and was dropped) and acks lost with a connection, which otherwise wait
 /// for the next reconnect.
 const GROUP_RETRY: Duration = Duration::from_secs(30);
+/// A chat connection pings this often so a link that died silently (sleep,
+/// Wi-Fi loss) is noticed; peers have always answered `Ping` with `Pong`.
+const KEEPALIVE: Duration = Duration::from_secs(20);
+/// With pings going both ways, a healthy link carries a frame well within
+/// this; a silent one is dropped and the peer shown offline.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 /// An unanswered offer is dropped after this long, on both sides.
 const OFFER_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
@@ -551,11 +557,25 @@ impl ChatEngine {
             let _ = wr.shutdown().await;
         });
 
+        let ping_tx = tx.clone();
+        let pinger = tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(KEEPALIVE).await;
+                if ping_tx.send(Frame::Control(ControlMsg::Ping)).await.is_err() {
+                    break;
+                }
+            }
+        });
+
         let engine = self.clone();
         let out = tx.clone();
         tauri::async_runtime::spawn(async move {
             loop {
-                match protocol::read_frame(&mut rd).await {
+                let Ok(read) = tokio::time::timeout(IDLE_TIMEOUT, protocol::read_frame(&mut rd)).await else {
+                    tracing::debug!(row_id, "connection went silent, dropping it");
+                    break;
+                };
+                match read {
                     Ok(Some(Frame::Control(msg))) => {
                         if let Err(e) = engine.on_control(row_id, msg, &out).await {
                             tracing::warn!(row_id, %e, "failed handling message");
@@ -571,6 +591,7 @@ impl ChatEngine {
                     }
                 }
             }
+            pinger.abort();
             let current = {
                 let mut conns = engine.conns.lock().unwrap();
                 let current = conns.get(&row_id).is_some_and(|c| c.generation == generation);
