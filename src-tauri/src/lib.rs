@@ -148,6 +148,30 @@ fn show_main(app: &AppHandle) {
     notify::focus_main(app);
 }
 
+/// Passed by the login item so the app starts in the tray.
+const MINIMIZED_ARG: &str = "--minimized";
+
+/// Login items written before `--minimized` existed open the window at login.
+/// Rewriting the entry while it is enabled picks up the current arguments
+/// (and executable path).
+fn refresh_autostart_entry(app: &AppHandle) {
+    use tauri_plugin_autostart::ManagerExt;
+    // A dev build shares the entry name and would point it at target/debug.
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let launcher = app.autolaunch();
+    match launcher.is_enabled() {
+        Ok(true) => {
+            if let Err(e) = launcher.enable() {
+                tracing::warn!(%e, "could not update the login item");
+            }
+        }
+        Ok(false) => {}
+        Err(e) => tracing::warn!(%e, "could not read the login item"),
+    }
+}
+
 #[tauri::command]
 async fn app_quit(app: AppHandle) {
     app.exit(0);
@@ -158,6 +182,13 @@ async fn app_quit(app: AppHandle) {
 async fn app_notify(app: AppHandle, title: String, body: String, route: Option<String>) {
     let r = route.as_deref().and_then(notify::parse_route);
     notify::show(&app, &title, &body, r);
+}
+
+/// Called by the UI once its navigate listener is up; returns the route a
+/// cold start was launched with, if any.
+#[tauri::command]
+fn app_take_route(pending: State<'_, notify::PendingRoute>) -> Option<notify::Route> {
+    pending.take()
 }
 
 /// Unread total shown on the tray tooltip and window title.
@@ -188,6 +219,10 @@ pub fn run() {
         // notification while the app is closed) hands its arguments to the
         // running instance and exits.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // A login launch while the app is already running.
+            if args.iter().any(|a| a == MINIMIZED_ARG) {
+                return;
+            }
             let urls: Vec<String> = args.into_iter().filter(|a| a.starts_with("conecta://")).collect();
             if urls.is_empty() {
                 notify::open_route(app, None);
@@ -201,9 +236,11 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
+            Some(vec![MINIMIZED_ARG]),
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .manage(notify::PendingRoute::default())
         .on_window_event(|window, event| {
             // Closing the main window hides it to the tray unless the user
             // turned that off; the tray menu has an explicit Quit.
@@ -226,7 +263,7 @@ pub fn run() {
             let show = MenuItem::with_id(app, "show", "Open Trakzen Conecta", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
-            TrayIconBuilder::with_id("main")
+            let tray = TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().cloned().expect("bundled icon"))
                 .tooltip("Trakzen Conecta")
                 .menu(&menu)
@@ -246,7 +283,17 @@ pub fn run() {
                         show_main(tray.app_handle());
                     }
                 })
-                .build(app)?;
+                .build(app);
+            if let Err(e) = &tray {
+                tracing::warn!(%e, "could not create the tray icon");
+            }
+            // The window starts hidden (tauri.conf.json) so a login launch
+            // doesn't flash it; without a tray there would be no way back to it.
+            let minimized = std::env::args().any(|a| a == MINIMIZED_ARG);
+            if !minimized || tray.is_err() {
+                show_main(app.handle());
+            }
+            refresh_autostart_entry(app.handle());
 
             // Override lets a second instance run against its own database
             // (handy for testing chat on a single machine).
@@ -287,12 +334,8 @@ pub fn run() {
                 }
                 if let Ok(Some(urls)) = app.deep_link().get_current() {
                     let list: Vec<String> = urls.iter().map(|u| u.to_string()).collect();
-                    let handle = app.handle().clone();
-                    // The webview is not up yet; give it a moment before routing.
-                    tauri::async_runtime::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-                        notify::handle_urls(&handle, &list);
-                    });
+                    // Held in PendingRoute until the UI asks for it.
+                    notify::handle_urls(app.handle(), &list);
                 }
                 let handle = app.handle().clone();
                 app.deep_link().on_open_url(move |event| {
@@ -450,6 +493,7 @@ pub fn run() {
             chat::commands::chat_pairing_qr,
             app_set_badge,
             app_notify,
+            app_take_route,
             trakzen_files::trakzen_files_status,
             trakzen_files::trakzen_files_discover,
             trakzen_files::trakzen_files_connect,
@@ -459,6 +503,7 @@ pub fn run() {
             trakzen_files::trakzen_files_upload,
             trakzen_files::trakzen_files_rename_upload,
             trakzen_files::trakzen_files_cancel_upload,
+            trakzen_files::trakzen_files_abort,
             trakzen_files::trakzen_files_open,
         ])
         .run(tauri::generate_context!())

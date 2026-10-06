@@ -4,12 +4,12 @@ import { errorMessage, files } from "../../lib/ipc";
 import { bytes } from "../../lib/format";
 import { Spinner } from "../../lib/Spinner";
 import type { FilesEntry } from "../../lib/types";
-import { displayPath, lastDir, rememberDir, useFiles, type SaveRequest } from "./store";
+import { displayPath, isAuthError, isCancelled, lastDir, rememberDir, useFiles, type SaveRequest } from "./store";
 
 type Phase =
   | { kind: "pick" }
   | { kind: "uploading"; sent: number; total: number }
-  | { kind: "nameTaken"; name: string; uploadId: string | null }
+  | { kind: "nameTaken"; name: string; uploadId: string | null; dir: string }
   | { kind: "done"; path: string };
 
 function parentOf(path: string) {
@@ -45,6 +45,7 @@ function SaveDialog({ req, onClose }: { req: SaveRequest; onClose: () => void })
       .then((e) => live && setEntries(e.filter((x) => x.isDir).sort((a, b) => a.name.localeCompare(b.name))))
       .catch((e) => {
         if (!live) return;
+        if (isAuthError(e)) void useFiles.getState().refresh(true);
         // A remembered folder may have been deleted; fall back to the top.
         if (dir !== "/") setDir("/");
         else setErr(errorMessage(e));
@@ -56,7 +57,8 @@ function SaveDialog({ req, onClose }: { req: SaveRequest; onClose: () => void })
 
   useEffect(() => {
     const un = files.onUpload((p) => {
-      if (p.key === key) setPhase({ kind: "uploading", sent: p.sent, total: p.total });
+      // A late event must not pull a finished or failed dialog back to "uploading".
+      if (p.key === key) setPhase((ph) => (ph.kind === "uploading" ? { kind: "uploading", sent: p.sent, total: p.total } : ph));
     });
     return () => {
       void un.then((f) => f());
@@ -64,13 +66,20 @@ function SaveDialog({ req, onClose }: { req: SaveRequest; onClose: () => void })
   }, [key]);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && phase.kind !== "uploading" && cancel();
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && cancel();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   });
 
   const busy = phase.kind === "uploading";
   const canSave = dir !== "/" && name.trim() !== "" && !busy;
+  // The data is already on the server in the clashing folder; a rename can
+  // only finish it there.
+  const folderLocked = busy || (phase.kind === "nameTaken" && phase.uploadId !== null);
+  const go = (d: string) => {
+    setDir(d);
+    if (phase.kind === "nameTaken") setPhase({ kind: "pick" });
+  };
 
   const save = async () => {
     setErr(null);
@@ -85,15 +94,18 @@ function SaveDialog({ req, onClose }: { req: SaveRequest; onClose: () => void })
         setPhase({ kind: "done", path: out.path });
       } else {
         setName(out.suggested || name);
-        setPhase({ kind: "nameTaken", name: out.name, uploadId: out.uploadId });
+        setPhase({ kind: "nameTaken", name: out.name, uploadId: out.uploadId, dir });
       }
     } catch (e) {
+      if (isCancelled(e)) return;
+      if (isAuthError(e)) void useFiles.getState().refresh(true);
       setErr(errorMessage(e));
       setPhase(phase.kind === "nameTaken" ? phase : { kind: "pick" });
     }
   };
 
   const cancel = () => {
+    if (busy) void files.abort(key).catch(() => {});
     if (phase.kind === "nameTaken" && phase.uploadId) void files.cancelUpload(phase.uploadId).catch(() => {});
     onClose();
   };
@@ -103,7 +115,7 @@ function SaveDialog({ req, onClose }: { req: SaveRequest; onClose: () => void })
     try {
       const path = await files.mkdir(dir, newFolder.trim());
       setNewFolder(null);
-      setDir(path);
+      go(path);
     } catch (e) {
       setErr(errorMessage(e));
     }
@@ -149,14 +161,14 @@ function SaveDialog({ req, onClose }: { req: SaveRequest; onClose: () => void })
             <input className="input w-full" value={name} onChange={(e) => setName(e.target.value)} disabled={busy} />
             {phase.kind === "nameTaken" && (
               <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                <b>“{phase.name}”</b> is already in {displayPath(dir)}. Existing files are never replaced; save it under the suggested name,
+                <b>“{phase.name}”</b> is already in {displayPath(phase.dir)}. Existing files are never replaced; save it under the suggested name,
                 choose another, or cancel.
               </p>
             )}
 
             <label className="label mt-4">Folder</label>
             <div className="mb-1 flex min-w-0 items-center gap-1 text-sm">
-              <button className="text-blue-700 hover:underline disabled:text-gray-400 disabled:no-underline" disabled={busy || dir === "/"} onClick={() => setDir("/")}>
+              <button className="text-blue-700 hover:underline disabled:text-gray-400 disabled:no-underline" disabled={folderLocked || dir === "/"} onClick={() => go("/")}>
                 Trakzen Files
               </button>
               {crumbs.map((c, i) => (
@@ -164,8 +176,8 @@ function SaveDialog({ req, onClose }: { req: SaveRequest; onClose: () => void })
                   <ChevronRight className="size-3.5 shrink-0 text-gray-400" />
                   <button
                     className="truncate text-blue-700 hover:underline disabled:text-gray-900 disabled:no-underline"
-                    disabled={busy || i === crumbs.length - 1}
-                    onClick={() => setDir(`/${crumbs.slice(0, i + 1).join("/")}`)}
+                    disabled={folderLocked || i === crumbs.length - 1}
+                    onClick={() => go(`/${crumbs.slice(0, i + 1).join("/")}`)}
                   >
                     {i === 0 ? displayPath(`/${c}`) : c}
                   </button>
@@ -183,9 +195,9 @@ function SaveDialog({ req, onClose }: { req: SaveRequest; onClose: () => void })
                 entries.map((e) => (
                   <button
                     key={e.path}
-                    disabled={busy}
-                    onClick={() => setDir(e.path)}
-                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-gray-100"
+                    disabled={folderLocked}
+                    onClick={() => go(e.path)}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-gray-100 disabled:opacity-60 disabled:hover:bg-transparent"
                   >
                     {e.kind === "space" ? (
                       e.path === "/home" ? <Home className="size-4 text-blue-600" /> : <Users className="size-4 text-blue-600" />
@@ -199,7 +211,7 @@ function SaveDialog({ req, onClose }: { req: SaveRequest; onClose: () => void })
               )}
             </div>
             {dir !== "/" &&
-              !busy &&
+              !folderLocked &&
               (newFolder === null ? (
                 <button className="mt-2 flex items-center gap-1.5 self-start text-sm text-blue-700 hover:underline" onClick={() => setNewFolder("")}>
                   <FolderPlus className="size-4" /> New folder
@@ -237,7 +249,7 @@ function SaveDialog({ req, onClose }: { req: SaveRequest; onClose: () => void })
 
             <div className="mt-4 flex items-center justify-end gap-2">
               {dir === "/" && <span className="mr-auto text-xs text-gray-500">Choose Shared or My files</span>}
-              <button className="btn text-sm" onClick={cancel} disabled={busy}>
+              <button className="btn text-sm" onClick={cancel}>
                 Cancel
               </button>
               <button className="btn btn-primary text-sm" onClick={() => void save()} disabled={!canSave}>

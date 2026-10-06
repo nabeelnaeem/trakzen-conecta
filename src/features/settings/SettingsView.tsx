@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { confirmDialog } from "../../lib/confirm";
 import { RichEditor } from "../mail/RichEditor";
 import { textToHtml } from "../mail/store";
@@ -29,6 +29,8 @@ import { useChat } from "../chat/store";
 import { useMail } from "../mail/store";
 import { Spinner } from "../../lib/Spinner";
 import { FilesTab } from "../files/FilesTab";
+import { FilterEditor } from "../mail/FilterEditor";
+import { getAutoDownload, setAutoDownload, useUpdater } from "../../lib/updater";
 
 type Tab = "general" | "appearance" | "mail" | "accounts" | "filters" | "chat" | "files" | "about";
 
@@ -57,14 +59,22 @@ export function SettingsView() {
   const applyMail = useMail((m) => m.applySettings);
 
   useEffect(() => {
-    settings.get().then(setS).catch((e) => setErr(errorMessage(e)));
+    settings
+      .get()
+      .then((v) => setS((cur) => cur ?? v))
+      .catch((e) => setErr(errorMessage(e)));
   }, []);
 
+  // Saves reach the backend one at a time, so replies arrive in order and a
+  // slow earlier one can't land after a later one and flip a toggle back.
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
   const save = useCallback(
     async (patch: SettingsPatch, note?: string) => {
       setErr(null);
       try {
-        const v = await settings.update(patch);
+        const pending = queue.current.then(() => settings.update(patch));
+        queue.current = pending.catch(() => undefined);
+        const v = await pending;
         setS(v);
         applyMail({ showImages: v.mailShowImages, conversations: v.conversationView, undoSeconds: v.undoSendSeconds });
         notifyPrefs.notifications = v.notifications;
@@ -74,8 +84,10 @@ export function SettingsView() {
         setSavedAt(Date.now());
         if (patch.chatDisplayName !== undefined) void refreshIdentity();
         if (note) setErr(note);
+        return true;
       } catch (e) {
         setErr(errorMessage(e));
+        return false;
       }
     },
     [applyMail, refreshIdentity],
@@ -133,7 +145,8 @@ function SavedMark({ at }: { at: number | null }) {
   return <span className={`text-xs text-green-700 transition-opacity ${show ? "opacity-100" : "opacity-0"}`}>Saved</span>;
 }
 
-type Save = (patch: SettingsPatch, note?: string) => Promise<void>;
+/** Resolves to whether the patch was saved. */
+type Save = (patch: SettingsPatch, note?: string) => Promise<boolean>;
 
 function Toggle({ v, on, label, hint }: { v: boolean; on: (v: boolean) => void; label: string; hint?: string }) {
   return (
@@ -162,7 +175,8 @@ function TextField({
 }: {
   label: string;
   value: string;
-  onCommit: (v: string) => void;
+  /** Returning a promise of `false` (save failed) puts the saved value back. */
+  onCommit: (v: string) => unknown;
   hint?: string;
   placeholder?: string;
   mono?: boolean;
@@ -174,7 +188,10 @@ function TextField({
   const [v, setV] = useState(value);
   useEffect(() => setV(value), [value]);
   const commit = () => {
-    if (v !== value) onCommit(v);
+    if (v === value) return;
+    void Promise.resolve(onCommit(v)).then((ok) => {
+      if (ok === false) setV(value);
+    });
   };
   const cls = `input ${mono ? "font-mono text-xs" : ""} ${width ?? ""}`;
   return (
@@ -440,8 +457,8 @@ function MailTab({ s, save }: { s: Settings; save: Save }) {
       <Toggle v={s.conversationView} on={(v) => void save({ conversationView: v })} label="Conversation view (group replies into threads)" />
       <Toggle v={s.mailShowImages} on={(v) => void save({ mailShowImages: v })} label="Always show remote images" hint="Off (the default) means senders can't tell when you open a message; you can still show images per message." />
       <div className="flex gap-6">
-        <TextField label="Undo send window (seconds)" value={String(s.undoSendSeconds)} numeric width="w-28" onCommit={(v) => void save({ undoSendSeconds: Math.max(0, Number(v) || 0) })} hint="0 sends immediately. Max 60." />
-        <TextField label="Check for new mail every (seconds)" value={String(s.mailPollSeconds)} numeric width="w-28" onCommit={(v) => void save({ mailPollSeconds: Math.max(0, Number(v) || 0) })} hint="Minimum 15; 0 turns background checks off." />
+        <TextField label="Undo send window (seconds)" value={String(s.undoSendSeconds)} numeric width="w-28" onCommit={(v) => save({ undoSendSeconds: Math.max(0, Number(v) || 0) })} hint="0 sends immediately. Max 60." />
+        <TextField label="Check for new mail every (seconds)" value={String(s.mailPollSeconds)} numeric width="w-28" onCommit={(v) => save({ mailPollSeconds: Math.max(0, Number(v) || 0) })} hint="Minimum 15; 0 turns background checks off." />
       </div>
       <SignatureEditor label="Signature (all accounts unless overridden under Accounts)" value={s.mailSignature} onCommit={(v) => void save({ mailSignature: v })} />
       <TemplatesEditor value={s.mailTemplates} onCommit={(v) => void save({ mailTemplates: v })} />
@@ -467,6 +484,7 @@ function MailTab({ s, save }: { s: Settings; save: Save }) {
 
 function TemplatesEditor({ value, onCommit }: { value: string; onCommit: (v: string) => void }) {
   const [text, setText] = useState(value || "[]");
+  const [invalid, setInvalid] = useState<string | null>(null);
   return (
     <div>
       <div className="mb-1 text-sm">Compose templates (JSON)</div>
@@ -474,16 +492,26 @@ function TemplatesEditor({ value, onCommit }: { value: string; onCommit: (v: str
       <textarea
         className="input min-h-[100px] font-mono text-[11px]"
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          setText(e.target.value);
+          setInvalid(null);
+        }}
         onBlur={() => {
+          let parsed: unknown;
           try {
-            JSON.parse(text || "[]");
-            onCommit(text.trim() || "[]");
-          } catch {
-            /* leave unsaved until it is valid JSON */
+            parsed = JSON.parse(text || "[]");
+          } catch (e) {
+            setInvalid(`Not saved — this isn't valid JSON: ${errorMessage(e)}`);
+            return;
           }
+          if (!Array.isArray(parsed)) {
+            setInvalid("Not saved — templates must be a JSON array, e.g. [{ \"name\": \"…\", \"subject\": \"…\", \"body\": \"…\" }].");
+            return;
+          }
+          if ((text.trim() || "[]") !== (value || "[]")) onCommit(text.trim() || "[]");
         }}
       />
+      {invalid && <p className="mt-1 text-xs text-red-700">{invalid}</p>}
     </div>
   );
 }
@@ -502,7 +530,7 @@ function AccountsTab({ s, save }: { s: Settings; save: Save }) {
           This app ships no Google credentials. Create an OAuth client of type <strong>Desktop app</strong> in the Google Cloud console, enable the Gmail API, and paste the client ID and secret here (see the README). The secret is stored in the OS credential store.
         </p>
         <div className="space-y-3">
-          <TextField label="Client ID" value={s.googleClientId} mono placeholder="xxxxxxxx.apps.googleusercontent.com" onCommit={(v) => void save({ googleClientId: v })} />
+          <TextField label="Client ID" value={s.googleClientId} mono placeholder="xxxxxxxx.apps.googleusercontent.com" onCommit={(v) => save({ googleClientId: v })} />
           <TextField
             label={`Client secret ${s.googleClientSecretSet ? "(set — enter a new one to replace, blank to clear)" : ""}`}
             value=""
@@ -700,6 +728,8 @@ function FiltersTab() {
 
   return (
     <div className="space-y-6 text-sm">
+      {/* The one in MailView is hidden along with the Mail tab. */}
+      {filterEditor && <FilterEditor />}
       <p className="text-gray-600">Rules your provider applies to incoming mail. Accounts connected before filter management was added need one "Sign in again" (Accounts tab).</p>
       <input className="input" placeholder="Search filters (sender, words, label)…" value={q} onChange={(e) => setQ(e.target.value)} />
       {accounts.map((a) => {
@@ -801,11 +831,16 @@ function FiltersTab() {
 
 function ChatTab({ s, save }: { s: Settings; save: Save }) {
   const [stats, setStats] = useState<StorageStats | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ text: string; error?: boolean } | null>(null);
   const load = () => chatIpc.storageStats().then(setStats).catch(() => setStats(null));
   useEffect(() => {
     void load();
   }, []);
+  const setDownloadDir = async (dir: string) => {
+    const ok = await save({ chatDownloadDir: dir });
+    if (ok) void load();
+    return ok;
+  };
   const clear = async (which: "received" | "outgoing", label: string) => {
     const ok = await confirmDialog({
       title: `Delete all ${label}?`,
@@ -814,24 +849,28 @@ function ChatTab({ s, save }: { s: Settings; save: Save }) {
       danger: true,
     });
     if (!ok) return;
-    const n = await chatIpc.clearStorage(which);
-    setMsg(`${n} file${n === 1 ? "" : "s"} deleted.`);
+    try {
+      const n = await chatIpc.clearStorage(which);
+      setMsg({ text: `${n} file${n === 1 ? "" : "s"} deleted.` });
+    } catch (e) {
+      setMsg({ text: `Could not delete the files: ${errorMessage(e)}`, error: true });
+    }
     void load();
   };
   return (
     <div className="space-y-5 text-sm">
-      <TextField label="Display name (what peers see)" value={s.chatDisplayName} onCommit={(v) => void save({ chatDisplayName: v })} />
-      <TextField label="Listen port" value={String(s.chatPort)} numeric width="w-32" onCommit={(v) => void save({ chatPort: Number(v) || undefined })} hint="Peers connect to this port; allow it through your firewall. Changes apply immediately." />
+      <TextField label="Display name (what peers see)" value={s.chatDisplayName} onCommit={(v) => save({ chatDisplayName: v })} />
+      <TextField label="Listen port" value={String(s.chatPort)} numeric width="w-32" onCommit={(v) => save({ chatPort: Number(v) || undefined })} hint="Peers connect to this port; allow it through your firewall. Changes apply immediately." />
       <Toggle v={s.chatAskFiles} on={(v) => void save({ chatAskFiles: v })} label="Ask before accepting incoming files" hint="Off: files from peers are saved to the folder below straight away." />
       <div>
         <label className="label">Received files folder</label>
         <div className="flex gap-2">
-          <TextField label="" value={s.chatDownloadDir} placeholder="Default: Downloads/Trakzen Conecta" onCommit={(v) => void save({ chatDownloadDir: v })} />
+          <TextField label="" value={s.chatDownloadDir} placeholder="Default: Downloads/Trakzen Conecta" onCommit={setDownloadDir} />
           <button
             className="btn self-start"
             onClick={async () => {
               const picked = await open({ directory: true, title: "Choose folder" });
-              if (typeof picked === "string") void save({ chatDownloadDir: picked });
+              if (typeof picked === "string") void setDownloadDir(picked);
             }}
           >
             Browse
@@ -856,7 +895,7 @@ function ChatTab({ s, save }: { s: Settings; save: Save }) {
               </div>
               <button className="btn text-xs" disabled={stats.outgoingFiles === 0} onClick={() => void clear("outgoing", "pasted media")}>Clear</button>
             </div>
-            {msg && <div className="text-xs text-green-700">{msg}</div>}
+            {msg && <div className={`text-xs ${msg.error ? "text-red-700" : "text-green-700"}`}>{msg.text}</div>}
           </div>
         </div>
       )}
@@ -868,8 +907,21 @@ function ChatTab({ s, save }: { s: Settings; save: Save }) {
 
 function AboutTab() {
   const built = useMemo(() => new Date(__BUILD_DATE__.replace(" UTC", "Z").replace(" ", "T")).toLocaleString(), []);
-  const [updateNote, setUpdateNote] = useState<string | null>(null);
-  const [checking, setChecking] = useState(false);
+  const u = useUpdater();
+  const [autoDownload, setAutoDownloadState] = useState(getAutoDownload());
+  const pct = u.total ? Math.min(100, Math.round((u.downloaded / u.total) * 100)) : null;
+  const updateNote =
+    u.phase === "checking"
+      ? null
+      : u.phase === "upToDate"
+        ? "You're on the latest version."
+        : u.phase === "available"
+          ? `Version ${u.version} is available.`
+          : u.phase === "downloading"
+            ? `Downloading version ${u.version}…${pct !== null ? ` ${pct}%` : ""}`
+            : u.phase === "ready" || u.phase === "installing"
+              ? `Version ${u.version} is downloaded and ready to install.`
+              : null;
   return (
     <div className="space-y-2 text-sm text-gray-600">
       <div>
@@ -879,34 +931,45 @@ function AboutTab() {
         {__BUILD_DATE__} · {built}
       </div>
       <div className="flex flex-wrap items-center gap-3 text-xs">
-        <button
-          className="btn"
-          disabled={checking}
-          onClick={() => {
-            setChecking(true);
-            setUpdateNote(null);
-            void import("@tauri-apps/plugin-updater")
-              .then(({ check }) => check())
-              .then(async (update) => {
-                if (!update) {
-                  setUpdateNote("You're on the latest version.");
-                  return;
-                }
-                setUpdateNote(`Version ${update.version} is available. Downloading…`);
-                await update.downloadAndInstall();
-                setUpdateNote("Update installed. Restart the app to finish.");
-              })
-              .catch((e) => setUpdateNote(errorMessage(e)))
-              .finally(() => setChecking(false));
-          }}
-        >
-          {checking ? "Checking…" : "Check for updates"}
-        </button>
+        {u.phase === "ready" || u.phase === "installing" ? (
+          <button className="btn btn-primary" disabled={u.phase === "installing"} onClick={() => void u.install()}>
+            {u.phase === "installing" ? "Installing…" : "Restart to update"}
+          </button>
+        ) : u.phase === "available" ? (
+          <button className="btn btn-primary" onClick={() => void u.download(true)}>
+            Download version {u.version}
+          </button>
+        ) : (
+          <button className="btn" disabled={u.phase === "checking" || u.phase === "downloading"} onClick={() => void u.check(true)}>
+            {u.phase === "checking" ? "Checking…" : "Check for updates"}
+          </button>
+        )}
         <button className="text-blue-700 hover:underline" onClick={() => void openUrl("https://github.com/nabeelnaeem/trakzen-conecta/releases")}>Releases</button>
         <button className="text-blue-700 hover:underline" onClick={() => void openUrl("https://github.com/nabeelnaeem/trakzen-conecta/issues")}>Report a problem</button>
         <button className="text-blue-700 hover:underline" onClick={() => void openUrl("https://github.com/nabeelnaeem/trakzen-conecta/blob/main/PRIVACY.md")}>Privacy</button>
       </div>
       {updateNote && <p className="text-xs">{updateNote}</p>}
+      {u.phase === "downloading" && (
+        <div className="h-1 w-64 overflow-hidden rounded bg-gray-200">
+          <div className="h-full bg-blue-600 transition-[width]" style={{ width: `${pct ?? 0}%` }} />
+        </div>
+      )}
+      {u.error && <p className="text-xs text-red-700">{u.error}</p>}
+      {u.notes && (u.phase === "available" || u.phase === "downloading" || u.phase === "ready") && (
+        <details className="text-xs">
+          <summary className="cursor-pointer">What's new in {u.version}</summary>
+          <div className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap rounded bg-gray-50 p-2 text-gray-700">{u.notes}</div>
+        </details>
+      )}
+      <Toggle
+        v={autoDownload}
+        on={(v) => {
+          setAutoDownload(v);
+          setAutoDownloadState(v);
+        }}
+        label="Download updates automatically"
+        hint="Checks GitHub releases every few hours. Off: you're told when a new version is out and download it yourself."
+      />
       <div className="pt-4">
         <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">Developer</div>
         <div className="text-sm text-gray-800">Nabeel Naeem</div>

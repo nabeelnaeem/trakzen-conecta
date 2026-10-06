@@ -10,6 +10,8 @@
 //! `set_app_user_model_id`) pin the AppUserModelID so those toasts belong
 //! to this app rather than PowerShell.
 
+use std::sync::Mutex;
+
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -61,11 +63,42 @@ pub fn parse_route(url: &str) -> Option<Route> {
     }
 }
 
+/// Routes that arrive before the UI is listening (a cold start from a
+/// notification or link) wait here until it asks for them.
+#[derive(Default)]
+pub struct PendingRoute(Mutex<(bool, Option<Route>)>);
+
+impl PendingRoute {
+    /// Marks the UI as listening and hands over whatever arrived before.
+    pub fn take(&self) -> Option<Route> {
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        g.0 = true;
+        g.1.take()
+    }
+
+    /// Keeps `route` for later unless the UI is already listening; returns
+    /// it back in that case so it can be emitted.
+    fn hold(&self, route: Route) -> Option<Route> {
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if g.0 {
+            Some(route)
+        } else {
+            g.1 = Some(route);
+            None
+        }
+    }
+}
+
 /// Brings the window back (from the tray or minimised) and tells the UI
 /// where to go.
 pub fn open_route(app: &AppHandle, route: Option<Route>) {
     focus_main(app);
-    if let Some(r) = route {
+    let Some(r) = route else { return };
+    let r = match app.try_state::<PendingRoute>() {
+        Some(p) => p.hold(r),
+        None => Some(r),
+    };
+    if let Some(r) = r {
         let _ = app.emit(EVENT_NAVIGATE, r);
     }
 }
@@ -232,6 +265,15 @@ mod tests {
         assert!(matches!(parse_route("conecta://pair?host=1.2.3.4&port=47800"), Some(Route::Pair { .. })));
         assert!(parse_route("https://example.com").is_none());
         assert!(parse_route("conecta://mail/x/y").is_none());
+    }
+
+    #[test]
+    fn holds_routes_until_the_ui_listens() {
+        let p = PendingRoute::default();
+        assert!(p.hold(Route::Chat { peer: "a".into() }).is_none());
+        assert!(matches!(p.take(), Some(Route::Chat { peer }) if peer == "a"));
+        assert!(p.take().is_none());
+        assert!(p.hold(Route::Chat { peer: "b".into() }).is_some());
     }
 
     #[test]

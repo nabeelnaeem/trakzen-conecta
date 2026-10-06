@@ -35,23 +35,17 @@ pub async fn wait_for_code(listener: TcpListener, expected_state: &str, service:
         let Some(path) = req.lines().next().and_then(|l| l.split_whitespace().nth(1)) else {
             continue;
         };
-        // Browsers also ask for /favicon.ico; ignore anything without a query.
-        let Some(query) = path.split_once('?').map(|(_, q)| q) else {
+        let params: HashMap<String, String> = path
+            .split_once('?')
+            .map(|(_, q)| url::form_urlencoded::parse(q.as_bytes()).into_owned().collect())
+            .unwrap_or_default();
+        // Browsers also ask for /favicon.ico, and anything else on this
+        // machine can poke the port; only a real redirect ends the wait.
+        let Some(outcome) = redirect_outcome(&params, expected_state, service) else {
             let _ = stream
                 .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
                 .await;
             continue;
-        };
-        let params: HashMap<String, String> = url::form_urlencoded::parse(query.as_bytes()).into_owned().collect();
-
-        let outcome = match (params.get("code"), params.get("state"), params.get("error")) {
-            (_, _, Some(err)) if err == "access_denied" => {
-                Err(AppError::Auth(format!("access was not allowed in {service}")))
-            }
-            (_, _, Some(err)) => Err(AppError::Auth(format!("{service} returned '{err}'"))),
-            (Some(code), Some(state), _) if state == expected_state => Ok(code.clone()),
-            (Some(_), _, _) => Err(AppError::Auth("state mismatch in OAuth redirect".into())),
-            _ => Err(AppError::Auth("redirect did not include a code".into())),
         };
 
         let (title, detail) = match &outcome {
@@ -74,6 +68,18 @@ pub async fn wait_for_code(listener: TcpListener, expected_state: &str, service:
     }
 }
 
+/// What a request to the redirect URI means, or `None` if it is not the
+/// redirect at all (no `code` and no `error`).
+fn redirect_outcome(params: &HashMap<String, String>, expected_state: &str, service: &str) -> Option<Result<String>> {
+    Some(match (params.get("code"), params.get("state"), params.get("error")) {
+        (_, _, Some(err)) if err == "access_denied" => Err(AppError::Auth(format!("access was not allowed in {service}"))),
+        (_, _, Some(err)) => Err(AppError::Auth(format!("{service} returned '{err}'"))),
+        (Some(code), Some(state), _) if state == expected_state => Ok(code.clone()),
+        (Some(_), _, _) => Err(AppError::Auth("state mismatch in OAuth redirect".into())),
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,5 +91,23 @@ mod tests {
             pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         );
+    }
+
+    fn params(q: &str) -> HashMap<String, String> {
+        url::form_urlencoded::parse(q.as_bytes()).into_owned().collect()
+    }
+
+    #[test]
+    fn ignores_requests_that_are_not_the_redirect() {
+        assert!(redirect_outcome(&params(""), "st", "X").is_none());
+        assert!(redirect_outcome(&params("utm_source=x"), "st", "X").is_none());
+        assert!(redirect_outcome(&params("state=st"), "st", "X").is_none());
+    }
+
+    #[test]
+    fn reads_the_redirect() {
+        assert_eq!(redirect_outcome(&params("code=abc&state=st"), "st", "X").unwrap().unwrap(), "abc");
+        assert!(redirect_outcome(&params("code=abc&state=other"), "st", "X").unwrap().is_err());
+        assert!(redirect_outcome(&params("error=access_denied&state=st"), "st", "X").unwrap().is_err());
     }
 }

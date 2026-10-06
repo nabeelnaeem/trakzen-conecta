@@ -118,9 +118,15 @@ pub struct SettingsView {
 pub fn view(db: &Db) -> Result<SettingsView> {
     Ok(SettingsView {
         google_client_id: get(db, GOOGLE_CLIENT_ID)?.unwrap_or_default(),
-        google_client_secret_set: crate::secrets::get(crate::secrets::GOOGLE_CLIENT_SECRET)?
-            .map(|s| !s.is_empty())
-            .unwrap_or(false),
+        // No credential store (e.g. Linux without Secret Service) must not
+        // take the whole settings screen down with it.
+        google_client_secret_set: match crate::secrets::get(crate::secrets::GOOGLE_CLIENT_SECRET) {
+            Ok(v) => v.is_some_and(|s| !s.is_empty()),
+            Err(e) => {
+                tracing::warn!(%e, "could not read the client secret from the credential store");
+                false
+            }
+        },
         chat_display_name: get(db, CHAT_DISPLAY_NAME)?.unwrap_or_default(),
         chat_port: get(db, CHAT_PORT)?
             .and_then(|p| p.parse().ok())

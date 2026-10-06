@@ -11,9 +11,11 @@
 //! name is taken the server answers `409 name_taken` with a suggested name,
 //! which is passed to the UI so the user can pick another name or cancel.
 
+use std::collections::HashMap;
+use std::future::Future;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -22,6 +24,7 @@ use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_opener::OpenerExt;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 
 use crate::error::{AppError, Result};
 use crate::loopback::{pkce_challenge, random_urlsafe, wait_for_code};
@@ -33,13 +36,55 @@ const CHUNK: u64 = 8 * 1024 * 1024;
 const MAX_RETRIES: u32 = 5;
 pub const EVENT_UPLOAD: &str = "files://upload";
 
+/// Generous enough for one chunk over a slow link; the default `timeout`
+/// below is for small API calls.
+const CHUNK_TIMEOUT: Duration = Duration::from_secs(300);
+
 static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .user_agent(concat!("trakzen-conecta/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
         .build()
         .expect("http client")
 });
+
+/// Connects and uploads in progress, by the key the UI started them with,
+/// so `trakzen_files_abort` can stop them.
+static RUNNING: LazyLock<Mutex<HashMap<String, Arc<Notify>>>> = LazyLock::new(Default::default);
+
+const CONNECT_KEY: &str = "connect";
+
+/// Runs `job` until it finishes or is aborted under `key` (then `None`).
+async fn abortable<T>(key: &str, job: impl Future<Output = T>) -> Option<T> {
+    let stop = Arc::new(Notify::new());
+    RUNNING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key.to_string(), stop.clone());
+    let out = tokio::select! {
+        r = job => Some(r),
+        _ = stop.notified() => None,
+    };
+    let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    if running.get(key).is_some_and(|n| Arc::ptr_eq(n, &stop)) {
+        running.remove(key);
+    }
+    out
+}
+
+fn cancelled() -> AppError {
+    AppError::Other("cancelled".into())
+}
+
+/// Stops a connect (`key` = "connect") or an upload started with `key`.
+#[tauri::command]
+pub async fn trakzen_files_abort(key: String) {
+    if let Some(stop) = RUNNING.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        // A stored permit, so an abort just before the select still lands.
+        stop.notify_one();
+    }
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -187,7 +232,13 @@ impl Connection {
 pub async fn trakzen_files_status(state: State<'_, AppState>, check: bool) -> Result<FilesStatus> {
     let url = settings::get(&state.db, settings::TRAKZEN_FILES_URL)?;
     let username = settings::get(&state.db, settings::TRAKZEN_FILES_USER)?;
-    let has_token = secrets::get(secrets::TRAKZEN_FILES_TOKEN)?.is_some();
+    let has_token = match secrets::get(secrets::TRAKZEN_FILES_TOKEN) {
+        Ok(t) => t.is_some(),
+        Err(e) => {
+            tracing::warn!(%e, "could not read the Trakzen Files token");
+            false
+        }
+    };
     let mut connected = url.is_some() && has_token;
     if connected && check {
         // A revoked token shows up as `user: null`; an unreachable server
@@ -246,9 +297,13 @@ pub async fn trakzen_files_discover() -> Result<Vec<FoundServer>> {
 }
 
 /// Opens the server's approval page in the browser and waits for the user to
-/// allow the connection.
+/// allow the connection. `trakzen_files_abort("connect")` gives up waiting.
 #[tauri::command]
 pub async fn trakzen_files_connect(app: AppHandle, state: State<'_, AppState>, url: String) -> Result<FilesStatus> {
+    abortable(CONNECT_KEY, connect(&app, &state, url)).await.ok_or_else(cancelled)?
+}
+
+async fn connect(app: &AppHandle, state: &AppState, url: String) -> Result<FilesStatus> {
     let url = normalize_url(&url)?;
     let probe = HTTP
         .get(format!("{url}/api/auth/state"))
@@ -431,7 +486,8 @@ fn name_taken(body: &Value, upload_id: Option<String>) -> UploadOutcome {
 
 /// Uploads a chat file or mail attachment into `dir` on the server. `name`
 /// overrides the file's own name (used after a name clash). Progress is
-/// emitted as `files://upload` with the caller's `key`.
+/// emitted as `files://upload` with the caller's `key`, and
+/// `trakzen_files_abort(key)` stops it.
 #[tauri::command]
 pub async fn trakzen_files_upload(
     app: AppHandle,
@@ -442,24 +498,44 @@ pub async fn trakzen_files_upload(
     name: Option<String>,
 ) -> Result<UploadOutcome> {
     let conn = connection(&state)?;
-    let (payload, own_name, fingerprint) = load_source(&state, &source).await?;
-    let name = name.filter(|n| !n.trim().is_empty()).unwrap_or(own_name);
-    let size = payload.size().await?;
-    upload(&conn, &payload, &dir, &name, &fingerprint, |sent| {
-        let _ = app.emit(
-            EVENT_UPLOAD,
-            UploadProgress {
-                key: key.clone(),
-                sent,
-                total: size,
-            },
-        );
-    })
-    .await
+    let started = Mutex::new(None::<String>);
+    let job = async {
+        let (payload, own_name, fingerprint) = load_source(&state, &source).await?;
+        let name = name.filter(|n| !n.trim().is_empty()).unwrap_or(own_name);
+        let size = payload.size().await?;
+        let progress = |sent| {
+            let _ = app.emit(
+                EVENT_UPLOAD,
+                UploadProgress {
+                    key: key.clone(),
+                    sent,
+                    total: size,
+                },
+            );
+        };
+        let created = |id: &str| *started.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.to_string());
+        upload(&conn, &payload, &dir, &name, &fingerprint, progress, created).await
+    };
+    match abortable(&key, job).await {
+        Some(out) => out,
+        None => {
+            let id = started.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(id) = id {
+                // Best effort: otherwise the server keeps the partial data
+                // until it expires.
+                let _ = conn
+                    .request(reqwest::Method::DELETE, &format!("/uploads/{id}"))
+                    .send()
+                    .await;
+            }
+            Err(cancelled())
+        }
+    }
 }
 
 /// The server's resumable upload protocol: create, then send chunks at an
 /// explicit offset, asking for the server's offset again after a failure.
+/// `on_created` gets the server's upload id once it exists.
 async fn upload(
     conn: &Connection,
     payload: &Payload,
@@ -467,6 +543,7 @@ async fn upload(
     name: &str,
     fingerprint: &str,
     progress: impl Fn(u64),
+    on_created: impl Fn(&str),
 ) -> Result<UploadOutcome> {
     let size = payload.size().await?;
     let created = conn
@@ -489,6 +566,8 @@ async fn upload(
         });
     }
 
+    on_created(&id);
+
     let mut offset = created["offset"].as_u64().unwrap_or(0);
     let mut failures = 0;
     progress(offset);
@@ -499,6 +578,7 @@ async fn upload(
             .request(reqwest::Method::PATCH, &format!("/uploads/{id}"))
             .header("upload-offset", offset)
             .header("content-type", "application/octet-stream")
+            .timeout(CHUNK_TIMEOUT)
             .body(data)
             .send()
             .await;
@@ -719,9 +799,15 @@ mod live_tests {
         // Three chunks, with progress reported along the way.
         let big = temp_file(18 * 1024 * 1024 + 123, 7);
         let reported = std::sync::Mutex::new(Vec::new());
-        let out = upload(&conn, &Payload::File(big.clone()), &dir, "video.bin", "fp-big", |n| {
-            reported.lock().unwrap().push(n)
-        })
+        let out = upload(
+            &conn,
+            &Payload::File(big.clone()),
+            &dir,
+            "video.bin",
+            "fp-big",
+            |n| reported.lock().unwrap().push(n),
+            |_| {},
+        )
         .await
         .unwrap();
         let UploadOutcome::Done { path } = out else {
@@ -741,6 +827,7 @@ mod live_tests {
             "video.bin",
             "fp-small",
             |_| {},
+            |_| {},
         )
         .await
         .unwrap();
@@ -758,6 +845,7 @@ mod live_tests {
             &dir,
             &suggested,
             "fp-small",
+            |_| {},
             |_| {},
         )
         .await
@@ -779,6 +867,7 @@ mod live_tests {
             &dir,
             "late.bin",
             "fp-other",
+            |_| {},
             |_| {},
         )
         .await
@@ -848,6 +937,19 @@ mod tests {
         assert!(entries[0].is_dir && !entries[1].is_dir);
         let out = serde_json::to_value(&entries[0]).unwrap();
         assert_eq!(out["isDir"], true);
+    }
+
+    #[tokio::test]
+    async fn aborts_by_key() {
+        let job = abortable("t-abort", std::future::pending::<()>());
+        let abort = async {
+            tokio::task::yield_now().await;
+            trakzen_files_abort("t-abort".into()).await;
+        };
+        let (out, ()) = tokio::join!(job, abort);
+        assert!(out.is_none());
+        assert!(!RUNNING.lock().unwrap().contains_key("t-abort"));
+        assert_eq!(abortable("t-done", async { 7 }).await, Some(7));
     }
 
     #[test]
