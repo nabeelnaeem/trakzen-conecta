@@ -8,7 +8,7 @@ import { disable as autostartDisable, enable as autostartEnable, isEnabled as au
 import { errorMessage, mail, settings } from "../../lib/ipc";
 import { asSoundName, notifyPrefs, playNamed, SOUND_NAMES, SOUNDS, type SoundName } from "../../lib/notify";
 import { onZoom, setZoom, zoomLevel, zoomStep } from "../../lib/zoom";
-import { onNavigate } from "../../lib/navigate";
+import { onNavigate, takePendingNav } from "../../lib/navigate";
 import { bytes } from "../../lib/format";
 import { chat as chatIpc } from "../../lib/ipc";
 import {
@@ -53,7 +53,10 @@ const TABS: { key: Tab; label: string }[] = [
  * button; the only exceptions are free-text fields, which save on blur.
  */
 export function SettingsView() {
-  const [tab, setTab] = useState<Tab>("general");
+  const [tab, setTab] = useState<Tab>(() => {
+    const t = takePendingNav("settings")?.tab;
+    return TABS.some((x) => x.key === t) ? (t as Tab) : "general";
+  });
   const [s, setS] = useState<Settings | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
@@ -70,7 +73,9 @@ export function SettingsView() {
   useEffect(
     () =>
       onNavigate((target, detail) => {
-        if (target === "settings" && TABS.some((t) => t.key === detail.tab)) setTab(detail.tab as Tab);
+        if (target !== "settings") return;
+        takePendingNav("settings");
+        if (TABS.some((t) => t.key === detail.tab)) setTab(detail.tab as Tab);
       }),
     [],
   );
