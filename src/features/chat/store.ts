@@ -94,6 +94,12 @@ export function progressByMessage(transfers: Record<string, TransferProgress>): 
   return out;
 }
 
+/** Author of an incoming group message under their current name; the name
+ * stored on the message is from when it was loaded. */
+export function senderName(m: ChatMessage, peers: Peer[]): string | null {
+  return (m.senderId && peers.find((p) => p.peerId === m.senderId)?.displayName) || m.senderName;
+}
+
 function upsertMessage(list: ChatMessage[], m: ChatMessage): ChatMessage[] {
   const i = list.findIndex((x) => x.msgId === m.msgId);
   if (i === -1) return [...list, m];

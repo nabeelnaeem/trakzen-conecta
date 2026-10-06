@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { progressByMessage, useChat, type MessageProgress } from "./store";
+import { progressByMessage, senderName, useChat, type MessageProgress } from "./store";
 import { Avatar } from "../mail/Avatar";
 import { bytes, shortDate, timeOnly } from "../../lib/format";
 import { chat as chatIpc, errorMessage } from "../../lib/ipc";
@@ -1217,7 +1217,7 @@ function Bubble({
       )}
       <div className={`flex flex-col ${mine ? "items-end" : "items-start"} ${m.body.includes("```") || m.kind === "file" ? "max-w-[85%]" : "max-w-[60%]"}`}>
       {inGroup && !mine && !grouped && (
-        <div className="mb-0.5 px-1 text-[11px] font-medium text-blue-700">{m.senderName ?? "Unknown member"}</div>
+        <div className="mb-0.5 px-1 text-[11px] font-medium text-blue-700">{senderName(m, peers) ?? "Unknown member"}</div>
       )}
       <div
         className={`${frameless ? "p-0" : "px-3 py-1.5"} text-sm ${
@@ -1327,7 +1327,7 @@ function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: bool
   const peers = useChat((st) => st.peers);
   const conversation = peers.find((p) => p.id === m.peerId);
   const peerName = conversation?.displayName ?? "the peer";
-  const senderName = conversation?.isGroup ? (m.senderName ?? "this member") : peerName;
+  const sender = conversation?.isGroup ? (senderName(m, peers) ?? "this member") : peerName;
   const [preview, setPreview] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const done = m.status === "unread" || m.status === "received" || m.status === "delivered" || m.status === "read" || (mine && m.status !== "failed");
@@ -1403,7 +1403,7 @@ function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: bool
             Decline
           </button>
           <button className="btn text-xs" title="Accept this and every future file from them without asking" onClick={() => void chatIpc.answerFile(m.msgId, true, true).catch((e) => setErr(errorMessage(e)))}>
-            Always accept from {senderName}
+            Always accept from {sender}
           </button>
         </div>
       )}
