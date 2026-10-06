@@ -482,6 +482,7 @@ function MailTab({ s, save }: { s: Settings; save: Save }) {
 
 function TemplatesEditor({ value, onCommit }: { value: string; onCommit: (v: string) => void }) {
   const [text, setText] = useState(value || "[]");
+  const [invalid, setInvalid] = useState<string | null>(null);
   return (
     <div>
       <div className="mb-1 text-sm">Compose templates (JSON)</div>
@@ -489,16 +490,26 @@ function TemplatesEditor({ value, onCommit }: { value: string; onCommit: (v: str
       <textarea
         className="input min-h-[100px] font-mono text-[11px]"
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          setText(e.target.value);
+          setInvalid(null);
+        }}
         onBlur={() => {
+          let parsed: unknown;
           try {
-            JSON.parse(text || "[]");
-            onCommit(text.trim() || "[]");
-          } catch {
-            /* leave unsaved until it is valid JSON */
+            parsed = JSON.parse(text || "[]");
+          } catch (e) {
+            setInvalid(`Not saved — this isn't valid JSON: ${errorMessage(e)}`);
+            return;
           }
+          if (!Array.isArray(parsed)) {
+            setInvalid("Not saved — templates must be a JSON array, e.g. [{ \"name\": \"…\", \"subject\": \"…\", \"body\": \"…\" }].");
+            return;
+          }
+          if ((text.trim() || "[]") !== (value || "[]")) onCommit(text.trim() || "[]");
         }}
       />
+      {invalid && <p className="mt-1 text-xs text-red-700">{invalid}</p>}
     </div>
   );
 }
