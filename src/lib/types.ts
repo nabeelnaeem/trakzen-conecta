@@ -283,6 +283,12 @@ export interface TransferProgress {
   state: "active" | "paused" | "done" | "failed";
 }
 
+export interface PeerRemovedEvent {
+  id: number;
+  /** The row that now holds its history, when it was a merge. */
+  mergedInto: number | null;
+}
+
 export interface TypingEvent {
   peerId: number;
   /** Who is typing, in a group. */

@@ -127,6 +127,10 @@ async function loadConversation(id: number): Promise<boolean> {
   }
 }
 
+// Rows merged away, and where their history went. Adding a peer by IP can
+// merge its row before the add command's own reply arrives.
+const retired = new Map<number, number | null>();
+
 // Peer list replies can land out of order (a burst of messages fires many
 // reloads); only the newest request may write, and bursts share one request.
 let peerSeq = 0;
@@ -184,6 +188,13 @@ export const useChat = create<ChatState>((set, get) => ({
         if (p.peerId && peers.some((x) => x.id !== p.id && x.peerId === p.peerId)) {
           reloadPeersSoon();
         }
+      }),
+      chat.onPeerRemoved(({ id, mergedInto }) => {
+        retired.set(id, mergedInto);
+        peerSeq++;
+        set({ peers: get().peers.filter((p) => p.id !== id) });
+        if (get().activePeerId === id) void get().selectPeer(mergedInto);
+        reloadPeersSoon();
       }),
       chat.onMessage((m) => {
         const { activePeerId, messages, peers } = get();
@@ -291,6 +302,11 @@ export const useChat = create<ChatState>((set, get) => ({
   addPeer: async (name, host, port) => {
     try {
       const p = await chat.addPeer(name, host, port);
+      if (retired.has(p.id)) {
+        reloadPeersSoon();
+        await get().selectPeer(retired.get(p.id) ?? null);
+        return;
+      }
       set({ peers: [p, ...get().peers.filter((x) => x.id !== p.id)] });
       await get().selectPeer(p.id);
     } catch (e) {

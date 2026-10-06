@@ -22,6 +22,7 @@ import type {
   OutgoingMessage,
   SnoozedMessage,
   Peer,
+  PeerRemovedEvent,
   ReplyMode,
   SettingsPatch,
   SettingsView,
@@ -162,6 +163,8 @@ export const chat = {
   onMessage: (cb: (m: ChatMessage) => void) =>
     listen<ChatMessage>("chat://message", (e) => cb(e.payload)),
   onPeer: (cb: (p: Peer) => void) => listen<Peer>("chat://peer", (e) => cb(e.payload)),
+  onPeerRemoved: (cb: (r: PeerRemovedEvent) => void) =>
+    listen<PeerRemovedEvent>("chat://peer-removed", (e) => cb(e.payload)),
   onTransfer: (cb: (t: TransferProgress) => void) =>
     listen<TransferProgress>("chat://transfer", (e) => cb(e.payload)),
   onStatus: (cb: (s: ChatStatus) => void) =>
