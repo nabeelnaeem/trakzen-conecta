@@ -940,6 +940,7 @@ export const useMail = create<MailState>((set, get) => ({
     };
     const delay = get().undoSeconds;
     if (delay <= 0) {
+      set({ composer: null });
       await doSend();
       return;
     }
