@@ -1,19 +1,20 @@
 import { saveToFiles, useFiles } from "../files/store";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { useChat } from "./store";
+import { progressByMessage, saveDraftText, senderName, useChat, type Draft, type MessageProgress, type PendingFile as Pending } from "./store";
 import { Avatar } from "../mail/Avatar";
 import { bytes, shortDate, timeOnly } from "../../lib/format";
 import { chat as chatIpc, errorMessage } from "../../lib/ipc";
 import { codeFromCopyButton, isOnlyCodeBlock, renderMarkdown } from "../../lib/markdown";
 import { navigateTo } from "../../lib/navigate";
+import { activeTab } from "../../lib/activeTab";
 import { textToHtml, useMail } from "../mail/store";
 import { Spinner } from "../../lib/Spinner";
-import type { ChatMessage, Peer, TransferProgress } from "../../lib/types";
+import type { ChatMessage, Peer } from "../../lib/types";
 import { confirmDialog } from "../../lib/confirm";
-import { Check, CheckCheck, Clock, MoreHorizontal, Paperclip, Pencil, QrCode, Search, Send, SmilePlus, Users, X } from "lucide-react";
+import { ArrowDown, Check, CheckCheck, Clock, MoreHorizontal, Paperclip, Pencil, QrCode, Search, Send, SmilePlus, Users, X } from "lucide-react";
 
 const QUICK_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🙏", "✅", "👀"];
 
@@ -29,6 +30,7 @@ export function ChatView() {
   // Ctrl+K: jump to a peer.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (activeTab() !== "chat") return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setSwitcher(true);
@@ -93,6 +95,10 @@ export function ChatView() {
                   <span className={`truncate text-xs ${p.unread ? "text-gray-800" : "text-gray-500"}`}>
                     {s.typing[p.id] ? (
                       <em className="text-blue-700">typing…</em>
+                    ) : p.id !== s.activePeerId && s.drafts[p.id] ? (
+                      <>
+                        <span className="text-red-700">Draft:</span> {draftPreview(s.drafts[p.id])}
+                      </>
                     ) : (
                       (p.lastMessage ?? (p.isGroup ? "No messages yet" : `${p.host}:${p.port}`))
                     )}
@@ -144,6 +150,12 @@ export function ChatView() {
       {switcher && <PeerSwitcher onClose={() => setSwitcher(false)} />}
     </div>
   );
+}
+
+function draftPreview(d: Draft): string {
+  if (d.text) return d.text;
+  if (d.files.length) return d.files.map((f) => f.name).join(", ");
+  return "…";
 }
 
 function PeerSwitcher({ onClose }: { onClose: () => void }) {
@@ -291,21 +303,27 @@ function AddPeer() {
     );
   }
   return (
-    <div className="space-y-2 border-b border-gray-200 p-2">
+    <form
+      className="space-y-2 border-b border-gray-200 p-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void submit();
+      }}
+    >
       <input className="input" placeholder="Name (optional)" value={name} onChange={(e) => setName(e.target.value)} />
       <div className="flex gap-2">
-        <input className="input" placeholder="192.168.1.20 or conecta://…" value={host} autoFocus onChange={(e) => setHost(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void submit()} />
+        <input className="input" placeholder="192.168.1.20 or conecta://…" value={host} autoFocus onChange={(e) => setHost(e.target.value)} />
         <input className="input w-24" placeholder={String(identity?.port ?? 47800)} value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} />
       </div>
       <div className="flex gap-2">
-        <button className="btn btn-primary flex-1 justify-center" onClick={() => void submit()} disabled={!host.trim()}>
+        <button type="submit" className="btn btn-primary flex-1 justify-center" disabled={!host.trim()}>
           Add
         </button>
-        <button className="btn" onClick={() => setOpenForm(false)}>
+        <button type="button" className="btn" onClick={() => setOpenForm(false)}>
           Cancel
         </button>
       </div>
-    </div>
+    </form>
   );
 }
 
@@ -360,17 +378,11 @@ function NewGroup() {
   );
 }
 
-interface Pending {
-  path: string;
-  name: string;
-  preview: string | null;
-}
-
 const MAX_ROWS = 8;
 const CODE_LANGS = ["", "typescript", "javascript", "python", "rust", "go", "java", "csharp", "sql", "bash", "json", "yaml", "html", "css"];
 
 function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer: Peer; peerId: number; name: string; seed: string; host: string; online: boolean; typing: { who: string | null } | null }) {
-  const { messages, transfers, sendText, sendFile, removePeer, clearChat, edit } = useChat();
+  const { messages, hasOlder, loadingOlder, loadOlder, pinned, jumpTo, transfers, sendText, sendFile, removePeer, clearChat, edit } = useChat();
   const isGroup = !!peer.isGroup;
   const left = !!peer.groupLeft;
   const [members, setMembers] = useState<Peer[] | null>(null);
@@ -385,27 +397,63 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
     };
     // Re-read whenever any peer changes: a roster update arrives as a peer event.
   }, [isGroup, peerId, peerVersion]);
-  const [text, setText] = useState("");
+  const [draft] = useState(() => useChat.getState().drafts[peerId]);
+  const [text, setText] = useState(draft?.text ?? "");
   const [editing, setEditing] = useState<ChatMessage | null>(null);
-  const [pending, setPending] = useState<Pending[]>([]);
-  const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
+  // The draft being written when an edit started; it comes back afterwards.
+  const beforeEdit = useRef("");
+  const [pending, setPending] = useState<Pending[]>(draft?.files ?? []);
+  const [replyTo, setReplyTo] = useState<ChatMessage | null>(draft?.replyTo ?? null);
   const [dragging, setDragging] = useState(false);
   const [toolbar, setToolbar] = useState(false);
   // Slack-style code mode: monospace box, Enter inserts a line, Ctrl+Enter
   // sends, the text goes out wrapped in a fenced block.
-  const [codeMode, setCodeMode] = useState(false);
-  const [codeLang, setCodeLang] = useState("");
+  const [codeMode, setCodeMode] = useState(draft?.codeMode ?? false);
+  const [codeLang, setCodeLang] = useState(draft?.codeLang ?? "");
   const [menu, setMenu] = useState(false);
   const [search, setSearch] = useState<string | null>(null);
   const [results, setResults] = useState<ChatMessage[] | null>(null);
   const [searching, setSearching] = useState(false);
-  const bottom = useRef<HTMLDivElement>(null);
+  // A message to bring into view once it is loaded, then highlight briefly.
+  const [target, setTarget] = useState<string | null>(null);
+  const [flash, setFlash] = useState<string | null>(null);
+  const scroller = useRef<HTMLDivElement>(null);
+  // Where the first message sat before an older page went in above it.
+  const anchor = useRef<{ msgId: string; top: number } | null>(null);
+  const lastId = useRef<number | null>(null);
+  const atBottom = useRef(true);
+  // The newest message when the user scrolled up; anything after it is unseen.
+  const [seenUpTo, setSeenUpTo] = useState<number | null>(null);
   const area = useRef<HTMLTextAreaElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const lastTyping = useRef(0);
 
+  const unsent = useRef<Draft | null>(null);
+  unsent.current = { text: editing ? beforeEdit.current : text, files: pending, replyTo, codeMode, codeLang };
+  useEffect(() => saveDraftText(peerId, editing ? beforeEdit.current : text), [peerId, text, editing]);
+  useEffect(
+    () => () => {
+      if (unsent.current) useChat.getState().setDraft(peerId, unsent.current);
+    },
+    [peerId],
+  );
+
+  const startEdit = (m: ChatMessage) => {
+    if (!editing) beforeEdit.current = text;
+    setEditing(m);
+    setCodeMode(false);
+    setText(m.body);
+    area.current?.focus();
+  };
+  const stopEdit = () => {
+    setEditing(null);
+    setText(beforeEdit.current);
+    beforeEdit.current = "";
+  };
+
   const byId = useMemo(() => new Map(messages.map((m) => [m.msgId, m])), [messages]);
+  const progress = useMemo(() => progressByMessage(transfers), [transfers]);
 
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
@@ -418,6 +466,7 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
   // Ctrl+F searches this conversation; Esc clears whatever is in progress.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (activeTab() !== "chat") return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
         e.preventDefault();
         setSearch((v) => v ?? "");
@@ -427,8 +476,7 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
           setSearch(null);
           setResults(null);
         } else if (editing) {
-          setEditing(null);
-          setText("");
+          stopEdit();
         } else if (replyTo || pending.length || text) {
           setReplyTo(null);
           setPending([]);
@@ -467,9 +515,74 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
     el.style.height = `${Math.min(line * rows + 18, Math.max(codeMode ? 120 : 40, el.scrollHeight))}px`;
   }, [text, codeMode]);
 
+  // The bubble rather than its row: the day divider above it can come and go.
+  const rowOf = (msgId: string) => scroller.current?.querySelector(`[data-msg="${CSS.escape(msgId)}"]`)?.lastElementChild ?? null;
+
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    if (results) {
+      // Back from search, the timeline opens at the bottom again.
+      lastId.current = null;
+      return;
+    }
+    const a = anchor.current;
+    if (a && messages[0]?.msgId !== a.msgId) {
+      anchor.current = null;
+      const row = rowOf(a.msgId);
+      if (row) el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - a.top;
+    }
+    const last = messages[messages.length - 1];
+    const prev = lastId.current;
+    lastId.current = last?.id ?? null;
+    if (target) return;
+    if (last && (prev === null || (last.id > prev && (atBottom.current || last.direction === "out")))) el.scrollTop = el.scrollHeight;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, results]);
+
+  useLayoutEffect(() => {
+    if (!target || results) return;
+    const row = rowOf(target);
+    if (!row) return;
+    setTarget(null);
+    row.scrollIntoView({ block: "center" });
+    setFlash(target);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target, messages, results]);
+
   useEffect(() => {
-    bottom.current?.scrollIntoView({ block: "end" });
-  }, [messages.length, peerId, results === null]);
+    if (!flash) return;
+    const t = window.setTimeout(() => setFlash(null), 1500);
+    return () => window.clearTimeout(t);
+  }, [flash]);
+
+  const jump = (m: ChatMessage) => {
+    setSearch(null);
+    setResults(null);
+    setTarget(m.msgId);
+    void jumpTo(m).then((ok) => {
+      if (ok) return;
+      setTarget(null);
+      if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
+    });
+  };
+
+  const onScroll = () => {
+    const el = scroller.current;
+    if (!el || results) return;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    const newest = messages[messages.length - 1]?.id ?? null;
+    atBottom.current = near;
+    setSeenUpTo((v) => (near ? null : (v ?? newest)));
+    if (!hasOlder || loadingOlder || el.scrollTop > 300) return;
+    const first = messages[0];
+    const row = first ? rowOf(first.msgId) : null;
+    if (!row) return;
+    anchor.current = { msgId: first.msgId, top: row.getBoundingClientRect().top - el.getBoundingClientRect().top };
+    void loadOlder().then((n) => {
+      if (n === 0) anchor.current = null;
+    });
+  };
 
   const attach = async (paths: string[]) => {
     const fresh = paths.filter((p) => !pending.some((x) => x.path === p));
@@ -485,18 +598,16 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
   };
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    void getCurrentWebview()
-      .onDragDropEvent((e) => {
-        if (e.payload.type === "enter" || e.payload.type === "over") setDragging(true);
-        else if (e.payload.type === "leave") setDragging(false);
-        else if (e.payload.type === "drop") {
-          setDragging(false);
-          void attach(e.payload.paths);
-        }
-      })
-      .then((u) => (unlisten = u));
-    return () => unlisten?.();
+    const off = getCurrentWebview().onDragDropEvent((e) => {
+      if (activeTab() !== "chat") return;
+      if (e.payload.type === "enter" || e.payload.type === "over") setDragging(true);
+      else if (e.payload.type === "leave") setDragging(false);
+      else if (e.payload.type === "drop") {
+        setDragging(false);
+        void attach(e.payload.paths);
+      }
+    });
+    return () => void off.then((f) => f());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [peerId]);
 
@@ -504,10 +615,7 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
     if (editing) {
       const body = text.trim();
       if (!body) return;
-      if (await edit(editing.msgId, body)) {
-        setEditing(null);
-        setText("");
-      }
+      if (await edit(editing.msgId, body)) stopEdit();
       return;
     }
     let body = codeMode ? text.replace(/^\n+|\n+$/g, "") : text.trim();
@@ -596,6 +704,7 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
   };
 
   const shown = results ?? messages;
+  const unseen = seenUpTo === null || results ? 0 : messages.filter((m) => m.id > seenUpTo && m.direction === "in").length;
   let lastDay = "";
   let lastFrom: string | null = null;
   let lastAt = 0;
@@ -737,15 +846,26 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto">
+      {pinned.length > 0 && (
+        <div className="max-h-28 overflow-y-auto border-b border-amber-200 bg-amber-50 px-4 py-1.5 text-xs text-amber-900">
+          <div className="mb-0.5 font-semibold">Pinned</div>
+          {pinned.map((m) => (
+            <button key={m.msgId} className="block w-full truncate text-left hover:underline" title="Show in chat" onClick={() => jump(m)}>
+              {m.kind === "file" ? m.fileName : m.body}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div ref={scroller} className="flex-1 overflow-y-auto" onScroll={onScroll}>
         <div className="mx-auto w-full max-w-[880px] px-4 py-3">
-          {messages.filter((m) => m.pinned).length > 0 && (
-            <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-              <div className="mb-1 font-semibold">Pinned</div>
-              {messages.filter((m) => m.pinned).map((m) => (
-                <div key={m.msgId} className="truncate">{m.kind === "file" ? m.fileName : m.body}</div>
-              ))}
+          {results === null && loadingOlder && (
+            <div className="flex justify-center py-2">
+              <Spinner size={16} className="text-gray-400" />
             </div>
+          )}
+          {results === null && !hasOlder && messages.length > 0 && (
+            <div className="py-2 text-center text-[11px] text-gray-400">Beginning of conversation</div>
           )}
           {shown.length === 0 && (
             <div className="flex flex-col items-center justify-center gap-2 py-24 text-center text-gray-400">
@@ -769,7 +889,15 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
             lastFrom = from;
             lastAt = m.createdAt;
             return (
-              <div key={m.msgId}>
+              <div
+                key={m.msgId}
+                data-msg={m.msgId}
+                className={`rounded-lg transition-colors duration-700 ${flash === m.msgId ? "bg-amber-50" : ""} ${results ? "cursor-pointer hover:bg-gray-50" : ""}`}
+                title={results ? "Show in chat" : undefined}
+                onClick={(e) => {
+                  if (results && !(e.target as HTMLElement).closest("button, a, img, .md-copy")) jump(m);
+                }}
+              >
                 {showDay && (
                   <div className="my-3 flex items-center gap-3 text-[11px] text-gray-400">
                     <span className="h-px flex-1 bg-gray-200" />
@@ -780,24 +908,29 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
                 <Bubble
                   m={m}
                   grouped={grouped}
-                  progress={transfers[m.msgId]}
+                  progress={progress[m.msgId]}
                   quoted={m.replyTo ? (byId.get(m.replyTo) ?? null) : null}
                   onReply={() => {
                     setReplyTo(m);
                     area.current?.focus();
                   }}
-                  onEdit={() => {
-                    setEditing(m);
-                    setCodeMode(false);
-                    setText(m.body);
-                    area.current?.focus();
-                  }}
+                  onEdit={() => startEdit(m)}
                 />
               </div>
             );
           })}
-          <div ref={bottom} />
         </div>
+        {unseen > 0 && (
+          <div className="pointer-events-none sticky bottom-0 flex h-0 justify-center">
+            <button
+              className="pointer-events-auto flex -translate-y-12 items-center gap-1 rounded-full bg-blue-600 px-3 py-1 text-xs text-on-accent shadow-lg hover:bg-blue-700"
+              onClick={() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" })}
+            >
+              <ArrowDown size={13} />
+              {unseen} new message{unseen === 1 ? "" : "s"}
+            </button>
+          </div>
+        )}
       </div>
 
       {left ? (
@@ -809,7 +942,7 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
             <div className="mb-2 flex items-center gap-2 rounded-md border-l-4 border-amber-500 bg-gray-50 px-3 py-1.5 text-xs">
               <Pencil size={12} className="text-amber-600" />
               <div className="min-w-0 flex-1 text-gray-700">Editing message · Enter to save, Esc to cancel</div>
-              <button className="text-gray-500 hover:text-gray-900" onClick={() => { setEditing(null); setText(""); }} aria-label="Cancel edit">✕</button>
+              <button className="text-gray-500 hover:text-gray-900" onClick={stopEdit} aria-label="Cancel edit">✕</button>
             </div>
           )}
           {replyTo && (
@@ -923,6 +1056,11 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
 function GroupMembers({ groupId, name, left, members, onClose }: { groupId: number; name: string; left: boolean; members: Peer[]; onClose: () => void }) {
   const { peers, identity } = useChat();
   const [title, setTitle] = useState(name);
+  // Follows renames by other members until the user starts typing.
+  const [edited, setEdited] = useState(false);
+  useEffect(() => {
+    if (!edited) setTitle(name);
+  }, [name, edited]);
   const [adding, setAdding] = useState(false);
   const [picked, setPicked] = useState<number[]>([]);
   const [err, setErr] = useState<string | null>(null);
@@ -940,8 +1078,14 @@ function GroupMembers({ groupId, name, left, members, onClose }: { groupId: numb
             <input
               className="input flex-1"
               value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              onBlur={() => title.trim() && title.trim() !== name && run(chatIpc.groupRename(groupId, title))}
+              onChange={(e) => {
+                setTitle(e.target.value);
+                setEdited(true);
+              }}
+              onBlur={() => {
+                if (edited && title.trim() && title.trim() !== name) void run(chatIpc.groupRename(groupId, title)).finally(() => setEdited(false));
+                else setEdited(false);
+              }}
               onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
               aria-label="Group name"
             />
@@ -1064,13 +1208,13 @@ function Bubble({
 }: {
   m: ChatMessage;
   grouped: boolean;
-  progress?: TransferProgress;
+  progress?: MessageProgress;
   quoted: ChatMessage | null;
   onReply: () => void;
   onEdit: () => void;
 }) {
   const mine = m.direction === "out";
-  const { deleteMessage, react, peers } = useChat();
+  const { deleteMessage, react, applyMessage, peers } = useChat();
   const openCompose = useMail((s) => s.openCompose);
   const updateComposer = useMail((s) => s.updateComposer);
   const [menu, setMenu] = useState(false);
@@ -1152,12 +1296,7 @@ function Bubble({
             onClick={() => {
               setMenu(false);
               void chatIpc.pin(m.msgId, !m.pinned).then((next) => {
-                if (!next) return;
-                const list = useChat.getState().messages;
-                const i = list.findIndex((x) => x.msgId === next.msgId);
-                useChat.setState({
-                  messages: i === -1 ? [...list, next] : list.map((x, n) => (n === i ? next : x)),
-                });
+                if (next) applyMessage(next);
               });
             }}
           >
@@ -1185,7 +1324,14 @@ function Bubble({
               danger
               onClick={() => {
                 setMenu(false);
-                void deleteMessage(m.msgId, true);
+                void confirmDialog({
+                  title: "Delete for everyone?",
+                  message: `The message is removed here and on ${inGroup ? "every member's machine" : `${peerName}'s machine`}.`,
+                  confirmLabel: "Delete for everyone",
+                  danger: true,
+                }).then((ok) => {
+                  if (ok) void deleteMessage(m.msgId, true);
+                });
               }}
             >
               Delete for everyone
@@ -1216,7 +1362,7 @@ function Bubble({
       )}
       <div className={`flex flex-col ${mine ? "items-end" : "items-start"} ${m.body.includes("```") || m.kind === "file" ? "max-w-[85%]" : "max-w-[60%]"}`}>
       {inGroup && !mine && !grouped && (
-        <div className="mb-0.5 px-1 text-[11px] font-medium text-blue-700">{m.senderName ?? "Unknown member"}</div>
+        <div className="mb-0.5 px-1 text-[11px] font-medium text-blue-700">{senderName(m, peers) ?? "Unknown member"}</div>
       )}
       <div
         className={`${frameless ? "p-0" : "px-3 py-1.5"} text-sm ${
@@ -1321,12 +1467,12 @@ function MarkdownBody({ body, mine }: { body: string; mine: boolean }) {
   );
 }
 
-function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: boolean; progress?: TransferProgress; frameless?: boolean }) {
+function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: boolean; progress?: MessageProgress; frameless?: boolean }) {
   const filesConnected = useFiles((f) => f.status?.connected ?? false);
   const peers = useChat((st) => st.peers);
   const conversation = peers.find((p) => p.id === m.peerId);
   const peerName = conversation?.displayName ?? "the peer";
-  const senderName = conversation?.isGroup ? (m.senderName ?? "this member") : peerName;
+  const sender = conversation?.isGroup ? (senderName(m, peers) ?? "this member") : peerName;
   const [preview, setPreview] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const done = m.status === "unread" || m.status === "received" || m.status === "delivered" || m.status === "read" || (mine && m.status !== "failed");
@@ -1356,10 +1502,12 @@ function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: bool
         {preview && <span className="truncate">{m.fileName}</span>}
         <span>{m.fileSize !== null ? bytes(m.fileSize) : ""}</span>
         {pct !== null && <span>· {pct}%</span>}
-        {progress && (progress.state === "active" || progress.state === "paused") && (
+        {progress && (
           <button
             className="underline"
-            onClick={() => void chatIpc.pauseTransfer(progress.transferId, progress.state !== "paused")}
+            onClick={() => {
+              for (const id of progress.transferIds) void chatIpc.pauseTransfer(id, progress.state !== "paused");
+            }}
           >
             {progress.state === "paused" ? "Resume" : "Pause"}
           </button>
@@ -1400,7 +1548,7 @@ function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: bool
             Decline
           </button>
           <button className="btn text-xs" title="Accept this and every future file from them without asking" onClick={() => void chatIpc.answerFile(m.msgId, true, true).catch((e) => setErr(errorMessage(e)))}>
-            Always accept from {senderName}
+            Always accept from {sender}
           </button>
         </div>
       )}

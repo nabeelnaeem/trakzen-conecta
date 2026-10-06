@@ -5,14 +5,17 @@ import { SettingsView } from "./features/settings/SettingsView";
 import { useMail } from "./features/mail/store";
 import { useChat } from "./features/chat/store";
 import { restoreZoom, setZoom, zoomStep } from "./lib/zoom";
-import { app as appIpc } from "./lib/ipc";
+import { app as appIpc, type NavRoute } from "./lib/ipc";
 import { isDark, onTheme, toggleDark } from "./lib/theme";
 import { Mail, MessageSquare, Moon, Settings, Sun, type LucideIcon } from "lucide-react";
 import { getLastTab, getRailOrder, getStartIn, setLastTab, setRailOrder, type RailItem } from "./lib/prefs";
 import { onNavigate } from "./lib/navigate";
+import { setActiveTab } from "./lib/activeTab";
 import { ConfirmHost } from "./lib/confirm";
 import { SaveToFilesHost } from "./features/files/SaveToFiles";
-import { useFiles } from "./features/files/store";
+import { watchFilesStatus } from "./features/files/store";
+import { UpdateBanner } from "./lib/UpdateBanner";
+import { startUpdateChecks } from "./lib/updater";
 
 type Tab = "mail" | "chat" | "settings";
 
@@ -24,30 +27,38 @@ export default function App() {
   const [order, setOrder] = useState<RailItem[]>(getRailOrder());
   const [dragging, setDragging] = useState<RailItem | null>(null);
   useEffect(() => {
+    setActiveTab(tab);
     if (tab === "mail" || tab === "chat") setLastTab(tab);
   }, [tab]);
+  // The chat view stays mounted behind other tabs; it must not count as read.
+  useEffect(() => useChat.getState().setVisible(tab === "chat"), [tab]);
   useEffect(() => onNavigate((t) => setTab(t)), []);
   // Save-to-Files buttons only show once connected; the check runs in the background.
-  useEffect(() => void useFiles.getState().refresh(true), []);
+  useEffect(() => watchFilesStatus(), []);
+  useEffect(() => startUpdateChecks(), []);
 
   // Deep links and notification clicks arrive here from the backend.
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    void appIpc
-      .onNavigate((r) => {
-        if (r.kind === "chat") {
-          setTab("chat");
-          void useChat.getState().selectByRoute(r.peer);
-        } else if (r.kind === "mail") {
-          setTab("mail");
-          void useMail.getState().openThread(r.accountId, r.threadId);
-        } else if (r.kind === "pair") {
-          setTab("chat");
-          useChat.getState().setPendingPair(r.link);
-        }
-      })
-      .then((u) => (unlisten = u));
-    return () => unlisten?.();
+    const go = (r: NavRoute) => {
+      if (r.kind === "chat") {
+        setTab("chat");
+        void useChat.getState().selectByRoute(r.peer);
+      } else if (r.kind === "mail") {
+        setTab("mail");
+        void useMail.getState().openThread(r.accountId, r.threadId);
+      } else if (r.kind === "pair") {
+        setTab("chat");
+        useChat.getState().setPendingPair(r.link);
+      }
+    };
+    const p = appIpc.onNavigate(go);
+    // Whatever arrived before the listener was up (a cold start from a
+    // notification or link) is held by the backend until asked for.
+    void p
+      .then(() => appIpc.takeRoute())
+      .then((r) => r && go(r))
+      .catch((e) => console.warn("navigate:", e));
+    return () => void p.then((f) => f());
   }, []);
   const reorder = (target: RailItem) => {
     if (!dragging || dragging === target) return;
@@ -114,6 +125,7 @@ export default function App() {
     <div className="flex h-full">
       <ConfirmHost />
       <SaveToFilesHost />
+      <UpdateBanner />
       <nav className="flex w-16 shrink-0 flex-col items-center gap-1 border-r border-gray-200 bg-gray-100 py-2">
         <div className="mb-2 flex h-9 w-9 items-center justify-center rounded-xl bg-blue-600 text-on-accent shadow-sm" title="Trakzen Conecta">
           <svg viewBox="0 0 512 512" width="22" height="22" aria-hidden>

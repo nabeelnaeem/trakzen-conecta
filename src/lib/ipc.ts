@@ -13,6 +13,7 @@ import type {
   FetchResult,
   FlagChange,
   Identity,
+  ImapLogin,
   Label,
   ListQuery,
   MailFilter,
@@ -22,6 +23,7 @@ import type {
   OutgoingMessage,
   SnoozedMessage,
   Peer,
+  PeerRemovedEvent,
   ReplyMode,
   SettingsPatch,
   SettingsView,
@@ -46,7 +48,7 @@ export const settings = {
 export const mail = {
   listAccounts: () => invoke<Account[]>("mail_list_accounts"),
   addAccount: (provider: string) => invoke<Account>("mail_add_account", { provider }),
-  addImap: (login: { host: string; port?: number; smtpHost?: string; smtpPort?: number; username: string; password: string }) =>
+  addImap: (login: ImapLogin) =>
     invoke<Account>("mail_add_imap", { login }),
   removeAccount: (accountId: number) => invoke<void>("mail_remove_account", { accountId }),
   sync: (accountId: number) => invoke<void>("mail_sync", { accountId }),
@@ -100,10 +102,12 @@ export const mail = {
   archive: (messageId: number) => invoke<void>("mail_archive", { messageId }),
   composeDraft: (messageId: number, mode: ReplyMode) =>
     invoke<ComposeDraft>("mail_compose_draft", { messageId, mode }),
-  send: (message: OutgoingMessage) => invoke<void>("mail_send", { message }),
+  send: (message: OutgoingMessage, draftMessageId: number | null = null) =>
+    invoke<void>("mail_send", { message, draftMessageId }),
   saveDraft: (message: OutgoingMessage) => invoke<string>("mail_save_draft", { message }),
-  discardDraft: (accountId: number, draftId: string) =>
-    invoke<void>("mail_discard_draft", { accountId, draftId }),
+  fileSizes: (paths: string[]) => invoke<(number | null)[]>("mail_file_sizes", { paths }),
+  discardDraft: (accountId: number, draftId: string, messageId: number | null = null) =>
+    invoke<void>("mail_discard_draft", { accountId, draftId, messageId }),
   openDraft: (messageId: number) => invoke<DraftContent>("mail_open_draft", { messageId }),
   saveAttachment: (attachmentId: number, open: boolean) =>
     invoke<string>("mail_save_attachment", { attachmentId, open }),
@@ -143,9 +147,11 @@ export const chat = {
     invoke<string>("chat_stash_blob", bytes, { headers: { "x-file-name": encodeURIComponent(name) } }),
   filePreview: (path: string) => invoke<string | null>("chat_file_preview", { path }),
   pauseTransfer: (transferId: string, pause: boolean) => invoke<void>("chat_pause_transfer", { transferId, pause }),
+  listTransfers: () => invoke<TransferProgress[]>("chat_list_transfers"),
   answerFile: (msgId: string, accept: boolean, always = false) => invoke<void>("chat_answer_file", { msgId, accept, always }),
   setAutoAccept: (peerId: number, on: boolean) => invoke<Peer>("chat_set_auto_accept", { peerId, on }),
   pin: (msgId: string, pinned: boolean) => invoke<ChatMessage | null>("chat_pin", { msgId, pinned }),
+  listPinned: (peerId: number) => invoke<ChatMessage[]>("chat_list_pinned", { peerId }),
   createGroup: (name: string, memberIds: number[]) => invoke<Peer>("chat_create_group", { name, memberIds }),
   groupMembers: (groupId: number) => invoke<Peer[]>("chat_group_members", { groupId }),
   groupAddMembers: (groupId: number, memberIds: number[]) => invoke<Peer>("chat_group_add_members", { groupId, memberIds }),
@@ -162,6 +168,11 @@ export const chat = {
   onMessage: (cb: (m: ChatMessage) => void) =>
     listen<ChatMessage>("chat://message", (e) => cb(e.payload)),
   onPeer: (cb: (p: Peer) => void) => listen<Peer>("chat://peer", (e) => cb(e.payload)),
+  onPeerRemoved: (cb: (r: PeerRemovedEvent) => void) =>
+    listen<PeerRemovedEvent>("chat://peer-removed", (e) => cb(e.payload)),
+  /** Many messages in these conversations changed at once. */
+  onReload: (cb: (r: { peerIds: number[] }) => void) =>
+    listen<{ peerIds: number[] }>("chat://reload", (e) => cb(e.payload)),
   onTransfer: (cb: (t: TransferProgress) => void) =>
     listen<TransferProgress>("chat://transfer", (e) => cb(e.payload)),
   onStatus: (cb: (s: ChatStatus) => void) =>
@@ -181,6 +192,8 @@ export const files = {
   renameUpload: (uploadId: string, name: string) =>
     invoke<FilesUploadOutcome>("trakzen_files_rename_upload", { uploadId, name }),
   cancelUpload: (uploadId: string) => invoke<void>("trakzen_files_cancel_upload", { uploadId }),
+  /** Stops a running `upload` (by its key) or `connect` (key "connect"); the call then fails with "cancelled". */
+  abort: (key: string) => invoke<void>("trakzen_files_abort", { key }),
   open: (path: string) => invoke<void>("trakzen_files_open", { path }),
   onUpload: (cb: (p: FilesUploadProgress) => void) =>
     listen<FilesUploadProgress>("files://upload", (e) => cb(e.payload)),
@@ -197,6 +210,8 @@ export const app = {
   /** Clickable OS notification; `route` is a conecta:// link. */
   notify: (title: string, body: string, route?: string) => invoke<void>("app_notify", { title, body, route: route ?? null }),
   onNavigate: (cb: (r: NavRoute) => void) => listen<NavRoute>("app://navigate", (e) => cb(e.payload)),
+  /** Call once `onNavigate` is listening: the route a cold start was launched with, if any. */
+  takeRoute: () => invoke<NavRoute | null>("app_take_route"),
 };
 
 export function errorMessage(e: unknown): string {

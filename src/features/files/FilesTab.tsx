@@ -3,7 +3,7 @@ import { errorMessage, files } from "../../lib/ipc";
 import { confirmDialog } from "../../lib/confirm";
 import { Spinner } from "../../lib/Spinner";
 import type { FilesServer } from "../../lib/types";
-import { useFiles } from "./store";
+import { isCancelled, useFiles } from "./store";
 
 /** Settings → Trakzen Files: find the server and connect this app to an account. */
 export function FilesTab() {
@@ -44,7 +44,7 @@ export function FilesTab() {
     try {
       setStatus(await files.connect(target));
     } catch (e) {
-      setErr(errorMessage(e));
+      if (!isCancelled(e)) setErr(errorMessage(e));
     } finally {
       setBusy(false);
     }
@@ -144,6 +144,9 @@ export function FilesTab() {
           {busy && (
             <p className="flex items-center gap-2 text-gray-600">
               <Spinner /> Waiting for you to approve in the browser…
+              <button className="btn btn-ghost text-xs" onClick={() => void files.abort("connect").catch(() => {})}>
+                Cancel
+              </button>
             </p>
           )}
           <p className="text-xs text-gray-500">

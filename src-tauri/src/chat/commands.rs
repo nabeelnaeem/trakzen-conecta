@@ -270,7 +270,7 @@ pub async fn chat_clear_storage(state: State<'_, AppState>, which: String) -> Re
             }
         }
     }
-    state.chat.store.forget_missing_files()?;
+    state.chat.forget_missing_files()?;
     Ok(removed)
 }
 
@@ -331,6 +331,11 @@ pub async fn chat_pause_transfer(state: State<'_, AppState>, transfer_id: String
     Ok(())
 }
 
+#[tauri::command]
+pub async fn chat_list_transfers(state: State<'_, AppState>) -> Result<Vec<TransferProgress>> {
+    Ok(state.chat.list_transfers())
+}
+
 /// Accept or decline a file a peer is offering (message status `offered`).
 /// `always` also switches the sender to auto-accept from now on.
 #[tauri::command]
@@ -349,6 +354,11 @@ pub async fn chat_set_auto_accept(state: State<'_, AppState>, peer_id: i64, on: 
 #[tauri::command]
 pub async fn chat_pin(state: State<'_, AppState>, msg_id: String, pinned: bool) -> Result<Option<ChatMessage>> {
     state.chat.pin_message(&msg_id, pinned).await
+}
+
+#[tauri::command]
+pub async fn chat_list_pinned(state: State<'_, AppState>, peer_id: i64) -> Result<Vec<ChatMessage>> {
+    state.chat.store.list_pinned(peer_id)
 }
 
 #[tauri::command]

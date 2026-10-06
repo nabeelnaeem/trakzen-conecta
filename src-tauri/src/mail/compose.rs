@@ -81,7 +81,9 @@ pub fn build_raw(
         _ => account.email.clone(),
     };
 
-    let mut b = Message::builder().from(mailbox(&from)?).subject(&msg.subject);
+    // Gmail reads Bcc recipients from the raw message and drops the header
+    // on delivery; the SMTP path strips it itself (see `without_bcc`).
+    let mut b = Message::builder().from(mailbox(&from)?).subject(&msg.subject).keep_bcc();
     for t in msg.to.iter().filter(|s| !s.trim().is_empty()) {
         b = b.to(mailbox(t)?);
     }
@@ -138,6 +140,30 @@ pub fn build_raw(
         b.multipart(mixed)?
     };
     Ok(built.formatted())
+}
+
+/// Removes the Bcc header (with any folded lines). SMTP hands the same bytes
+/// to every recipient, so Bcc addresses must only be in the envelope.
+pub fn without_bcc(raw: &[u8]) -> Vec<u8> {
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| i + 2)
+        .unwrap_or(raw.len());
+    let (head, body) = raw.split_at(split);
+    let mut out = Vec::with_capacity(raw.len());
+    let mut skipping = false;
+    for line in head.split_inclusive(|&b| b == b'\n') {
+        let folded = matches!(line.first(), Some(b' ' | b'\t'));
+        if !folded {
+            skipping = line.len() >= 4 && line[..4].eq_ignore_ascii_case(b"bcc:");
+        }
+        if !skipping {
+            out.extend_from_slice(line);
+        }
+    }
+    out.extend_from_slice(body);
+    out
 }
 
 /// Replaces `src="data:<mime>;base64,<data>"` with `cid:imgN@trakzen` and
@@ -543,6 +569,47 @@ mod tests {
         assert!(!head.contains("To:"), "{head}");
         assert!(raw.contains("Subject: Half-written"));
         assert!(raw.contains("Dear"));
+    }
+
+    #[test]
+    fn bcc_only_message_keeps_bcc_until_smtp_strips_it() {
+        let msg = OutgoingMessage {
+            account_id: 1,
+            to: vec![],
+            cc: vec![],
+            bcc: vec!["hidden@example.com".into(), "other@example.com".into()],
+            subject: "Quiet".into(),
+            body_text: "Hi".into(),
+            body_html: None,
+            quoted_html: None,
+            in_reply_to: None,
+            references: None,
+            thread_id: None,
+            attachments: vec![],
+            draft_id: None,
+        };
+        let account = Account {
+            id: 1,
+            provider: "gmail".into(),
+            email: "me@example.com".into(),
+            display_name: None,
+            sync_cursor: None,
+        };
+        let raw = build_raw(&account, &msg, vec![]).unwrap();
+        let text = String::from_utf8(raw.clone()).unwrap();
+        assert!(text.contains("hidden@example.com"));
+        let stripped = String::from_utf8(without_bcc(&raw)).unwrap();
+        let head = stripped.split("\r\n\r\n").next().unwrap_or("");
+        assert!(!stripped.contains("hidden@example.com"), "{head}");
+        assert!(!stripped.contains("other@example.com"), "{head}");
+        assert!(head.contains("Subject: Quiet"));
+        assert!(stripped.contains("Hi"));
+    }
+
+    #[test]
+    fn without_bcc_drops_folded_lines_only() {
+        let raw = b"From: a@x\r\nBcc: b@x,\r\n c@x\r\nSubject: s\r\n\r\nBcc: body stays\r\n";
+        assert_eq!(without_bcc(raw), b"From: a@x\r\nSubject: s\r\n\r\nBcc: body stays\r\n".to_vec());
     }
 
     #[test]
