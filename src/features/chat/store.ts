@@ -70,12 +70,71 @@ export const useChat = create<ChatState>((set, get) => ({
   init: async () => {
     if (get().initialised) return;
     set({ initialised: true });
-    try {
-      set({ identity: await chat.identity() });
-    } catch (e) {
-      set({ error: errorMessage(e) });
-    }
-    await get().loadPeers();
+    // Listen before loading anything, so nothing emitted while the first
+    // loads are in flight is missed.
+    await Promise.all([
+      chat.onStatus((status) => {
+        set({ status });
+        void chat.identity().then((identity) => set({ identity }));
+      }),
+      chat.onPeer((p) => {
+        const peers = get().peers;
+        const i = peers.findIndex((x) => x.id === p.id);
+        if (i === -1) {
+          set({ peers: [p, ...peers] });
+        } else {
+          const next = peers.slice();
+          next[i] = p;
+          set({ peers: next });
+        }
+        // A merge may have retired a duplicate row; refresh to drop it.
+        if (p.peerId && peers.some((x) => x.id !== p.id && x.peerId === p.peerId)) {
+          void get().loadPeers();
+        }
+      }),
+      chat.onMessage((m) => {
+        const { activePeerId, messages, peers } = get();
+        const viewing = m.peerId === activePeerId && document.hasFocus();
+        if (m.peerId === activePeerId) {
+          set({ messages: upsertMessage(messages, m) });
+          if (viewing && m.direction === "in" && m.status === "unread") void chat.markRead(m.peerId);
+        }
+        if (m.direction === "in" && (m.status === "unread" || m.status === "offered") && !viewing) {
+          const peer = peers.find((p) => p.id === m.peerId);
+          const who = peer?.displayName ?? "New message";
+          const what = m.status === "offered" ? `Wants to send you ${m.fileName ?? "a file"}` : m.kind === "file" ? `Sent a file: ${m.fileName ?? ""}` : m.body;
+          const body = peer?.isGroup && m.senderName ? `${m.senderName}: ${what}` : what;
+          void notify(who, body, "chat", `conecta://chat/${peer?.peerId ?? m.peerId}`);
+        }
+        void get().loadPeers();
+      }),
+      chat.onNearby((nearby) => set({ nearby })),
+      chat.onTyping(({ peerId, who }) => {
+        set({ typing: { ...get().typing, [peerId]: { at: Date.now(), who } } });
+        window.setTimeout(() => {
+          const t = get().typing;
+          if (Date.now() - (t[peerId]?.at ?? 0) >= 3900) {
+            const next = { ...t };
+            delete next[peerId];
+            set({ typing: next });
+          }
+        }, 4000);
+      }),
+      chat.onDeleted((d) => {
+        if (d.peerId === get().activePeerId) {
+          set({
+            messages: d.msgIds.length === 0 ? [] : get().messages.filter((m) => !d.msgIds.includes(m.msgId)),
+          });
+        }
+        void get().loadPeers();
+      }),
+      chat.onTransfer((t) => {
+        const transfers = { ...get().transfers };
+        if (t.state === "active" || t.state === "paused") transfers[t.msgId] = t;
+        else delete transfers[t.msgId];
+        set({ transfers });
+      }),
+    ]);
     // Messages that arrived while the window was in the background are
     // only marked read once the user is actually looking at them.
     window.addEventListener("focus", () => {
@@ -83,69 +142,8 @@ export const useChat = create<ChatState>((set, get) => ({
       if (id === null) return;
       void chat.markRead(id).then(() => get().loadPeers());
     });
-
-    await chat.onStatus((status) => {
-      set({ status });
-      void chat.identity().then((identity) => set({ identity }));
-    });
-    await chat.onPeer((p) => {
-      const peers = get().peers;
-      const i = peers.findIndex((x) => x.id === p.id);
-      if (i === -1) {
-        set({ peers: [p, ...peers] });
-      } else {
-        const next = peers.slice();
-        next[i] = p;
-        set({ peers: next });
-      }
-      // A merge may have retired a duplicate row; refresh to drop it.
-      if (p.peerId && peers.some((x) => x.id !== p.id && x.peerId === p.peerId)) {
-        void get().loadPeers();
-      }
-    });
-    await chat.onMessage((m) => {
-      const { activePeerId, messages, peers } = get();
-      const viewing = m.peerId === activePeerId && document.hasFocus();
-      if (m.peerId === activePeerId) {
-        set({ messages: upsertMessage(messages, m) });
-        if (viewing && m.direction === "in" && m.status === "unread") void chat.markRead(m.peerId);
-      }
-      if (m.direction === "in" && (m.status === "unread" || m.status === "offered") && !viewing) {
-        const peer = peers.find((p) => p.id === m.peerId);
-        const who = peer?.displayName ?? "New message";
-        const what = m.status === "offered" ? `Wants to send you ${m.fileName ?? "a file"}` : m.kind === "file" ? `Sent a file: ${m.fileName ?? ""}` : m.body;
-        const body = peer?.isGroup && m.senderName ? `${m.senderName}: ${what}` : what;
-        void notify(who, body, "chat", `conecta://chat/${peer?.peerId ?? m.peerId}`);
-      }
-      void get().loadPeers();
-    });
     chat.nearby().then((nearby) => set({ nearby })).catch(() => undefined);
-    await chat.onNearby((nearby) => set({ nearby }));
-    await chat.onTyping(({ peerId, who }) => {
-      set({ typing: { ...get().typing, [peerId]: { at: Date.now(), who } } });
-      window.setTimeout(() => {
-        const t = get().typing;
-        if (Date.now() - (t[peerId]?.at ?? 0) >= 3900) {
-          const next = { ...t };
-          delete next[peerId];
-          set({ typing: next });
-        }
-      }, 4000);
-    });
-    await chat.onDeleted((d) => {
-      if (d.peerId === get().activePeerId) {
-        set({
-          messages: d.msgIds.length === 0 ? [] : get().messages.filter((m) => !d.msgIds.includes(m.msgId)),
-        });
-      }
-      void get().loadPeers();
-    });
-    await chat.onTransfer((t) => {
-      const transfers = { ...get().transfers };
-      if (t.state === "active" || t.state === "paused") transfers[t.msgId] = t;
-      else delete transfers[t.msgId];
-      set({ transfers });
-    });
+    await Promise.all([get().refreshIdentity(), get().loadPeers()]);
   },
 
   refreshIdentity: async () => {
