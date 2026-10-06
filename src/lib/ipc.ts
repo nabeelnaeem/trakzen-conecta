@@ -149,6 +149,7 @@ export const chat = {
   answerFile: (msgId: string, accept: boolean, always = false) => invoke<void>("chat_answer_file", { msgId, accept, always }),
   setAutoAccept: (peerId: number, on: boolean) => invoke<Peer>("chat_set_auto_accept", { peerId, on }),
   pin: (msgId: string, pinned: boolean) => invoke<ChatMessage | null>("chat_pin", { msgId, pinned }),
+  listPinned: (peerId: number) => invoke<ChatMessage[]>("chat_list_pinned", { peerId }),
   createGroup: (name: string, memberIds: number[]) => invoke<Peer>("chat_create_group", { name, memberIds }),
   groupMembers: (groupId: number) => invoke<Peer[]>("chat_group_members", { groupId }),
   groupAddMembers: (groupId: number, memberIds: number[]) => invoke<Peer>("chat_group_add_members", { groupId, memberIds }),
