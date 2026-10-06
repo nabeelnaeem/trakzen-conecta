@@ -309,15 +309,8 @@ export const useMail = create<MailState>((set, get) => ({
     } catch {
       /* defaults are fine */
     }
-    await get().loadAccounts();
-    // Coming back to the window is the moment people expect fresh mail.
-    let lastFocusSync = 0;
-    window.addEventListener("focus", () => {
-      const now = Date.now();
-      if (now - lastFocusSync < 15_000) return;
-      lastFocusSync = now;
-      void get().sync();
-    });
+    // Listeners go first: if the first load fails, later syncs must still
+    // be able to fill the view.
     await mail.onUnsnoozed((due) => {
       void get().refresh();
       for (const m of due) {
@@ -343,7 +336,9 @@ export const useMail = create<MailState>((set, get) => ({
           const next = { ...syncing };
           delete next[ev.accountId];
           set({ syncing: next });
-          if (shown) {
+          if (activeAccountId === null) {
+            void get().loadAccounts().catch((e: unknown) => set({ error: errorMessage(e) }));
+          } else if (shown) {
             void get().refresh();
             void get().loadLabels();
           }
@@ -380,6 +375,19 @@ export const useMail = create<MailState>((set, get) => ({
         }
       }
     });
+    // Coming back to the window is the moment people expect fresh mail.
+    let lastFocusSync = 0;
+    window.addEventListener("focus", () => {
+      const now = Date.now();
+      if (now - lastFocusSync < 15_000) return;
+      lastFocusSync = now;
+      void get().sync();
+    });
+    try {
+      await get().loadAccounts();
+    } catch (e) {
+      set({ error: errorMessage(e) });
+    }
   },
 
   applySettings: ({ showImages, conversations, undoSeconds }) => {
