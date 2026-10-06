@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { useChat } from "./store";
+import { progressByMessage, useChat, type MessageProgress } from "./store";
 import { Avatar } from "../mail/Avatar";
 import { bytes, shortDate, timeOnly } from "../../lib/format";
 import { chat as chatIpc, errorMessage } from "../../lib/ipc";
@@ -11,7 +11,7 @@ import { codeFromCopyButton, isOnlyCodeBlock, renderMarkdown } from "../../lib/m
 import { navigateTo } from "../../lib/navigate";
 import { textToHtml, useMail } from "../mail/store";
 import { Spinner } from "../../lib/Spinner";
-import type { ChatMessage, Peer, TransferProgress } from "../../lib/types";
+import type { ChatMessage, Peer } from "../../lib/types";
 import { confirmDialog } from "../../lib/confirm";
 import { Check, CheckCheck, Clock, MoreHorizontal, Paperclip, Pencil, QrCode, Search, Send, SmilePlus, Users, X } from "lucide-react";
 
@@ -406,6 +406,7 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
   const lastTyping = useRef(0);
 
   const byId = useMemo(() => new Map(messages.map((m) => [m.msgId, m])), [messages]);
+  const progress = useMemo(() => progressByMessage(transfers), [transfers]);
 
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
@@ -780,7 +781,7 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
                 <Bubble
                   m={m}
                   grouped={grouped}
-                  progress={transfers[m.msgId]}
+                  progress={progress[m.msgId]}
                   quoted={m.replyTo ? (byId.get(m.replyTo) ?? null) : null}
                   onReply={() => {
                     setReplyTo(m);
@@ -1064,7 +1065,7 @@ function Bubble({
 }: {
   m: ChatMessage;
   grouped: boolean;
-  progress?: TransferProgress;
+  progress?: MessageProgress;
   quoted: ChatMessage | null;
   onReply: () => void;
   onEdit: () => void;
@@ -1321,7 +1322,7 @@ function MarkdownBody({ body, mine }: { body: string; mine: boolean }) {
   );
 }
 
-function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: boolean; progress?: TransferProgress; frameless?: boolean }) {
+function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: boolean; progress?: MessageProgress; frameless?: boolean }) {
   const filesConnected = useFiles((f) => f.status?.connected ?? false);
   const peers = useChat((st) => st.peers);
   const conversation = peers.find((p) => p.id === m.peerId);
@@ -1356,10 +1357,12 @@ function FileCard({ m, mine, progress, frameless }: { m: ChatMessage; mine: bool
         {preview && <span className="truncate">{m.fileName}</span>}
         <span>{m.fileSize !== null ? bytes(m.fileSize) : ""}</span>
         {pct !== null && <span>· {pct}%</span>}
-        {progress && (progress.state === "active" || progress.state === "paused") && (
+        {progress && (
           <button
             className="underline"
-            onClick={() => void chatIpc.pauseTransfer(progress.transferId, progress.state !== "paused")}
+            onClick={() => {
+              for (const id of progress.transferIds) void chatIpc.pauseTransfer(id, progress.state !== "paused");
+            }}
           >
             {progress.state === "paused" ? "Resume" : "Pause"}
           </button>

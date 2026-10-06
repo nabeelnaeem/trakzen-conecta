@@ -144,6 +144,7 @@ export const chat = {
     invoke<string>("chat_stash_blob", bytes, { headers: { "x-file-name": encodeURIComponent(name) } }),
   filePreview: (path: string) => invoke<string | null>("chat_file_preview", { path }),
   pauseTransfer: (transferId: string, pause: boolean) => invoke<void>("chat_pause_transfer", { transferId, pause }),
+  listTransfers: () => invoke<TransferProgress[]>("chat_list_transfers"),
   answerFile: (msgId: string, accept: boolean, always = false) => invoke<void>("chat_answer_file", { msgId, accept, always }),
   setAutoAccept: (peerId: number, on: boolean) => invoke<Peer>("chat_set_auto_accept", { peerId, on }),
   pin: (msgId: string, pinned: boolean) => invoke<ChatMessage | null>("chat_pin", { msgId, pinned }),

@@ -275,7 +275,10 @@ export interface Nearby {
 export interface TransferProgress {
   transferId: string;
   msgId: string;
+  /** The conversation; a group row for group files. */
   peerId: number;
+  /** The machine on the other end: the member, for a group file. */
+  memberId: number;
   direction: "in" | "out";
   fileName: string;
   bytesDone: number;

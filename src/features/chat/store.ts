@@ -9,6 +9,7 @@ interface ChatState {
   peers: Peer[];
   activePeerId: number | null;
   messages: ChatMessage[];
+  /** Live transfers by transfer id; a group file has one per member. */
   transfers: Record<string, TransferProgress>;
   nearby: Nearby[];
   /** peer row id → when the last "typing" arrived and, in a group, from whom */
@@ -71,6 +72,26 @@ function resyncSoon() {
     resyncTimer = undefined;
     void useChat.getState().resync();
   }, 100);
+}
+
+/** A file message's transfers summed up for display. */
+export interface MessageProgress {
+  transferIds: string[];
+  bytesDone: number;
+  bytesTotal: number;
+  state: "active" | "paused";
+}
+
+export function progressByMessage(transfers: Record<string, TransferProgress>): Record<string, MessageProgress> {
+  const out: Record<string, MessageProgress> = {};
+  for (const t of Object.values(transfers)) {
+    const p = out[t.msgId] ?? (out[t.msgId] = { transferIds: [], bytesDone: 0, bytesTotal: 0, state: "paused" });
+    p.transferIds.push(t.transferId);
+    p.bytesDone += t.bytesDone;
+    p.bytesTotal += t.bytesTotal;
+    if (t.state === "active") p.state = "active";
+  }
+  return out;
 }
 
 function upsertMessage(list: ChatMessage[], m: ChatMessage): ChatMessage[] {
@@ -250,8 +271,8 @@ export const useChat = create<ChatState>((set, get) => ({
       }),
       chat.onTransfer((t) => {
         const transfers = { ...get().transfers };
-        if (t.state === "active" || t.state === "paused") transfers[t.msgId] = t;
-        else delete transfers[t.msgId];
+        if (t.state === "active" || t.state === "paused") transfers[t.transferId] = t;
+        else delete transfers[t.transferId];
         set({ transfers });
       }),
     ]);
@@ -262,6 +283,11 @@ export const useChat = create<ChatState>((set, get) => ({
       if (document.visibilityState === "visible") resyncSoon();
     });
     chat.nearby().then((nearby) => set({ nearby })).catch(() => undefined);
+    // Transfers already running (the webview was reloaded mid-transfer).
+    chat
+      .listTransfers()
+      .then((list) => set({ transfers: { ...Object.fromEntries(list.map((t) => [t.transferId, t])), ...get().transfers } }))
+      .catch(() => undefined);
     await Promise.all([get().refreshIdentity(), get().loadPeers()]);
   },
 
