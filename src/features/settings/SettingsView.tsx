@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { confirmDialog } from "../../lib/confirm";
 import { RichEditor } from "../mail/RichEditor";
 import { textToHtml } from "../mail/store";
@@ -57,14 +57,22 @@ export function SettingsView() {
   const applyMail = useMail((m) => m.applySettings);
 
   useEffect(() => {
-    settings.get().then(setS).catch((e) => setErr(errorMessage(e)));
+    settings
+      .get()
+      .then((v) => setS((cur) => cur ?? v))
+      .catch((e) => setErr(errorMessage(e)));
   }, []);
 
+  // Saves reach the backend one at a time, so replies arrive in order and a
+  // slow earlier one can't land after a later one and flip a toggle back.
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
   const save = useCallback(
     async (patch: SettingsPatch, note?: string) => {
       setErr(null);
       try {
-        const v = await settings.update(patch);
+        const pending = queue.current.then(() => settings.update(patch));
+        queue.current = pending.catch(() => undefined);
+        const v = await pending;
         setS(v);
         applyMail({ showImages: v.mailShowImages, conversations: v.conversationView, undoSeconds: v.undoSendSeconds });
         notifyPrefs.notifications = v.notifications;
@@ -74,8 +82,10 @@ export function SettingsView() {
         setSavedAt(Date.now());
         if (patch.chatDisplayName !== undefined) void refreshIdentity();
         if (note) setErr(note);
+        return true;
       } catch (e) {
         setErr(errorMessage(e));
+        return false;
       }
     },
     [applyMail, refreshIdentity],
@@ -133,7 +143,8 @@ function SavedMark({ at }: { at: number | null }) {
   return <span className={`text-xs text-green-700 transition-opacity ${show ? "opacity-100" : "opacity-0"}`}>Saved</span>;
 }
 
-type Save = (patch: SettingsPatch, note?: string) => Promise<void>;
+/** Resolves to whether the patch was saved. */
+type Save = (patch: SettingsPatch, note?: string) => Promise<boolean>;
 
 function Toggle({ v, on, label, hint }: { v: boolean; on: (v: boolean) => void; label: string; hint?: string }) {
   return (
@@ -162,7 +173,8 @@ function TextField({
 }: {
   label: string;
   value: string;
-  onCommit: (v: string) => void;
+  /** Returning a promise of `false` (save failed) puts the saved value back. */
+  onCommit: (v: string) => unknown;
   hint?: string;
   placeholder?: string;
   mono?: boolean;
@@ -174,7 +186,10 @@ function TextField({
   const [v, setV] = useState(value);
   useEffect(() => setV(value), [value]);
   const commit = () => {
-    if (v !== value) onCommit(v);
+    if (v === value) return;
+    void Promise.resolve(onCommit(v)).then((ok) => {
+      if (ok === false) setV(value);
+    });
   };
   const cls = `input ${mono ? "font-mono text-xs" : ""} ${width ?? ""}`;
   return (
@@ -440,8 +455,8 @@ function MailTab({ s, save }: { s: Settings; save: Save }) {
       <Toggle v={s.conversationView} on={(v) => void save({ conversationView: v })} label="Conversation view (group replies into threads)" />
       <Toggle v={s.mailShowImages} on={(v) => void save({ mailShowImages: v })} label="Always show remote images" hint="Off (the default) means senders can't tell when you open a message; you can still show images per message." />
       <div className="flex gap-6">
-        <TextField label="Undo send window (seconds)" value={String(s.undoSendSeconds)} numeric width="w-28" onCommit={(v) => void save({ undoSendSeconds: Math.max(0, Number(v) || 0) })} hint="0 sends immediately. Max 60." />
-        <TextField label="Check for new mail every (seconds)" value={String(s.mailPollSeconds)} numeric width="w-28" onCommit={(v) => void save({ mailPollSeconds: Math.max(0, Number(v) || 0) })} hint="Minimum 15; 0 turns background checks off." />
+        <TextField label="Undo send window (seconds)" value={String(s.undoSendSeconds)} numeric width="w-28" onCommit={(v) => save({ undoSendSeconds: Math.max(0, Number(v) || 0) })} hint="0 sends immediately. Max 60." />
+        <TextField label="Check for new mail every (seconds)" value={String(s.mailPollSeconds)} numeric width="w-28" onCommit={(v) => save({ mailPollSeconds: Math.max(0, Number(v) || 0) })} hint="Minimum 15; 0 turns background checks off." />
       </div>
       <SignatureEditor label="Signature (all accounts unless overridden under Accounts)" value={s.mailSignature} onCommit={(v) => void save({ mailSignature: v })} />
       <TemplatesEditor value={s.mailTemplates} onCommit={(v) => void save({ mailTemplates: v })} />
@@ -502,7 +517,7 @@ function AccountsTab({ s, save }: { s: Settings; save: Save }) {
           This app ships no Google credentials. Create an OAuth client of type <strong>Desktop app</strong> in the Google Cloud console, enable the Gmail API, and paste the client ID and secret here (see the README). The secret is stored in the OS credential store.
         </p>
         <div className="space-y-3">
-          <TextField label="Client ID" value={s.googleClientId} mono placeholder="xxxxxxxx.apps.googleusercontent.com" onCommit={(v) => void save({ googleClientId: v })} />
+          <TextField label="Client ID" value={s.googleClientId} mono placeholder="xxxxxxxx.apps.googleusercontent.com" onCommit={(v) => save({ googleClientId: v })} />
           <TextField
             label={`Client secret ${s.googleClientSecretSet ? "(set — enter a new one to replace, blank to clear)" : ""}`}
             value=""
@@ -801,11 +816,16 @@ function FiltersTab() {
 
 function ChatTab({ s, save }: { s: Settings; save: Save }) {
   const [stats, setStats] = useState<StorageStats | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ text: string; error?: boolean } | null>(null);
   const load = () => chatIpc.storageStats().then(setStats).catch(() => setStats(null));
   useEffect(() => {
     void load();
   }, []);
+  const setDownloadDir = async (dir: string) => {
+    const ok = await save({ chatDownloadDir: dir });
+    if (ok) void load();
+    return ok;
+  };
   const clear = async (which: "received" | "outgoing", label: string) => {
     const ok = await confirmDialog({
       title: `Delete all ${label}?`,
@@ -814,24 +834,28 @@ function ChatTab({ s, save }: { s: Settings; save: Save }) {
       danger: true,
     });
     if (!ok) return;
-    const n = await chatIpc.clearStorage(which);
-    setMsg(`${n} file${n === 1 ? "" : "s"} deleted.`);
+    try {
+      const n = await chatIpc.clearStorage(which);
+      setMsg({ text: `${n} file${n === 1 ? "" : "s"} deleted.` });
+    } catch (e) {
+      setMsg({ text: `Could not delete the files: ${errorMessage(e)}`, error: true });
+    }
     void load();
   };
   return (
     <div className="space-y-5 text-sm">
-      <TextField label="Display name (what peers see)" value={s.chatDisplayName} onCommit={(v) => void save({ chatDisplayName: v })} />
-      <TextField label="Listen port" value={String(s.chatPort)} numeric width="w-32" onCommit={(v) => void save({ chatPort: Number(v) || undefined })} hint="Peers connect to this port; allow it through your firewall. Changes apply immediately." />
+      <TextField label="Display name (what peers see)" value={s.chatDisplayName} onCommit={(v) => save({ chatDisplayName: v })} />
+      <TextField label="Listen port" value={String(s.chatPort)} numeric width="w-32" onCommit={(v) => save({ chatPort: Number(v) || undefined })} hint="Peers connect to this port; allow it through your firewall. Changes apply immediately." />
       <Toggle v={s.chatAskFiles} on={(v) => void save({ chatAskFiles: v })} label="Ask before accepting incoming files" hint="Off: files from peers are saved to the folder below straight away." />
       <div>
         <label className="label">Received files folder</label>
         <div className="flex gap-2">
-          <TextField label="" value={s.chatDownloadDir} placeholder="Default: Downloads/Trakzen Conecta" onCommit={(v) => void save({ chatDownloadDir: v })} />
+          <TextField label="" value={s.chatDownloadDir} placeholder="Default: Downloads/Trakzen Conecta" onCommit={setDownloadDir} />
           <button
             className="btn self-start"
             onClick={async () => {
               const picked = await open({ directory: true, title: "Choose folder" });
-              if (typeof picked === "string") void save({ chatDownloadDir: picked });
+              if (typeof picked === "string") void setDownloadDir(picked);
             }}
           >
             Browse
@@ -856,7 +880,7 @@ function ChatTab({ s, save }: { s: Settings; save: Save }) {
               </div>
               <button className="btn text-xs" disabled={stats.outgoingFiles === 0} onClick={() => void clear("outgoing", "pasted media")}>Clear</button>
             </div>
-            {msg && <div className="text-xs text-green-700">{msg}</div>}
+            {msg && <div className={`text-xs ${msg.error ? "text-red-700" : "text-green-700"}`}>{msg.text}</div>}
           </div>
         </div>
       )}
