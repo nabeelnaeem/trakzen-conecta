@@ -38,6 +38,20 @@ export function Composer() {
   const fileName = (p: string) => p.split(/[\\/]/).pop() ?? p;
   const hasRecipient = !!c.to.trim();
 
+  const applyTemplate = async (t: Template) => {
+    if (c.body.trim()) {
+      const ok = await confirmDialog({
+        title: `Replace your message with "${t.name}"?`,
+        message: "What you have typed so far will be lost.",
+        confirmLabel: "Replace",
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    const now = useMail.getState().composer ?? c;
+    updateComposer({ subject: t.subject || now.subject, body: t.body, bodyHtml: textToHtml(t.body) });
+  };
+
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.defaultPrevented) return;
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
@@ -50,10 +64,9 @@ export function Composer() {
   };
 
   return (
-    <div className="fixed inset-0 z-20 flex items-end justify-end bg-black/20 p-4" onClick={closeCompose}>
+    <div className="fixed inset-0 z-20 flex items-end justify-end bg-black/20 p-4">
       <div
         className="flex h-[80vh] w-[720px] max-w-full flex-col overflow-hidden rounded-lg border border-gray-300 bg-white shadow-xl"
-        onClick={(e) => e.stopPropagation()}
         onKeyDown={onKeyDown}
       >
         <div className="flex items-center justify-between border-b border-gray-200 bg-gray-50 px-3 py-2">
@@ -145,8 +158,8 @@ export function Composer() {
               defaultValue=""
               onChange={(e) => {
                 const t = templates.find((x) => x.name === e.target.value);
-                if (t) updateComposer({ subject: t.subject || c.subject, body: t.body, bodyHtml: textToHtml(t.body) });
                 e.target.value = "";
+                if (t) void applyTemplate(t);
               }}
             >
               <option value="">Template…</option>
