@@ -598,18 +598,16 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
   };
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    void getCurrentWebview()
-      .onDragDropEvent((e) => {
-        if (e.payload.type === "enter" || e.payload.type === "over") setDragging(true);
-        else if (e.payload.type === "leave") setDragging(false);
-        else if (e.payload.type === "drop") {
-          setDragging(false);
-          void attach(e.payload.paths);
-        }
-      })
-      .then((u) => (unlisten = u));
-    return () => unlisten?.();
+    const off = getCurrentWebview().onDragDropEvent((e) => {
+      if (activeTab() !== "chat") return;
+      if (e.payload.type === "enter" || e.payload.type === "over") setDragging(true);
+      else if (e.payload.type === "leave") setDragging(false);
+      else if (e.payload.type === "drop") {
+        setDragging(false);
+        void attach(e.payload.paths);
+      }
+    });
+    return () => void off.then((f) => f());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [peerId]);
 
