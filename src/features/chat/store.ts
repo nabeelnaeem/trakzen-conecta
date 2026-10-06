@@ -54,6 +54,20 @@ function addMessage(list: ChatMessage[], m: ChatMessage): ChatMessage[] {
   return list.some((x) => x.msgId === m.msgId) ? list : [...list, m];
 }
 
+// Peer list replies can land out of order (a burst of messages fires many
+// reloads); only the newest request may write, and bursts share one request.
+let peerSeq = 0;
+let peerLoads = 0;
+let peerTimer: number | undefined;
+
+function reloadPeersSoon() {
+  if (peerTimer !== undefined) return;
+  peerTimer = window.setTimeout(() => {
+    peerTimer = undefined;
+    void useChat.getState().loadPeers();
+  }, 100);
+}
+
 export const useChat = create<ChatState>((set, get) => ({
   identity: null,
   status: null,
@@ -87,9 +101,14 @@ export const useChat = create<ChatState>((set, get) => ({
           next[i] = p;
           set({ peers: next });
         }
+        // A list read before this event would undo it; read again instead.
+        if (peerLoads > 0) {
+          peerSeq++;
+          reloadPeersSoon();
+        }
         // A merge may have retired a duplicate row; refresh to drop it.
         if (p.peerId && peers.some((x) => x.id !== p.id && x.peerId === p.peerId)) {
-          void get().loadPeers();
+          reloadPeersSoon();
         }
       }),
       chat.onMessage((m) => {
@@ -106,7 +125,7 @@ export const useChat = create<ChatState>((set, get) => ({
           const body = peer?.isGroup && m.senderName ? `${m.senderName}: ${what}` : what;
           void notify(who, body, "chat", `conecta://chat/${peer?.peerId ?? m.peerId}`);
         }
-        void get().loadPeers();
+        reloadPeersSoon();
       }),
       chat.onNearby((nearby) => set({ nearby })),
       chat.onTyping(({ peerId, who }) => {
@@ -126,7 +145,7 @@ export const useChat = create<ChatState>((set, get) => ({
             messages: d.msgIds.length === 0 ? [] : get().messages.filter((m) => !d.msgIds.includes(m.msgId)),
           });
         }
-        void get().loadPeers();
+        reloadPeersSoon();
       }),
       chat.onTransfer((t) => {
         const transfers = { ...get().transfers };
@@ -155,10 +174,15 @@ export const useChat = create<ChatState>((set, get) => ({
   },
 
   loadPeers: async () => {
+    const seq = ++peerSeq;
+    peerLoads++;
     try {
-      set({ peers: await chat.listPeers() });
+      const peers = await chat.listPeers();
+      if (seq === peerSeq) set({ peers });
     } catch (e) {
-      set({ error: errorMessage(e) });
+      if (seq === peerSeq) set({ error: errorMessage(e) });
+    } finally {
+      peerLoads--;
     }
   },
 
@@ -229,8 +253,18 @@ export const useChat = create<ChatState>((set, get) => ({
   },
 
   selectByRoute: async (peer) => {
-    if (get().peers.length === 0) await get().loadPeers();
-    const p = get().peers.find((x) => x.peerId === peer || String(x.id) === peer);
+    const match = (x: Peer) => x.peerId === peer || String(x.id) === peer;
+    let p = get().peers.find(match);
+    if (!p) {
+      // Asked directly: a newer reload may have superseded the store's.
+      try {
+        p = (await chat.listPeers()).find(match);
+      } catch (e) {
+        set({ error: errorMessage(e) });
+        return;
+      }
+      reloadPeersSoon();
+    }
     if (p) await get().selectPeer(p.id);
     else set({ error: "That peer is not in your list." });
   },
