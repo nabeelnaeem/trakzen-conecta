@@ -256,6 +256,79 @@ pub(super) fn uid_set(uids: &[u32]) -> String {
     out.join(",")
 }
 
+fn expand_uid_set(set: &str) -> Option<Vec<u32>> {
+    let mut out = Vec::new();
+    for part in set.split(',') {
+        match part.split_once(':') {
+            Some((a, b)) => {
+                let (a, b): (u32, u32) = (a.parse().ok()?, b.parse().ok()?);
+                out.extend(a.min(b)..=a.max(b));
+            }
+            None => out.push(part.parse().ok()?),
+        }
+    }
+    Some(out)
+}
+
+/// The destination's UIDVALIDITY and (old UID, new UID) per moved message.
+pub(super) type CopiedUids = (u32, Vec<(u32, u32)>);
+
+/// The `[COPYUID <validity> <from> <to>]` codes (RFC 4315) in a MOVE
+/// response.
+pub(super) fn parse_copyuid(response: &[u8]) -> Option<CopiedUids> {
+    let text = String::from_utf8_lossy(response);
+    let upper = text.to_ascii_uppercase();
+    let mut validity = None;
+    let mut pairs = Vec::new();
+    let mut at = 0;
+    while let Some(found) = upper[at..].find("[COPYUID ") {
+        let start = at + found + "[COPYUID ".len();
+        let end = start + text[start..].find(']')?;
+        let mut parts = text[start..end].split_whitespace();
+        let v: u32 = parts.next()?.parse().ok()?;
+        let from = expand_uid_set(parts.next()?)?;
+        let to = expand_uid_set(parts.next()?)?;
+        if from.len() != to.len() {
+            return None;
+        }
+        validity = Some(v);
+        pairs.extend(from.into_iter().zip(to));
+        at = end;
+    }
+    validity.map(|v| (v, pairs))
+}
+
+/// Where a label change sends a message that sits in `current`, if
+/// anywhere. `origin` is the folder it was last moved out of, so undoing a
+/// trash or spam move can put it back where it came from.
+pub(super) fn plan_move(current: Option<Role>, add: &[String], remove: &[String], origin: Option<Role>) -> Option<Role> {
+    let has = |v: &[String], l: &str| v.iter().any(|x| x == l);
+    let own_copy = matches!(current, Some(Role::Sent | Role::Drafts));
+    let leaving = (has(remove, "TRASH") && current == Some(Role::Trash))
+        || (has(remove, "SPAM") && current == Some(Role::Junk));
+    let target = if has(add, "TRASH") {
+        Role::Trash
+    } else if has(add, "SPAM") {
+        if own_copy {
+            return None;
+        }
+        Role::Junk
+    } else if has(add, "INBOX") || leaving {
+        // Asking for the inbox outright still returns sent and draft copies
+        // home: in conversation mode a thread's own messages ride along.
+        match origin {
+            Some(o) if Some(o) != current && (!has(add, "INBOX") || matches!(o, Role::Sent | Role::Drafts)) => o,
+            _ if own_copy => return None,
+            _ => Role::Inbox,
+        }
+    } else if has(remove, "INBOX") && current == Some(Role::Inbox) {
+        Role::Archive
+    } else {
+        return None;
+    };
+    (Some(target) != current).then_some(target)
+}
+
 /// What a sync saw in one folder.
 #[derive(Debug, Clone)]
 pub(super) struct FolderScan {
@@ -390,6 +463,46 @@ mod tests {
         assert_eq!(uid_set(&[9, 3, 4, 5, 5, 11, 12]), "3:5,9,11:12");
         assert_eq!(uid_set(&[7]), "7");
         assert_eq!(uid_set(&[]), "");
+    }
+
+    #[test]
+    fn copyuid_maps_old_uids_to_new_ones() {
+        let resp = b"* OK [COPYUID 1709 4:5,9 101:103] Moved\r\n* 3 EXPUNGE\r\n* 3 EXPUNGE\r\n* 6 EXPUNGE\r\n";
+        assert_eq!(parse_copyuid(resp), Some((1709, vec![(4, 101), (5, 102), (9, 103)])));
+        // Large moves may be reported in pieces.
+        let resp = b"* OK [copyuid 7 1 50] partial\r\n* OK [COPYUID 7 2:3 52:51] rest\r\n";
+        assert_eq!(parse_copyuid(resp), Some((7, vec![(1, 50), (2, 51), (3, 52)])));
+        assert_eq!(parse_copyuid(b"* 3 EXPUNGE\r\n"), None);
+        assert_eq!(parse_copyuid(b"* OK [COPYUID 7 1:3 50] bad\r\n"), None);
+    }
+
+    #[test]
+    fn label_changes_become_folder_moves() {
+        let l = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let plan = |current, add: &[&str], remove: &[&str], origin| plan_move(current, &l(add), &l(remove), origin);
+        use Role::*;
+        // The frontend's actions.
+        assert_eq!(plan(Some(Inbox), &[], &["INBOX"], None), Some(Archive));
+        assert_eq!(plan(Some(Inbox), &["TRASH"], &["INBOX"], None), Some(Trash));
+        assert_eq!(plan(Some(Inbox), &["SPAM"], &["INBOX"], None), Some(Junk));
+        assert_eq!(plan(Some(Junk), &[], &["SPAM"], None), Some(Inbox));
+        assert_eq!(plan(Some(Trash), &["INBOX"], &["TRASH", "SPAM"], Some(Archive)), Some(Inbox));
+        // Their undos.
+        assert_eq!(plan(Some(Archive), &["INBOX"], &[], Some(Inbox)), Some(Inbox));
+        assert_eq!(plan(Some(Trash), &["INBOX"], &["TRASH"], Some(Inbox)), Some(Inbox));
+        assert_eq!(plan(Some(Trash), &[], &["TRASH"], Some(Sent)), Some(Sent));
+        assert_eq!(plan(Some(Trash), &[], &["TRASH"], Some(Archive)), Some(Archive));
+        assert_eq!(plan(Some(Trash), &["INBOX"], &["TRASH"], Some(Sent)), Some(Sent));
+        assert_eq!(plan(Some(Inbox), &["SPAM"], &[], Some(Junk)), Some(Junk));
+        // Nothing to move.
+        assert_eq!(plan(Some(Sent), &[], &["INBOX"], None), None);
+        assert_eq!(plan(Some(Sent), &["INBOX"], &[], None), None);
+        assert_eq!(plan(Some(Sent), &["SPAM"], &["INBOX"], None), None);
+        assert_eq!(plan(Some(Trash), &["TRASH"], &["INBOX"], None), None);
+        assert_eq!(plan(Some(Inbox), &["UNREAD"], &["STARRED"], None), None);
+        assert_eq!(plan(None, &[], &["INBOX"], None), None);
+        // Sent mail can still be thrown away.
+        assert_eq!(plan(Some(Sent), &["TRASH"], &["INBOX"], None), Some(Trash));
     }
 
     #[test]

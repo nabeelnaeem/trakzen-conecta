@@ -331,6 +331,24 @@ impl MailStore {
         Ok(())
     }
 
+    /// Points a cached message at the id it got when the provider moved it
+    /// on the server. If a sync already brought the moved copy in, the old
+    /// row is dropped instead.
+    pub fn rename_remote_id(&self, account_id: i64, old: &str, new: &str) -> Result<()> {
+        let conn = self.db.conn();
+        let n = conn.execute(
+            "UPDATE OR IGNORE mail_messages SET remote_id = ?3 WHERE account_id = ?1 AND remote_id = ?2",
+            params![account_id, old, new],
+        )?;
+        if n == 0 {
+            conn.execute(
+                "DELETE FROM mail_messages WHERE account_id = ?1 AND remote_id = ?2",
+                params![account_id, old],
+            )?;
+        }
+        Ok(())
+    }
+
     /// Drops a cached draft once it is sent or discarded. Only draft rows:
     /// a stale id must never take a real message with it.
     pub fn delete_draft_row(&self, id: i64) -> Result<()> {
@@ -1147,6 +1165,25 @@ mod tests {
             store.delete_draft_row(*id).unwrap();
         }
         assert_eq!(store.known_remote_ids(acc.id).unwrap(), vec!["2".to_string()]);
+    }
+
+    #[test]
+    fn renamed_rows_keep_their_local_id() {
+        let store = store();
+        let acc = store.upsert_account("imap", "a@b.c", None).unwrap();
+        store
+            .upsert_messages(acc.id, &[msg("INBOX/1", &["INBOX"]), msg("Trash/7", &["TRASH"])])
+            .unwrap();
+        let before = store.summaries_by_remote_ids(acc.id, &["INBOX/1".into()]).unwrap()[0].id;
+        store.rename_remote_id(acc.id, "INBOX/1", "Archive/3").unwrap();
+        let after = store.summaries_by_remote_ids(acc.id, &["Archive/3".into()]).unwrap();
+        assert_eq!(after[0].id, before);
+        // The moved copy is already cached: the stale row goes.
+        store.upsert_messages(acc.id, &[msg("INBOX/2", &["INBOX"])]).unwrap();
+        store.rename_remote_id(acc.id, "INBOX/2", "Trash/7").unwrap();
+        let mut ids = store.known_remote_ids(acc.id).unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["Archive/3", "Trash/7"]);
     }
 
     #[test]

@@ -74,6 +74,9 @@ pub struct ImapProvider {
     db: Arc<Db>,
     /// Folder roles per account email, refreshed on every sync.
     folders: Mutex<HashMap<String, FolderMap>>,
+    /// The folder a message was moved out of, by (account id, new remote
+    /// id), so undo can send it back there.
+    moved_from: Mutex<HashMap<(i64, String), Role>>,
 }
 
 impl ImapProvider {
@@ -81,6 +84,7 @@ impl ImapProvider {
         Self {
             db,
             folders: Mutex::new(HashMap::new()),
+            moved_from: Mutex::new(HashMap::new()),
         }
     }
 
@@ -116,6 +120,67 @@ impl ImapProvider {
 
     fn remember_folders(&self, account: &Account, map: FolderMap) {
         self.folders.lock().unwrap().insert(account.email.clone(), map);
+    }
+
+    /// Applies a label change the way IMAP can: UNREAD and STARRED become
+    /// flags, INBOX/TRASH/SPAM become moves between folders. Other labels
+    /// have no IMAP equivalent and are left alone.
+    async fn change_labels(&self, account: &Account, remote_ids: &[String], add: &[String], remove: &[String]) -> Result<()> {
+        if remote_ids.is_empty() {
+            return Ok(());
+        }
+        let (cfg, pass) = self.config(account)?;
+        let cached = self.cached_folders(account);
+        let origins: HashMap<String, Role> = {
+            let moved_from = self.moved_from.lock().unwrap();
+            remote_ids
+                .iter()
+                .filter_map(|id| moved_from.get(&(account.id, id.clone())).map(|r| (id.clone(), *r)))
+                .collect()
+        };
+        let (ids, add, remove) = (remote_ids.to_vec(), add.to_vec(), remove.to_vec());
+        let (map, outcome) = tokio::task::spawn_blocking(move || {
+            with_session(&cfg, &pass, |s| {
+                let mut map = match cached {
+                    Some(m) => m,
+                    None => discover_folders(s)?,
+                };
+                let outcome = apply_changes(s, &mut map, &ids, &add, &remove, &origins)?;
+                Ok((map, outcome))
+            })
+        })
+        .await
+        .map_err(|e| AppError::Other(e.to_string()))??;
+        self.remember_folders(account, map);
+
+        // A move gives the message a new UID; repoint the cached row so the
+        // next action on it (an undo, say) finds it without waiting for a sync.
+        let store = MailStore::new(self.db.clone());
+        let mut moved_from = self.moved_from.lock().unwrap();
+        for m in &outcome.moved {
+            moved_from.remove(&(account.id, m.old.clone()));
+            if let Some(new) = &m.new {
+                store.rename_remote_id(account.id, &m.old, new)?;
+                if let Some(from) = m.from {
+                    moved_from.insert((account.id, new.clone()), from);
+                }
+            }
+        }
+        if outcome.stale > 0 {
+            return Err(AppError::NotFound(
+                "some messages changed on the server; sync and try again".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn thread_remote_ids(&self, account: &Account, thread_ids: &[String]) -> Result<Vec<String>> {
+        let store = MailStore::new(self.db.clone());
+        let mut local = Vec::new();
+        for t in thread_ids {
+            local.extend(store.thread_local_ids(account.id, t)?);
+        }
+        Ok(store.remote_ids(&local)?.into_iter().map(|(_, _, r)| r).collect())
     }
 }
 
@@ -370,6 +435,212 @@ fn fetch_raw(s: &mut Session, r: &MsgRef) -> Result<Vec<u8>> {
         .ok_or_else(|| AppError::NotFound(format!("IMAP message {} in {}", r.uid, r.folder)))
 }
 
+/// IMAP quoted string. Folder names from LIST never contain CR or LF.
+fn quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// The folder for `role`, created if the account has none. Servers that
+/// keep everything under INBOX get "INBOX.<name>" when the plain name is
+/// refused.
+fn ensure_folder(s: &mut Session, map: &mut FolderMap, role: Role) -> Result<String> {
+    if let Some(f) = map.get(role) {
+        return Ok(f.to_string());
+    }
+    let name = role.default_name();
+    let mut candidates = vec![name.to_string()];
+    if let Some(d) = map.delimiter.as_deref().filter(|d| !d.is_empty()) {
+        candidates.push(format!("INBOX{d}{name}"));
+    }
+    for folder in candidates {
+        match s.create(&folder) {
+            Ok(()) => {
+                let _ = s.subscribe(&folder);
+                map.set(role, folder.clone());
+                return Ok(folder);
+            }
+            Err(e) => tracing::debug!(folder, error = %e, "IMAP create failed"),
+        }
+    }
+    Err(AppError::Other(format!(
+        "this account has no {name} folder and the server would not create one"
+    )))
+}
+
+/// Moves UIDs out of the selected folder. Returns the destination's
+/// UIDVALIDITY and new UIDs when the server reports them.
+fn move_uids(s: &mut Session, set: &str, dest: &str, has_move: bool, uidplus: bool) -> Result<Option<folders::CopiedUids>> {
+    if has_move {
+        let resp = s
+            .run_command_and_read_response(format!("UID MOVE {set} {}", quote(dest)))
+            .map_err(imap_err)?;
+        return Ok(folders::parse_copyuid(&resp));
+    }
+    // COPY reports COPYUID on the tagged reply, which the imap crate drops.
+    s.run_command_and_read_response(format!("UID COPY {set} {}", quote(dest)))
+        .map_err(imap_err)?;
+    s.uid_store(set, "+FLAGS.SILENT (\\Deleted)").map_err(imap_err)?;
+    if uidplus {
+        s.uid_expunge(set).map_err(imap_err)?;
+    } else {
+        s.expunge().map_err(imap_err)?;
+    }
+    Ok(None)
+}
+
+fn header_message_ids(s: &mut Session, set: &str) -> Result<HashMap<u32, String>> {
+    let fetches = s.uid_fetch(set, "(UID BODY.PEEK[HEADER])").map_err(imap_err)?;
+    Ok(fetches
+        .iter()
+        .filter_map(|f| {
+            let parsed = mailparse::parse_mail(f.header()?).ok()?;
+            let id = parsed
+                .headers
+                .iter()
+                .find(|h| h.get_key_ref().eq_ignore_ascii_case("Message-ID"))?
+                .get_value();
+            Some((f.uid?, id.trim().to_string()))
+        })
+        .filter(|(_, id)| !id.is_empty())
+        .collect())
+}
+
+struct Moved {
+    old: String,
+    /// `None` when the server did not say where the message went; the next
+    /// sync drops the old row and picks the message up in its new folder.
+    new: Option<String>,
+    from: Option<Role>,
+}
+
+#[derive(Default)]
+struct ChangeOutcome {
+    moved: Vec<Moved>,
+    /// Messages skipped because their folder's UIDVALIDITY changed.
+    stale: usize,
+}
+
+fn apply_changes(
+    s: &mut Session,
+    map: &mut FolderMap,
+    ids: &[String],
+    add: &[String],
+    remove: &[String],
+    origins: &HashMap<String, Role>,
+) -> Result<ChangeOutcome> {
+    let has = |v: &[String], l: &str| v.iter().any(|x| x == l);
+    let seen = match (has(remove, "UNREAD"), has(add, "UNREAD")) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    };
+    let flagged = match (has(add, "STARRED"), has(remove, "STARRED")) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    };
+
+    let mut by_folder: std::collections::BTreeMap<String, Vec<(String, MsgRef)>> = Default::default();
+    for id in ids {
+        let r = parse_ref(id)?;
+        by_folder.entry(r.folder.clone()).or_default().push((id.clone(), r));
+    }
+
+    let mut out = ChangeOutcome::default();
+    let mut caps: Option<(bool, bool)> = None;
+    // (old id, source role, destination, Message-ID) for moves the server
+    // did not report new UIDs for.
+    let mut lookups: Vec<(String, Option<Role>, String, String)> = Vec::new();
+    for (folder, refs) in by_folder {
+        let current = map.role_of(&folder);
+        let planned: Vec<(String, MsgRef, Option<Role>)> = refs
+            .into_iter()
+            .map(|(id, r)| {
+                let target = folders::plan_move(current, add, remove, origins.get(&id).copied());
+                (id, r, target)
+            })
+            .collect();
+        if seen.is_none() && flagged.is_none() && planned.iter().all(|(_, _, t)| t.is_none()) {
+            continue;
+        }
+        let mailbox = s.select(&folder).map_err(imap_err)?;
+        let (fresh, stale): (Vec<_>, Vec<_>) = planned
+            .into_iter()
+            .partition(|(_, r, _)| r.validity.is_none() || r.validity == mailbox.uid_validity);
+        out.stale += stale.len();
+        if fresh.is_empty() {
+            continue;
+        }
+
+        let uids: Vec<u32> = fresh.iter().map(|(_, r, _)| r.uid).collect();
+        let set = folders::uid_set(&uids);
+        if let Some(on) = seen {
+            let op = if on { "+" } else { "-" };
+            s.uid_store(&set, format!("{op}FLAGS.SILENT (\\Seen)")).map_err(imap_err)?;
+        }
+        if let Some(on) = flagged {
+            let op = if on { "+" } else { "-" };
+            s.uid_store(&set, format!("{op}FLAGS.SILENT (\\Flagged)")).map_err(imap_err)?;
+        }
+
+        let mut by_target: HashMap<Role, Vec<(String, u32)>> = HashMap::new();
+        for (id, r, target) in fresh {
+            if let Some(t) = target {
+                by_target.entry(t).or_default().push((id, r.uid));
+            }
+        }
+        for (target, msgs) in by_target {
+            let dest = ensure_folder(s, map, target)?;
+            let (has_move, uidplus) = match caps {
+                Some(c) => c,
+                None => {
+                    let c = s.capabilities().map_err(imap_err)?;
+                    *caps.insert((c.has_str("MOVE"), c.has_str("UIDPLUS")))
+                }
+            };
+            let uids: Vec<u32> = msgs.iter().map(|(_, uid)| *uid).collect();
+            let set = folders::uid_set(&uids);
+            let message_ids = if has_move && uidplus {
+                HashMap::new()
+            } else {
+                header_message_ids(s, &set)?
+            };
+            let reported = move_uids(s, &set, &dest, has_move, uidplus)?;
+            for (old, uid) in msgs {
+                let new = reported.as_ref().and_then(|(validity, pairs)| {
+                    pairs
+                        .iter()
+                        .find(|(from, _)| *from == uid)
+                        .map(|(_, to)| folders::remote_id(&dest, *validity, *to))
+                });
+                match (new, message_ids.get(&uid)) {
+                    (Some(new), _) => out.moved.push(Moved { old, new: Some(new), from: current }),
+                    (None, Some(mid)) => lookups.push((old, current, dest.clone(), mid.clone())),
+                    (None, None) => out.moved.push(Moved { old, new: None, from: current }),
+                }
+            }
+        }
+    }
+
+    // No COPYUID: find each moved copy by its Message-ID, newest first in
+    // case the destination already held an older copy.
+    let mut opened: Option<(String, Option<u32>)> = None;
+    for (old, from, dest, mid) in lookups {
+        if opened.as_ref().map(|(f, _)| f) != Some(&dest) {
+            let mailbox = s.examine(&dest).map_err(imap_err)?;
+            opened = Some((dest.clone(), mailbox.uid_validity));
+        }
+        let validity = opened.as_ref().and_then(|(_, v)| *v);
+        let found = s
+            .uid_search(format!("HEADER Message-ID {}", quote(&mid)))
+            .ok()
+            .and_then(|uids| uids.into_iter().max());
+        let new = validity.zip(found).map(|(v, uid)| folders::remote_id(&dest, v, uid));
+        out.moved.push(Moved { old, new, from });
+    }
+    Ok(out)
+}
+
 #[async_trait]
 impl MailProvider for ImapProvider {
     fn kind(&self) -> ProviderKind {
@@ -481,51 +752,38 @@ impl MailProvider for ImapProvider {
     }
 
     async fn set_flags(&self, account: &Account, remote_id: &str, flags: FlagChange) -> Result<()> {
-        let (cfg, pass) = self.config(account)?;
-        let r = parse_ref(remote_id)?;
-        tokio::task::spawn_blocking(move || {
-            with_session(&cfg, &pass, |s| {
-                open_folder(s, &r, true)?;
-                let uid = r.uid.to_string();
-                let mut store = |query: &str| s.uid_store(&uid, query).map(|_| ()).map_err(imap_err);
-                match flags.read {
-                    Some(true) => store("+FLAGS.SILENT (\\Seen)")?,
-                    Some(false) => store("-FLAGS.SILENT (\\Seen)")?,
-                    None => {}
-                }
-                match flags.starred {
-                    Some(true) => store("+FLAGS.SILENT (\\Flagged)")?,
-                    Some(false) => store("-FLAGS.SILENT (\\Flagged)")?,
-                    None => {}
-                }
-                Ok(())
-            })
-        })
-        .await
-        .map_err(|e| AppError::Other(e.to_string()))?
+        let mut add = Vec::new();
+        let mut remove = Vec::new();
+        match flags.read {
+            Some(true) => remove.push("UNREAD".to_string()),
+            Some(false) => add.push("UNREAD".to_string()),
+            None => {}
+        }
+        match flags.starred {
+            Some(true) => add.push("STARRED".to_string()),
+            Some(false) => remove.push("STARRED".to_string()),
+            None => {}
+        }
+        if add.is_empty() && remove.is_empty() {
+            return Ok(());
+        }
+        self.change_labels(account, &[remote_id.to_string()], &add, &remove).await
     }
 
+    /// Moves to the Trash folder. Like Gmail, trashing something already
+    /// in Trash leaves it there; nothing is expunged from here.
     async fn trash(&self, account: &Account, remote_id: &str) -> Result<()> {
-        let (cfg, pass) = self.config(account)?;
-        let r = parse_ref(remote_id)?;
-        tokio::task::spawn_blocking(move || {
-            with_session(&cfg, &pass, |s| {
-                open_folder(s, &r, true)?;
-                s.uid_store(r.uid.to_string(), "+FLAGS.SILENT (\\Deleted)").map_err(imap_err)?;
-                s.expunge().map_err(imap_err)?;
-                Ok(())
-            })
-        })
-        .await
-        .map_err(|e| AppError::Other(e.to_string()))?
+        self.change_labels(account, &[remote_id.to_string()], &["TRASH".into()], &["INBOX".into()])
+            .await
     }
 
     async fn archive(&self, account: &Account, remote_id: &str) -> Result<()> {
-        self.trash(account, remote_id).await
+        self.change_labels(account, &[remote_id.to_string()], &[], &["INBOX".into()])
+            .await
     }
 
-    async fn modify_labels(&self, _a: &Account, _id: &str, _add: &[String], _remove: &[String]) -> Result<()> {
-        Ok(())
+    async fn modify_labels(&self, account: &Account, remote_id: &str, add: &[String], remove: &[String]) -> Result<()> {
+        self.change_labels(account, &[remote_id.to_string()], add, remove).await
     }
 
     async fn list_labels(&self, account: &Account) -> Result<Vec<RemoteLabel>> {
@@ -549,24 +807,35 @@ impl MailProvider for ImapProvider {
         Err(unsupported("IMAP filters"))
     }
 
-    async fn batch_modify(&self, _a: &Account, _ids: &[String], _add: &[String], _remove: &[String]) -> Result<()> {
-        Ok(())
+    async fn batch_modify(&self, account: &Account, remote_ids: &[String], add: &[String], remove: &[String]) -> Result<()> {
+        self.change_labels(account, remote_ids, add, remove).await
     }
 
-    async fn modify_thread(&self, _a: &Account, _t: &str, _add: &[String], _remove: &[String]) -> Result<()> {
-        Ok(())
+    async fn modify_thread(&self, account: &Account, thread_id: &str, add: &[String], remove: &[String]) -> Result<()> {
+        let ids = self.thread_remote_ids(account, &[thread_id.to_string()])?;
+        self.change_labels(account, &ids, add, remove).await
     }
 
-    async fn modify_threads(&self, _a: &Account, _t: &[String], _add: &[String], _remove: &[String]) -> Result<()> {
-        Ok(())
+    async fn modify_threads(&self, account: &Account, thread_ids: &[String], add: &[String], remove: &[String]) -> Result<()> {
+        let ids = self.thread_remote_ids(account, thread_ids)?;
+        self.change_labels(account, &ids, add, remove).await
     }
 
     async fn count_view(&self, _a: &Account, _q: &ListQuery) -> Result<u64> {
         Ok(0)
     }
 
-    async fn modify_view(&self, _a: &Account, _q: &ListQuery, _add: &[String], _remove: &[String]) -> Result<usize> {
-        Ok(0)
+    /// Covers what is cached for the view; there is no server-side query
+    /// to run it against.
+    async fn modify_view(&self, account: &Account, query: &ListQuery, add: &[String], remove: &[String]) -> Result<usize> {
+        let store = MailStore::new(self.db.clone());
+        let ids: Vec<String> = store
+            .list_messages(account.id, query, 100_000, 0)?
+            .into_iter()
+            .map(|m| m.remote_id)
+            .collect();
+        self.change_labels(account, &ids, add, remove).await?;
+        Ok(ids.len())
     }
 
     async fn save_draft(&self, _a: &Account, _raw: Vec<u8>, _t: Option<&str>, _d: Option<&str>) -> Result<String> {
