@@ -2,9 +2,13 @@
 //!
 //! Credentials live in the OS keychain; host/port sit in settings. Folders
 //! map onto the same label ids the rest of the app already understands
-//! (INBOX, SENT, DRAFT, TRASH, SPAM, STARRED).
+//! (INBOX, SENT, DRAFT, TRASH, SPAM, STARRED). Remote ids name the folder
+//! and UIDVALIDITY as well as the UID, see [`folders::MsgRef`].
 
-use std::sync::Arc;
+mod folders;
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -17,6 +21,10 @@ use crate::db::Db;
 use super::store::MailStore;
 use super::types::*;
 use super::{MailProvider, SyncObserver};
+
+use folders::{FolderMap, FolderScan, ListedFolder, MsgRef, Role};
+
+type Session = ::imap::Session<native_tls::TlsStream<std::net::TcpStream>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -64,11 +72,16 @@ fn unsupported(op: &str) -> AppError {
 
 pub struct ImapProvider {
     db: Arc<Db>,
+    /// Folder roles per account email, refreshed on every sync.
+    folders: Mutex<HashMap<String, FolderMap>>,
 }
 
 impl ImapProvider {
     pub fn new(db: Arc<Db>) -> Self {
-        Self { db }
+        Self {
+            db,
+            folders: Mutex::new(HashMap::new()),
+        }
     }
 
     pub fn add_account(
@@ -96,12 +109,24 @@ impl ImapProvider {
             .ok_or_else(|| AppError::Other("IMAP password missing from the credential store".into()))?;
         Ok((cfg, pass))
     }
+
+    fn cached_folders(&self, account: &Account) -> Option<FolderMap> {
+        self.folders.lock().unwrap().get(&account.email).cloned()
+    }
+
+    fn remember_folders(&self, account: &Account, map: FolderMap) {
+        self.folders.lock().unwrap().insert(account.email.clone(), map);
+    }
+}
+
+fn imap_err(e: ::imap::Error) -> AppError {
+    AppError::Other(format!("IMAP: {e}"))
 }
 
 fn with_session<T>(
     cfg: &ImapConfig,
     password: &str,
-    f: impl FnOnce(&mut ::imap::Session<native_tls::TlsStream<std::net::TcpStream>>) -> Result<T>,
+    f: impl FnOnce(&mut Session) -> Result<T>,
 ) -> Result<T> {
     let tls = native_tls::TlsConnector::builder()
         .build()
@@ -179,27 +204,170 @@ fn pick_ehlo_name(host: Option<&str>, email: &str) -> Option<String> {
         .or_else(|| super::compose::sender_domain(email).map(str::to_ascii_lowercase))
 }
 
-fn labels_from_flags(flags: &[::imap::types::Flag<'_>]) -> (Vec<String>, bool, bool) {
+fn discover_folders(s: &mut Session) -> Result<FolderMap> {
+    use ::imap::types::NameAttribute;
+    let names = s.list(Some(""), Some("*")).map_err(imap_err)?;
+    let listed: Vec<ListedFolder> = names
+        .iter()
+        .map(|n| ListedFolder {
+            name: n.name().to_string(),
+            delimiter: n.delimiter().map(str::to_string),
+            attributes: n
+                .attributes()
+                .iter()
+                .map(|a| match a {
+                    NameAttribute::NoInferiors => "\\Noinferiors".to_string(),
+                    NameAttribute::NoSelect => "\\Noselect".to_string(),
+                    NameAttribute::Marked => "\\Marked".to_string(),
+                    NameAttribute::Unmarked => "\\Unmarked".to_string(),
+                    NameAttribute::Custom(c) => c.to_string(),
+                })
+                .collect(),
+        })
+        .collect();
+    Ok(FolderMap::from_list(&listed))
+}
+
+/// Labels from the folder a message sits in plus its flags.
+fn labels_for(role: Role, flags: &[::imap::types::Flag<'_>]) -> (Vec<String>, bool, bool) {
     use ::imap::types::Flag;
-    let mut labels = vec!["INBOX".into()];
-    let mut seen = false;
-    let mut starred = false;
-    for f in flags {
-        match f {
-            Flag::Seen => seen = true,
-            Flag::Flagged => {
-                starred = true;
-                labels.push("STARRED".into());
-            }
-            Flag::Draft => labels.push("DRAFT".into()),
-            Flag::Deleted => labels.push("TRASH".into()),
-            _ => {}
-        }
+    let mut labels: Vec<String> = role.label().map(str::to_string).into_iter().collect();
+    let seen = flags.contains(&Flag::Seen);
+    let starred = flags.contains(&Flag::Flagged);
+    if starred {
+        labels.push("STARRED".into());
+    }
+    if flags.contains(&Flag::Draft) && role != Role::Drafts {
+        labels.push("DRAFT".into());
     }
     if !seen {
         labels.push("UNREAD".into());
     }
     (labels, seen, starred)
+}
+
+fn message_from_header(
+    remote_id: String,
+    role: Role,
+    flags: &[::imap::types::Flag<'_>],
+    internal_date: Option<i64>,
+    header: &[u8],
+) -> RemoteMessage {
+    let (labels, is_read, is_starred) = labels_for(role, flags);
+    let parsed = mailparse::parse_mail(header).ok();
+    let get = |n: &str| {
+        parsed.as_ref().and_then(|p| {
+            p.headers
+                .iter()
+                .find(|h| h.get_key().eq_ignore_ascii_case(n))
+                .map(|h| h.get_value())
+        })
+    };
+    let from = get("From").unwrap_or_default();
+    let (from_name, from_addr) = crate::mail::gmail::split_mailbox(&from);
+    // mailparse shrugs off a weekday that does not match the date, which
+    // real mail has and chrono's RFC 2822 parser rejects.
+    let header_date = get("Date")
+        .and_then(|d| mailparse::dateparse(d.trim()).ok())
+        .map(|secs| secs * 1000);
+    RemoteMessage {
+        remote_id,
+        thread_id: get("Message-ID"),
+        subject: get("Subject").unwrap_or_default(),
+        from_name,
+        from_addr,
+        to_addrs: get("To").unwrap_or_default(),
+        cc_addrs: get("Cc").unwrap_or_default(),
+        snippet: String::new(),
+        date: internal_date.or(header_date).unwrap_or(0),
+        labels,
+        is_read,
+        is_starred,
+        has_attachments: false,
+        message_id_hdr: get("Message-ID"),
+        references_hdr: get("References"),
+        list_unsubscribe: None,
+        list_unsubscribe_post: None,
+    }
+}
+
+/// Reads the newest messages of every synced folder in one session.
+fn scan_folders(s: &mut Session, map: &FolderMap) -> Result<(Vec<RemoteMessage>, Vec<FolderScan>)> {
+    use ::imap::types::Flag;
+    let mut messages = Vec::new();
+    let mut scans = Vec::new();
+    for (role, limit) in Role::SYNCED {
+        let Some(folder) = map.get(role) else { continue };
+        let mailbox = match s.examine(folder) {
+            Ok(m) => m,
+            Err(e) if role != Role::Inbox => {
+                tracing::warn!(folder, error = %e, "IMAP folder could not be opened");
+                continue;
+            }
+            Err(e) => return Err(imap_err(e)),
+        };
+        let validity = mailbox.uid_validity.unwrap_or(0);
+        let uids = s.uid_search("ALL").map_err(imap_err)?;
+        let mut newest: Vec<u32> = uids.iter().copied().collect();
+        newest.sort_unstable_by(|a, b| b.cmp(a));
+        newest.truncate(limit);
+        if !newest.is_empty() {
+            let fetches = s
+                .uid_fetch(folders::uid_set(&newest), "(UID FLAGS INTERNALDATE BODY.PEEK[HEADER])")
+                .map_err(imap_err)?;
+            for f in fetches.iter() {
+                let Some(uid) = f.uid else { continue };
+                // Flagged for removal by another client; gone on its next expunge.
+                if f.flags().contains(&Flag::Deleted) {
+                    continue;
+                }
+                messages.push(message_from_header(
+                    folders::remote_id(folder, validity, uid),
+                    role,
+                    f.flags(),
+                    f.internal_date().map(|d| d.timestamp_millis()),
+                    f.header().unwrap_or(&[]),
+                ));
+            }
+        }
+        let uid_next = mailbox
+            .uid_next
+            .unwrap_or_else(|| uids.iter().max().map_or(1, |m| m + 1));
+        scans.push(FolderScan {
+            folder: folder.to_string(),
+            validity,
+            uids,
+            uid_next,
+        });
+    }
+    Ok((messages, scans))
+}
+
+/// Opens the message's folder, refusing if the folder was recreated since
+/// the id was handed out (its UIDs now point at other messages).
+fn open_folder(s: &mut Session, r: &MsgRef, write: bool) -> Result<()> {
+    let mailbox = if write { s.select(&r.folder) } else { s.examine(&r.folder) }.map_err(imap_err)?;
+    match r.validity {
+        Some(v) if mailbox.uid_validity != Some(v) => Err(AppError::NotFound(
+            "this message changed on the server; sync and try again".into(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn parse_ref(remote_id: &str) -> Result<MsgRef> {
+    MsgRef::parse(remote_id).ok_or_else(|| AppError::NotFound(format!("IMAP message {remote_id}")))
+}
+
+fn fetch_raw(s: &mut Session, r: &MsgRef) -> Result<Vec<u8>> {
+    open_folder(s, r, false)?;
+    let fetches = s.uid_fetch(r.uid.to_string(), "(UID BODY.PEEK[])").map_err(imap_err)?;
+    fetches
+        .iter()
+        .find(|f| f.uid == Some(r.uid))
+        .and_then(|f| f.body())
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| AppError::NotFound(format!("IMAP message {} in {}", r.uid, r.folder)))
 }
 
 #[async_trait]
@@ -227,81 +395,24 @@ impl MailProvider for ImapProvider {
             full: true,
         });
         let (cfg, pass) = self.config(account)?;
-        let account = account.clone();
-        let store = store.clone();
-        let fetched = tokio::task::spawn_blocking(move || {
+        let (map, fetched, scans) = tokio::task::spawn_blocking(move || {
             with_session(&cfg, &pass, |s| {
-                s.select("INBOX").map_err(|e| AppError::Other(e.to_string()))?;
-                let count = s.search("ALL").map_err(|e| AppError::Other(e.to_string()))?;
-                let mut seqs: Vec<u32> = count.into_iter().collect();
-                seqs.sort_unstable();
-                let take = seqs.into_iter().rev().take(200).collect::<Vec<_>>();
-                if take.is_empty() {
-                    return Ok(Vec::new());
-                }
-                let set = take
-                    .iter()
-                    .map(|n| n.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let fetches = s
-                    .fetch(&set, "(UID FLAGS BODY.PEEK[HEADER])")
-                    .map_err(|e| AppError::Other(e.to_string()))?;
-                let mut out = Vec::new();
-                for f in fetches.iter() {
-                    let uid = f.uid.unwrap_or(0);
-                    let (labels, is_read, is_starred) = labels_from_flags(f.flags());
-                    let header = f.header().unwrap_or(&[]);
-                    let parsed = mailparse::parse_mail(header).ok();
-                    let get = |n: &str| {
-                        parsed.as_ref().and_then(|p| {
-                            p.headers.iter().find(|h| h.get_key().eq_ignore_ascii_case(n)).map(|h| h.get_value())
-                        })
-                    };
-                    let from = get("From").unwrap_or_default();
-                    let (from_name, from_addr) = crate::mail::gmail::split_mailbox(&from);
-                    out.push(RemoteMessage {
-                        remote_id: uid.to_string(),
-                        thread_id: get("Message-ID"),
-                        subject: get("Subject").unwrap_or_default(),
-                        from_name,
-                        from_addr,
-                        to_addrs: get("To").unwrap_or_default(),
-                        cc_addrs: get("Cc").unwrap_or_default(),
-                        snippet: String::new(),
-                        date: parsed
-                            .as_ref()
-                            .and_then(|p| p.headers.iter().find(|h| h.get_key().eq_ignore_ascii_case("Date")))
-                            .and_then(|h| chrono::DateTime::parse_from_rfc2822(&h.get_value()).ok())
-                            .map(|d| d.timestamp_millis())
-                            .unwrap_or(0),
-                        labels,
-                        is_read,
-                        is_starred,
-                        has_attachments: false,
-                        message_id_hdr: get("Message-ID"),
-                        references_hdr: None,
-                        list_unsubscribe: None,
-                        list_unsubscribe_post: None,
-                    });
-                }
-                Ok(out)
+                let map = discover_folders(s)?;
+                let (messages, scans) = scan_folders(s, &map)?;
+                Ok((map, messages, scans))
             })
         })
         .await
         .map_err(|e| AppError::Other(e.to_string()))??;
+        // Also clears rows from before ids named their folder, which would
+        // otherwise sit next to their re-synced copies.
+        let stale = folders::stale_ids(&store.known_remote_ids(account.id)?, &scans);
+        if !stale.is_empty() {
+            store.delete_messages(account.id, &stale)?;
+        }
         store.upsert_messages(account.id, &fetched)?;
-        let _ = store.replace_labels(
-            account.id,
-            &[RemoteLabel {
-                remote_id: "INBOX".into(),
-                name: "Inbox".into(),
-                kind: "system".into(),
-                bg_color: None,
-                fg_color: None,
-                visible: true,
-            }],
-        );
+        store.replace_labels(account.id, &map.labels())?;
+        self.remember_folders(account, map);
         observe(SyncEvent::Finished {
             account_id: account.id,
         });
@@ -310,23 +421,13 @@ impl MailProvider for ImapProvider {
 
     async fn fetch_body(&self, account: &Account, remote_id: &str) -> Result<RemoteBody> {
         let (cfg, pass) = self.config(account)?;
-        let uid = remote_id.to_string();
+        let r = parse_ref(remote_id)?;
         tokio::task::spawn_blocking(move || {
-            with_session(&cfg, &pass, |s| {
-                s.select("INBOX").map_err(|e| AppError::Other(e.to_string()))?;
-                let fetches = s
-                    .uid_fetch(&uid, "BODY.PEEK[]")
-                    .map_err(|e| AppError::Other(e.to_string()))?;
-                let raw = fetches
-                    .iter()
-                    .next()
-                    .and_then(|f| f.body())
-                    .ok_or_else(|| AppError::NotFound(uid.clone()))?;
-                let parsed = mailparse::parse_mail(raw).map_err(|e| AppError::Other(e.to_string()))?;
-                let mut out = RemoteBody::default();
-                walk_parts(&parsed, "", &mut out);
-                Ok(out)
-            })
+            let raw = with_session(&cfg, &pass, |s| fetch_raw(s, &r))?;
+            let parsed = mailparse::parse_mail(&raw).map_err(|e| AppError::Other(e.to_string()))?;
+            let mut out = RemoteBody::default();
+            walk_parts(&parsed, "", &mut out);
+            Ok(out)
         })
         .await
         .map_err(|e| AppError::Other(e.to_string()))?
@@ -336,27 +437,17 @@ impl MailProvider for ImapProvider {
     /// message is fetched again and that part decoded.
     async fn fetch_attachment(&self, account: &Account, remote_id: &str, att: &str) -> Result<Vec<u8>> {
         let (cfg, pass) = self.config(account)?;
-        let uid = remote_id.to_string();
+        let r = parse_ref(remote_id)?;
         let path = att.to_string();
         tokio::task::spawn_blocking(move || {
-            with_session(&cfg, &pass, |s| {
-                s.select("INBOX").map_err(|e| AppError::Other(e.to_string()))?;
-                let fetches = s
-                    .uid_fetch(&uid, "BODY.PEEK[]")
-                    .map_err(|e| AppError::Other(e.to_string()))?;
-                let raw = fetches
-                    .iter()
-                    .next()
-                    .and_then(|f| f.body())
-                    .ok_or_else(|| AppError::NotFound(uid.clone()))?;
-                let parsed = mailparse::parse_mail(raw).map_err(|e| AppError::Other(e.to_string()))?;
-                let mut part = &parsed;
-                for idx in path.split('.').filter(|s| !s.is_empty()) {
-                    let i: usize = idx.parse().map_err(|_| AppError::NotFound(format!("part {path}")))?;
-                    part = part.subparts.get(i).ok_or_else(|| AppError::NotFound(format!("part {path}")))?;
-                }
-                part.get_body_raw().map_err(|e| AppError::Other(e.to_string()))
-            })
+            let raw = with_session(&cfg, &pass, |s| fetch_raw(s, &r))?;
+            let parsed = mailparse::parse_mail(&raw).map_err(|e| AppError::Other(e.to_string()))?;
+            let mut part = &parsed;
+            for idx in path.split('.').filter(|s| !s.is_empty()) {
+                let i: usize = idx.parse().map_err(|_| AppError::NotFound(format!("part {path}")))?;
+                part = part.subparts.get(i).ok_or_else(|| AppError::NotFound(format!("part {path}")))?;
+            }
+            part.get_body_raw().map_err(|e| AppError::Other(e.to_string()))
         })
         .await
         .map_err(|e| AppError::Other(e.to_string()))?
@@ -391,21 +482,21 @@ impl MailProvider for ImapProvider {
 
     async fn set_flags(&self, account: &Account, remote_id: &str, flags: FlagChange) -> Result<()> {
         let (cfg, pass) = self.config(account)?;
-        let uid = remote_id.to_string();
+        let r = parse_ref(remote_id)?;
         tokio::task::spawn_blocking(move || {
             with_session(&cfg, &pass, |s| {
-                s.select("INBOX").map_err(|e| AppError::Other(e.to_string()))?;
-                if flags.read == Some(true) {
-                    let _ = s.uid_store(&uid, "+FLAGS (\\Seen)");
+                open_folder(s, &r, true)?;
+                let uid = r.uid.to_string();
+                let mut store = |query: &str| s.uid_store(&uid, query).map(|_| ()).map_err(imap_err);
+                match flags.read {
+                    Some(true) => store("+FLAGS.SILENT (\\Seen)")?,
+                    Some(false) => store("-FLAGS.SILENT (\\Seen)")?,
+                    None => {}
                 }
-                if flags.read == Some(false) {
-                    let _ = s.uid_store(&uid, "-FLAGS (\\Seen)");
-                }
-                if flags.starred == Some(true) {
-                    let _ = s.uid_store(&uid, "+FLAGS (\\Flagged)");
-                }
-                if flags.starred == Some(false) {
-                    let _ = s.uid_store(&uid, "-FLAGS (\\Flagged)");
+                match flags.starred {
+                    Some(true) => store("+FLAGS.SILENT (\\Flagged)")?,
+                    Some(false) => store("-FLAGS.SILENT (\\Flagged)")?,
+                    None => {}
                 }
                 Ok(())
             })
@@ -416,12 +507,12 @@ impl MailProvider for ImapProvider {
 
     async fn trash(&self, account: &Account, remote_id: &str) -> Result<()> {
         let (cfg, pass) = self.config(account)?;
-        let uid = remote_id.to_string();
+        let r = parse_ref(remote_id)?;
         tokio::task::spawn_blocking(move || {
             with_session(&cfg, &pass, |s| {
-                s.select("INBOX").map_err(|e| AppError::Other(e.to_string()))?;
-                let _ = s.uid_store(&uid, "+FLAGS (\\Deleted)");
-                let _ = s.expunge();
+                open_folder(s, &r, true)?;
+                s.uid_store(r.uid.to_string(), "+FLAGS.SILENT (\\Deleted)").map_err(imap_err)?;
+                s.expunge().map_err(imap_err)?;
                 Ok(())
             })
         })
@@ -437,10 +528,9 @@ impl MailProvider for ImapProvider {
         Ok(())
     }
 
-    async fn list_labels(&self, _account: &Account) -> Result<Vec<RemoteLabel>> {
-        Ok(vec![
-            RemoteLabel { remote_id: "INBOX".into(), name: "Inbox".into(), kind: "system".into(), bg_color: None, fg_color: None, visible: true },
-        ])
+    async fn list_labels(&self, account: &Account) -> Result<Vec<RemoteLabel>> {
+        let map = self.cached_folders(account).unwrap_or_else(|| FolderMap::from_list(&[]));
+        Ok(map.labels())
     }
 
     async fn create_label(&self, _a: &Account, _name: &str) -> Result<RemoteLabel> {
@@ -583,6 +673,39 @@ mod tests {
         assert_eq!(pick_ehlo_name(Some("10.0.0.7"), "a@trakzenhq.com").as_deref(), Some("trakzenhq.com"));
         assert_eq!(pick_ehlo_name(None, "a@trakzenhq.com").as_deref(), Some("trakzenhq.com"));
         assert_eq!(pick_ehlo_name(None, "nobody"), None);
+    }
+
+    #[test]
+    fn labels_come_from_the_folder_and_flags() {
+        use ::imap::types::Flag;
+        let (labels, read, starred) = labels_for(Role::Sent, &[Flag::Seen]);
+        assert_eq!((labels, read, starred), (vec!["SENT".to_string()], true, false));
+        let (labels, read, _) = labels_for(Role::Sent, &[]);
+        assert_eq!((labels, read), (vec!["SENT".to_string(), "UNREAD".to_string()], false));
+        let (labels, _, starred) = labels_for(Role::Archive, &[Flag::Seen, Flag::Flagged]);
+        assert_eq!((labels, starred), (vec!["STARRED".to_string()], true));
+        let (labels, _, _) = labels_for(Role::Junk, &[Flag::Seen]);
+        assert_eq!(labels, vec!["SPAM"]);
+    }
+
+    #[test]
+    fn headers_fill_in_a_message_row() {
+        use ::imap::types::Flag;
+        let header = b"From: \"Rabiya Gull\" <rabiya@example.com>\r\nTo: me@example.com\r\nSubject: Q3 numbers\r\nDate: Tue, 14 Oct 2026 09:00:00 +0000\r\nMessage-ID: <abc@example.com>\r\nReferences: <root@example.com>\r\n\r\n";
+        let id = folders::remote_id("Sent Items", 7, 31);
+        let m = message_from_header(id.clone(), Role::Inbox, &[Flag::Seen], None, header);
+        assert_eq!(m.remote_id, id);
+        assert_eq!(m.subject, "Q3 numbers");
+        assert_eq!(m.from_addr, "rabiya@example.com");
+        assert_eq!(m.from_name, "Rabiya Gull");
+        assert_eq!(m.message_id_hdr.as_deref(), Some("<abc@example.com>"));
+        assert_eq!(m.references_hdr.as_deref(), Some("<root@example.com>"));
+        assert_eq!(m.date, 1_791_968_400_000);
+        assert_eq!(m.labels, vec!["INBOX"]);
+        // The server's arrival time wins over a sender-supplied Date.
+        let m = message_from_header(id, Role::Inbox, &[], Some(5), header);
+        assert_eq!(m.date, 5);
+        assert!(!m.is_read);
     }
 
     #[test]
