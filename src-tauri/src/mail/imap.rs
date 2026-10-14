@@ -505,6 +505,17 @@ fn header_message_ids(s: &mut Session, set: &str) -> Result<HashMap<u32, String>
         .collect())
 }
 
+fn save_to_sent(s: &mut Session, cached: Option<FolderMap>, raw: &[u8]) -> Result<FolderMap> {
+    let mut map = match cached {
+        Some(m) => m,
+        None => discover_folders(s)?,
+    };
+    let sent = ensure_folder(s, &mut map, Role::Sent)?;
+    s.append_with_flags(&sent, raw, &[::imap::types::Flag::Seen])
+        .map_err(imap_err)?;
+    Ok(map)
+}
+
 struct Moved {
     old: String,
     /// `None` when the server did not say where the message went; the next
@@ -724,14 +735,18 @@ impl MailProvider for ImapProvider {
         .map_err(|e| AppError::Other(e.to_string()))?
     }
 
+    /// Submits over SMTP, then files a copy in Sent: SMTP servers do not do
+    /// that themselves. The copy keeps its Bcc header so the sender can see
+    /// who was on it.
     async fn send(&self, account: &Account, raw: Vec<u8>, _thread_id: Option<&str>) -> Result<()> {
         let (cfg, pass) = self.config(account)?;
-        tokio::task::spawn_blocking(move || {
+        let cached = self.cached_folders(account);
+        let map = tokio::task::spawn_blocking(move || -> Result<Option<FolderMap>> {
             use lettre::transport::smtp::authentication::Credentials;
             use lettre::{SmtpTransport, Transport};
             let envelope = envelope_from_raw(&raw, &cfg.username)?;
-            let raw = super::compose::without_bcc(&raw);
-            let creds = Credentials::new(cfg.username.clone(), pass);
+            let wire = super::compose::without_bcc(&raw);
+            let creds = Credentials::new(cfg.username.clone(), pass.clone());
             let mailer = if cfg.smtp_implicit_tls() {
                 SmtpTransport::relay(&cfg.smtp_host)
             } else {
@@ -743,12 +758,24 @@ impl MailProvider for ImapProvider {
             .credentials(creds)
             .build();
             mailer
-                .send_raw(&envelope, &raw)
+                .send_raw(&envelope, &wire)
                 .map_err(|e| AppError::Other(format!("SMTP: {e}")))?;
-            Ok(())
+            // The mail is out; a missing Sent copy must not turn into a
+            // failed send the user might retry.
+            match with_session(&cfg, &pass, |s| save_to_sent(s, cached, &raw)) {
+                Ok(map) => Ok(Some(map)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "sent mail could not be saved to the Sent folder");
+                    Ok(None)
+                }
+            }
         })
         .await
-        .map_err(|e| AppError::Other(e.to_string()))?
+        .map_err(|e| AppError::Other(e.to_string()))??;
+        if let Some(map) = map {
+            self.remember_folders(account, map);
+        }
+        Ok(())
     }
 
     async fn set_flags(&self, account: &Account, remote_id: &str, flags: FlagChange) -> Result<()> {
