@@ -149,6 +149,36 @@ fn envelope_from_raw(raw: &[u8], fallback_from: &str) -> Result<lettre::address:
     lettre::address::Envelope::new(Some(from), to).map_err(|e| AppError::Other(e.to_string()))
 }
 
+/// lettre greets with `EHLO [127.0.0.1]` by default, which some servers
+/// refuse. Use this machine's name when it is fully qualified, otherwise
+/// the sender's domain.
+fn ehlo_name(email: &str) -> lettre::transport::smtp::extension::ClientId {
+    use lettre::transport::smtp::extension::ClientId;
+    let host = std::env::var("COMPUTERNAME")
+        .ok()
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok());
+    match pick_ehlo_name(host.as_deref(), email) {
+        Some(name) => ClientId::Domain(name),
+        None => ClientId::default(),
+    }
+}
+
+fn pick_ehlo_name(host: Option<&str>, email: &str) -> Option<String> {
+    let fqdn = |h: &str| {
+        let labels: Vec<&str> = h.split('.').collect();
+        labels.len() >= 2
+            && labels
+                .iter()
+                .all(|l| !l.is_empty() && !l.starts_with('-') && !l.ends_with('-') && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+            && !labels.last().is_some_and(|l| l.chars().all(|c| c.is_ascii_digit()))
+            && !["local", "localdomain", "lan", "home", "internal"].iter().any(|t| labels.last().is_some_and(|l| l.eq_ignore_ascii_case(t)))
+    };
+    host.map(|h| h.trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|h| fqdn(h))
+        .or_else(|| super::compose::sender_domain(email).map(str::to_ascii_lowercase))
+}
+
 fn labels_from_flags(flags: &[::imap::types::Flag<'_>]) -> (Vec<String>, bool, bool) {
     use ::imap::types::Flag;
     let mut labels = vec!["INBOX".into()];
@@ -347,6 +377,7 @@ impl MailProvider for ImapProvider {
             }
             .map_err(|e| AppError::Other(e.to_string()))?
             .port(cfg.smtp_port)
+            .hello_name(ehlo_name(&cfg.username))
             .credentials(creds)
             .build();
             mailer
@@ -542,6 +573,16 @@ mod tests {
         assert!(!cfg(587, None).smtp_implicit_tls());
         assert!(cfg(2525, Some(SmtpSecurity::Tls)).smtp_implicit_tls());
         assert!(!cfg(465, Some(SmtpSecurity::Starttls)).smtp_implicit_tls());
+    }
+
+    #[test]
+    fn ehlo_uses_a_qualified_hostname_or_the_sender_domain() {
+        assert_eq!(pick_ehlo_name(Some("mail.office.example.com\n"), "a@trakzenhq.com").as_deref(), Some("mail.office.example.com"));
+        assert_eq!(pick_ehlo_name(Some("DESKTOP-4F2K9"), "a@trakzenhq.com").as_deref(), Some("trakzenhq.com"));
+        assert_eq!(pick_ehlo_name(Some("macbook.local"), "a@TrakzenHQ.com").as_deref(), Some("trakzenhq.com"));
+        assert_eq!(pick_ehlo_name(Some("10.0.0.7"), "a@trakzenhq.com").as_deref(), Some("trakzenhq.com"));
+        assert_eq!(pick_ehlo_name(None, "a@trakzenhq.com").as_deref(), Some("trakzenhq.com"));
+        assert_eq!(pick_ehlo_name(None, "nobody"), None);
     }
 
     #[test]
