@@ -658,6 +658,14 @@ impl MailProvider for ImapProvider {
         ProviderKind::Imap
     }
 
+    fn settled_labels(&self, account: &Account, remote_id: &str, labels: &[String]) -> Option<Vec<String>> {
+        let msg = MsgRef::parse(remote_id)?;
+        let role = self.cached_folders(account)?.role_of(&msg.folder)?;
+        let mut out: Vec<String> = role.label().map(str::to_string).into_iter().collect();
+        out.extend(labels.iter().filter(|l| *l == "STARRED" || *l == "UNREAD").cloned());
+        Some(out)
+    }
+
     async fn login(&self, _app: &tauri::AppHandle, _store: &MailStore) -> Result<Account> {
         Err(AppError::Other("use Connect IMAP with host and password".into()))
     }

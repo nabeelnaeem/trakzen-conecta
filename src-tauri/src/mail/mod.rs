@@ -29,6 +29,14 @@ pub type SyncObserver<'a> = &'a (dyn Fn(SyncEvent) + Send + Sync);
 pub trait MailProvider: Send + Sync {
     fn kind(&self) -> ProviderKind;
 
+    /// Labels a cached message really carries after a label change asked
+    /// for `labels`. Folder-backed providers can't honour every change (an
+    /// IMAP copy in Sent stays there whatever a thread action asks); `None`
+    /// means the request stands as made.
+    fn settled_labels(&self, _account: &Account, _remote_id: &str, _labels: &[String]) -> Option<Vec<String>> {
+        None
+    }
+
     /// Interactive sign-in. Returns the account once the provider has stored
     /// whatever credentials it needs for later calls.
     async fn login(&self, app: &tauri::AppHandle, store: &MailStore) -> Result<Account>;
