@@ -71,6 +71,23 @@ pub fn build_raw_lenient(
 /// Placeholder recipient used only while building a recipient-less draft.
 const DRAFT_SENTINEL: &str = "draft@invalid";
 
+/// The part of an address after the `@`, when it looks like a hostname.
+pub fn sender_domain(email: &str) -> Option<&str> {
+    let (_, domain) = email.trim().rsplit_once('@')?;
+    let ok = !domain.is_empty()
+        && !domain.starts_with(['.', '-'])
+        && !domain.ends_with(['.', '-'])
+        && domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
+    ok.then_some(domain)
+}
+
+/// lettre fills in Date but not Message-ID, and some servers bounce mail
+/// that arrives without one.
+fn new_message_id(email: &str) -> String {
+    let domain = sender_domain(email).unwrap_or("trakzen-conecta.local");
+    format!("<{}@{}>", uuid::Uuid::new_v4().simple(), domain)
+}
+
 pub fn build_raw(
     account: &Account,
     msg: &OutgoingMessage,
@@ -83,7 +100,12 @@ pub fn build_raw(
 
     // Gmail reads Bcc recipients from the raw message and drops the header
     // on delivery; the SMTP path strips it itself (see `without_bcc`).
-    let mut b = Message::builder().from(mailbox(&from)?).subject(&msg.subject).keep_bcc();
+    let mut b = Message::builder()
+        .from(mailbox(&from)?)
+        .subject(&msg.subject)
+        .message_id(Some(new_message_id(&account.email)))
+        .date_now()
+        .keep_bcc();
     for t in msg.to.iter().filter(|s| !s.trim().is_empty()) {
         b = b.to(mailbox(t)?);
     }
@@ -604,6 +626,59 @@ mod tests {
         assert!(!stripped.contains("other@example.com"), "{head}");
         assert!(head.contains("Subject: Quiet"));
         assert!(stripped.contains("Hi"));
+    }
+
+    fn header_count(raw: &[u8], name: &str) -> usize {
+        let text = String::from_utf8_lossy(raw);
+        let head = text.split("\r\n\r\n").next().unwrap_or("").to_string();
+        let prefix = format!("{}:", name.to_ascii_lowercase());
+        head.lines().filter(|l| l.to_ascii_lowercase().starts_with(&prefix)).count()
+    }
+
+    #[test]
+    fn every_message_gets_one_message_id_and_date() {
+        let mut msg = OutgoingMessage {
+            account_id: 1,
+            to: vec!["alice@example.com".into()],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Hi".into(),
+            body_text: "Hello".into(),
+            body_html: None,
+            quoted_html: None,
+            in_reply_to: None,
+            references: None,
+            thread_id: None,
+            attachments: vec![],
+            draft_id: None,
+        };
+        let raw = build_raw(&account(), &msg, vec![]).unwrap();
+        assert_eq!(header_count(&raw, "Message-ID"), 1);
+        assert_eq!(header_count(&raw, "Date"), 1);
+        let id = |r: &[u8]| {
+            String::from_utf8_lossy(r)
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("message-id:"))
+                .map(str::to_string)
+                .unwrap_or_default()
+        };
+        assert!(id(&raw).ends_with("@example.com>"), "{}", id(&raw));
+        let again = build_raw(&account(), &msg, vec![]).unwrap();
+        assert_ne!(id(&raw), id(&again));
+
+        msg.to.clear();
+        let draft = build_raw_lenient(&account(), &msg, vec![]).unwrap();
+        assert_eq!(header_count(&draft, "Message-ID"), 1);
+        assert_eq!(header_count(&draft, "Date"), 1);
+    }
+
+    #[test]
+    fn message_id_domain_falls_back_when_address_has_none() {
+        assert_eq!(sender_domain("me@trakzenhq.com"), Some("trakzenhq.com"));
+        assert_eq!(sender_domain("me"), None);
+        assert_eq!(sender_domain("me@"), None);
+        assert_eq!(sender_domain("me@bad domain"), None);
+        assert!(new_message_id("me").ends_with("@trakzen-conecta.local>"));
     }
 
     #[test]

@@ -235,6 +235,21 @@ pub async fn mail_list_thread(
     state.mail.list_thread(account_id, &thread_id)
 }
 
+/// Brings cached labels in line with what the provider actually did after
+/// the requested change was applied locally.
+fn settle_labels(state: &AppState, provider: &dyn super::MailProvider, account: &Account, ids: &[i64]) -> Result<()> {
+    let settled: Vec<(String, Vec<String>)> = state
+        .mail
+        .labels_of(ids)?
+        .into_iter()
+        .filter_map(|(remote, labels)| provider.settled_labels(account, &remote, &labels).map(|l| (remote, l)))
+        .collect();
+    if !settled.is_empty() {
+        state.mail.apply_label_snapshots(account.id, &settled)?;
+    }
+    Ok(())
+}
+
 /// Label change applied to a set of local message ids (one account) with a
 /// single batched provider call. Used by multi-select and by thread-level
 /// actions, which pass every message of the thread.
@@ -262,7 +277,8 @@ pub async fn mail_bulk_modify(
     let ids: Vec<i64> = rows.iter().map(|(id, _, _)| *id).collect();
     let add: Vec<&str> = add.iter().map(String::as_str).collect();
     let remove: Vec<&str> = remove.iter().map(String::as_str).collect();
-    state.mail.set_labels_bulk(&ids, &add, &remove)
+    state.mail.set_labels_bulk(&ids, &add, &remove)?;
+    settle_labels(&state, provider.as_ref(), &account, &ids)
 }
 
 /// Gmail's estimate of how many messages a view holds on the server.
@@ -295,6 +311,7 @@ pub async fn mail_modify_view(
     let add: Vec<&str> = add.iter().map(String::as_str).collect();
     let remove: Vec<&str> = remove.iter().map(String::as_str).collect();
     state.mail.set_labels_bulk(&ids, &add, &remove)?;
+    settle_labels(&state, provider.as_ref(), &account, &ids)?;
     Ok(n)
 }
 
@@ -337,7 +354,8 @@ pub async fn mail_threads_modify(
     }
     let add: Vec<&str> = add.iter().map(String::as_str).collect();
     let remove: Vec<&str> = remove.iter().map(String::as_str).collect();
-    state.mail.set_labels_bulk(&ids, &add, &remove)
+    state.mail.set_labels_bulk(&ids, &add, &remove)?;
+    settle_labels(&state, provider.as_ref(), &account, &ids)
 }
 
 #[tauri::command]
@@ -356,7 +374,8 @@ pub async fn mail_thread_modify(
     let ids = state.mail.thread_local_ids(account_id, &thread_id)?;
     let add: Vec<&str> = add.iter().map(String::as_str).collect();
     let remove: Vec<&str> = remove.iter().map(String::as_str).collect();
-    state.mail.set_labels_bulk(&ids, &add, &remove)
+    state.mail.set_labels_bulk(&ids, &add, &remove)?;
+    settle_labels(&state, provider.as_ref(), &account, &ids)
 }
 
 #[tauri::command]
@@ -598,6 +617,7 @@ pub async fn mail_modify_labels(
     let add: Vec<&str> = add.iter().map(String::as_str).collect();
     let remove: Vec<&str> = remove.iter().map(String::as_str).collect();
     state.mail.set_labels(message_id, &add, &remove)?;
+    settle_labels(&state, provider.as_ref(), &account, &[message_id])?;
     state.mail.get_message(message_id)
 }
 
@@ -890,7 +910,8 @@ pub async fn mail_trash(state: State<'_, AppState>, message_id: i64) -> Result<(
     let account = state.mail.get_account(detail.summary.account_id)?;
     let provider = state.providers.provider_for(&account.provider)?;
     provider.trash(&account, &detail.summary.remote_id).await?;
-    state.mail.set_labels(message_id, &["TRASH"], &["INBOX"])
+    state.mail.set_labels(message_id, &["TRASH"], &["INBOX"])?;
+    settle_labels(&state, provider.as_ref(), &account, &[message_id])
 }
 
 #[tauri::command]
@@ -899,7 +920,8 @@ pub async fn mail_archive(state: State<'_, AppState>, message_id: i64) -> Result
     let account = state.mail.get_account(detail.summary.account_id)?;
     let provider = state.providers.provider_for(&account.provider)?;
     provider.archive(&account, &detail.summary.remote_id).await?;
-    state.mail.set_labels(message_id, &[], &["INBOX"])
+    state.mail.set_labels(message_id, &[], &["INBOX"])?;
+    settle_labels(&state, provider.as_ref(), &account, &[message_id])
 }
 
 #[tauri::command]
