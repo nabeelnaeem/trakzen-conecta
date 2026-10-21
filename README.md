@@ -227,6 +227,8 @@ points git at `.githooks/`, whose `pre-push` hook runs it on every push
 (check out the branch you are pushing and commit your changes first).
 `pnpm run ci:full` also builds this platform's installers;
 `node scripts/ci.mjs --lint` adds `cargo fmt --check` and clippy.
+To skip the hook, push with `--no-verify`, or run
+`git config trakzen.skipci true` to turn it off in this clone.
 
 Releases are built by the *Release* GitHub Actions workflow, started by
 hand from `main` with the version number (Actions → Release → Run

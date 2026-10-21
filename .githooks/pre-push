@@ -1,5 +1,10 @@
 #!/bin/sh
 # GitHub Actions only runs on demand, so this is the gate: the same checks CI ran, on this machine, before every push.
+if [ -n "$SKIP_CI" ] || [ "$(git config --bool trakzen.skipci 2>/dev/null)" = "true" ]; then
+  echo "pre-push: checks skipped (SKIP_CI or git config trakzen.skipci). Run them by hand with: node scripts/ci.mjs" >&2
+  cat >/dev/null
+  exit 0
+fi
 zero=0000000000000000000000000000000000000000
 head=$(git rev-parse HEAD)
 pushing=0
