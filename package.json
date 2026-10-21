@@ -15,7 +15,10 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "ci": "node scripts/ci.mjs",
+    "ci:full": "node scripts/ci.mjs --full",
+    "prepare": "node -e \"try{require('child_process').execSync('git config core.hooksPath .githooks',{stdio:'ignore'})}catch{}\""
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
