@@ -217,6 +217,19 @@ dependencies; if `pnpm install` fails with
 `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`, create a local
 `pnpm-workspace.yaml` containing `minimumReleaseAge: 0` (it is git-ignored).
 
+### Checks before pushing
+
+There is no CI on pushes or pull requests; `pnpm run ci` is the gate. It
+checks that the three version numbers agree and that the CSP in
+`tauri.conf.json` carries the hash of the mail frame script, then
+typechecks, builds the frontend and runs the Rust tests. `pnpm install`
+points git at `.githooks/`, whose `pre-push` hook runs it on every push
+(check out the branch you are pushing and commit your changes first).
+`pnpm run ci:full` also builds this platform's installers;
+`node scripts/ci.mjs --lint` adds `cargo fmt --check` and clippy.
+To skip the hook, push with `--no-verify`, or run
+`git config trakzen.skipci true` to turn it off in this clone.
+
 Releases are built by the *Release* GitHub Actions workflow, started by
 hand from `main` with the version number (Actions → Release → Run
 workflow); it tags the commit and publishes the installers. macOS is
