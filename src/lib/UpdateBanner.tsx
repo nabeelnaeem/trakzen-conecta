@@ -27,7 +27,7 @@ export function UpdateBanner() {
             <div>Version {u.version} is available.</div>
           ) : (
             <div>
-              Version {u.version} is ready — restart to update.
+              Version {u.version} is ready. Restart to update.
             </div>
           )}
           {u.error && <div className="mt-1 text-xs text-red-700">{u.error}</div>}
