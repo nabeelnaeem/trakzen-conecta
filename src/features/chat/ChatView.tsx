@@ -111,7 +111,7 @@ export function ChatView() {
           {s.peers.length === 0 && (
             <li className="px-4 py-8 text-center text-xs text-gray-500">
               {s.nearby.length > 0
-                ? "Machines running Trakzen Conecta on this network appear under Nearby — click Add."
+                ? "Machines running Trakzen Conecta on this network appear under Nearby. Click Add."
                 : "No peers yet. Other machines on this network running the app will appear here automatically; you can also add one by IP."}
             </li>
           )}
@@ -1026,7 +1026,7 @@ function Conversation({ peer, peerId, name, seed, host, online, typing }: { peer
                   ? "Paste or type code…"
                   : isGroup || online
                     ? "Message… (Enter to send, Shift+Enter for a new line)"
-                    : "Peer is offline — messages are queued and sent when it returns"
+                    : "Peer is offline. Messages are queued and sent when it returns"
               }
               value={text}
               onChange={(e) => onChange(e.target.value)}

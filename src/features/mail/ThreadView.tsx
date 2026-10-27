@@ -317,7 +317,7 @@ function ThreadMessage({
           </div>
           {expanded ? (
             <div className="text-xs text-gray-500">
-              to {m.toAddrs || "—"}
+              to {m.toAddrs || "-"}
               {m.ccAddrs && <span>, cc {m.ccAddrs}</span>}
             </div>
           ) : (

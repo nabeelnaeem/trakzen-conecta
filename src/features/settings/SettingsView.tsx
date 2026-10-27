@@ -399,7 +399,7 @@ function AppearanceTab() {
 
       <details className="rounded-md border border-gray-200 p-3">
         <summary className="cursor-pointer text-sm font-medium">
-          Custom theme {p.custom ? `— ${p.custom.name}` : ""}
+          Custom theme {p.custom ? `(${p.custom.name})` : ""}
         </summary>
         <p className="mt-2 text-xs text-gray-500">Changes apply live. Start from the current palette, tweak tokens, then export the JSON to share it.</p>
         <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-2">
@@ -419,7 +419,7 @@ function AppearanceTab() {
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <input className="input w-48 text-xs" placeholder="Theme name" value={p.custom?.name ?? ""} onChange={(e) => p.custom && setTheme({ custom: { ...p.custom, name: e.target.value } })} disabled={!p.custom} />
-          <button className="btn text-xs" onClick={() => { setJson(exportThemeJson(p)); setMsg("Exported below — copy it anywhere."); }}>Export JSON</button>
+          <button className="btn text-xs" onClick={() => { setJson(exportThemeJson(p)); setMsg("Exported below. Copy it anywhere."); }}>Export JSON</button>
           <button
             className="btn text-xs"
             onClick={() => {
@@ -510,11 +510,11 @@ function TemplatesEditor({ value, onCommit }: { value: string; onCommit: (v: str
           try {
             parsed = JSON.parse(text || "[]");
           } catch (e) {
-            setInvalid(`Not saved — this isn't valid JSON: ${errorMessage(e)}`);
+            setInvalid(`Not saved. This isn't valid JSON: ${errorMessage(e)}`);
             return;
           }
           if (!Array.isArray(parsed)) {
-            setInvalid("Not saved — templates must be a JSON array, e.g. [{ \"name\": \"…\", \"subject\": \"…\", \"body\": \"…\" }].");
+            setInvalid("Not saved. Templates must be a JSON array, e.g. [{ \"name\": \"…\", \"subject\": \"…\", \"body\": \"…\" }].");
             return;
           }
           if ((text.trim() || "[]") !== (value || "[]")) onCommit(text.trim() || "[]");
@@ -578,7 +578,7 @@ function AccountsTab({ s, save }: { s: Settings; save: Save }) {
         <div className="space-y-3">
           <TextField label="Client ID" value={s.googleClientId} mono placeholder="xxxxxxxx.apps.googleusercontent.com" onCommit={(v) => save({ googleClientId: v })} />
           <TextField
-            label={`Client secret ${s.googleClientSecretSet ? "(set — enter a new one to replace, blank to clear)" : ""}`}
+            label={`Client secret ${s.googleClientSecretSet ? "(set; enter a new one to replace, blank to clear)" : ""}`}
             value=""
             mono
             password
@@ -822,7 +822,7 @@ function FiltersTab() {
             </div>
             {dupes.length > 0 && (
               <div className="mb-2 flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-900">
-                {dupes.length / 2 | 0 || 1} duplicate rule{dupes.length > 2 ? "s" : ""} found — identical filters do nothing extra.
+                {dupes.length / 2 | 0 || 1} duplicate rule{dupes.length > 2 ? "s" : ""} found. Identical filters do nothing extra.
                 <button
                   className="ml-auto underline"
                   onClick={async () => {
@@ -948,14 +948,14 @@ function ChatTab({ s, save }: { s: Settings; save: Save }) {
           <div className="space-y-2">
             <div className="flex items-center gap-3">
               <div className="flex-1">
-                <div>Received files — {stats.receivedFiles} file{stats.receivedFiles === 1 ? "" : "s"}, {bytes(stats.receivedBytes)}</div>
+                <div>Received files: {stats.receivedFiles} file{stats.receivedFiles === 1 ? "" : "s"}, {bytes(stats.receivedBytes)}</div>
                 <div className="truncate font-mono text-[11px] text-gray-500">{stats.receivedDir}</div>
               </div>
               <button className="btn text-xs" disabled={stats.receivedFiles === 0} onClick={() => void clear("received", "received files")}>Clear</button>
             </div>
             <div className="flex items-center gap-3">
               <div className="flex-1">
-                <div>Pasted &amp; dropped media — {stats.outgoingFiles} file{stats.outgoingFiles === 1 ? "" : "s"}, {bytes(stats.outgoingBytes)}</div>
+                <div>Pasted &amp; dropped media: {stats.outgoingFiles} file{stats.outgoingFiles === 1 ? "" : "s"}, {bytes(stats.outgoingBytes)}</div>
                 <div className="truncate font-mono text-[11px] text-gray-500">{stats.outgoingDir}</div>
               </div>
               <button className="btn text-xs" disabled={stats.outgoingFiles === 0} onClick={() => void clear("outgoing", "pasted media")}>Clear</button>
